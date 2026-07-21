@@ -757,6 +757,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -802,6 +808,10 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_encrypt_payload_with_key(`sessionKeyHex`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_evaluate_connection_hierarchy(`wifiDirectActive`: Byte,`lanActive`: Byte,`publicEndpoint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_generate_pairing_config(`hostPkHex`: RustBuffer.ByValue,`wireguardPkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_generate_path_challenge_tokens(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_generate_pq_keypair(uniffi_out_err: UniffiRustCallStatus, 
@@ -812,6 +822,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_core_crypto_fn_func_is_duplicate_clipboard(`contentHash`: RustBuffer.ByValue,`recentHashes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    fun uniffi_core_crypto_fn_func_perform_stun_hole_punch(`stunHost`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_toggle_flight_data_recorder(`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_core_crypto_fn_func_trigger_panic_hardware_wipe(uniffi_out_err: UniffiRustCallStatus, 
@@ -960,6 +972,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_encrypt_payload_with_key(
     ): Short
+    fun uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_generate_pairing_config(
+    ): Short
     fun uniffi_core_crypto_checksum_func_generate_path_challenge_tokens(
     ): Short
     fun uniffi_core_crypto_checksum_func_generate_pq_keypair(
@@ -969,6 +985,8 @@ internal interface UniffiLib : Library {
     fun uniffi_core_crypto_checksum_func_initialize_pq_handshake(
     ): Short
     fun uniffi_core_crypto_checksum_func_is_duplicate_clipboard(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_perform_stun_hole_punch(
     ): Short
     fun uniffi_core_crypto_checksum_func_toggle_flight_data_recorder(
     ): Short
@@ -1038,6 +1056,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_encrypt_payload_with_key() != 32257.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy() != 22994.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_pairing_config() != 40067.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_core_crypto_checksum_func_generate_path_challenge_tokens() != 47384.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1051,6 +1075,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_is_duplicate_clipboard() != 42674.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_perform_stun_hole_punch() != 33648.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_toggle_flight_data_recorder() != 35988.toShort()) {
@@ -1260,6 +1287,46 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 
 
+data class ConnectionInfo (
+    var `activeTier`: kotlin.UInt, 
+    var `activePathDescription`: kotlin.String, 
+    var `latencyMs`: kotlin.Double, 
+    var `publicEndpoint`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeConnectionInfo: FfiConverterRustBuffer<ConnectionInfo> {
+    override fun read(buf: ByteBuffer): ConnectionInfo {
+        return ConnectionInfo(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ConnectionInfo) = (
+            FfiConverterUInt.allocationSize(value.`activeTier`) +
+            FfiConverterString.allocationSize(value.`activePathDescription`) +
+            FfiConverterDouble.allocationSize(value.`latencyMs`) +
+            FfiConverterString.allocationSize(value.`publicEndpoint`)
+    )
+
+    override fun write(value: ConnectionInfo, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`activeTier`, buf)
+            FfiConverterString.write(value.`activePathDescription`, buf)
+            FfiConverterDouble.write(value.`latencyMs`, buf)
+            FfiConverterString.write(value.`publicEndpoint`, buf)
+    }
+}
+
+
+
 data class EncryptedPayload (
     var `nonceHex`: kotlin.String, 
     var `ciphertextHex`: kotlin.String
@@ -1287,6 +1354,54 @@ public object FfiConverterTypeEncryptedPayload: FfiConverterRustBuffer<Encrypted
     override fun write(value: EncryptedPayload, buf: ByteBuffer) {
             FfiConverterString.write(value.`nonceHex`, buf)
             FfiConverterString.write(value.`ciphertextHex`, buf)
+    }
+}
+
+
+
+data class PairingConfig (
+    var `hostIdentityPkHex`: kotlin.String, 
+    var `localIp`: kotlin.String, 
+    var `wifiDirectMac`: kotlin.String, 
+    var `wireguardPkHex`: kotlin.String, 
+    var `stunEndpoint`: kotlin.String, 
+    var `pairingNonceHex`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePairingConfig: FfiConverterRustBuffer<PairingConfig> {
+    override fun read(buf: ByteBuffer): PairingConfig {
+        return PairingConfig(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PairingConfig) = (
+            FfiConverterString.allocationSize(value.`hostIdentityPkHex`) +
+            FfiConverterString.allocationSize(value.`localIp`) +
+            FfiConverterString.allocationSize(value.`wifiDirectMac`) +
+            FfiConverterString.allocationSize(value.`wireguardPkHex`) +
+            FfiConverterString.allocationSize(value.`stunEndpoint`) +
+            FfiConverterString.allocationSize(value.`pairingNonceHex`)
+    )
+
+    override fun write(value: PairingConfig, buf: ByteBuffer) {
+            FfiConverterString.write(value.`hostIdentityPkHex`, buf)
+            FfiConverterString.write(value.`localIp`, buf)
+            FfiConverterString.write(value.`wifiDirectMac`, buf)
+            FfiConverterString.write(value.`wireguardPkHex`, buf)
+            FfiConverterString.write(value.`stunEndpoint`, buf)
+            FfiConverterString.write(value.`pairingNonceHex`, buf)
     }
 }
 
@@ -1818,6 +1933,25 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
+ fun `evaluateConnectionHierarchy`(`wifiDirectActive`: kotlin.Boolean, `lanActive`: kotlin.Boolean, `publicEndpoint`: kotlin.String): ConnectionInfo {
+            return FfiConverterTypeConnectionInfo.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_evaluate_connection_hierarchy(
+        FfiConverterBoolean.lower(`wifiDirectActive`),FfiConverterBoolean.lower(`lanActive`),FfiConverterString.lower(`publicEndpoint`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `generatePairingConfig`(`hostPkHex`: kotlin.String, `wireguardPkHex`: kotlin.String): PairingConfig {
+            return FfiConverterTypePairingConfig.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_pairing_config(
+        FfiConverterString.lower(`hostPkHex`),FfiConverterString.lower(`wireguardPkHex`),_status)
+}
+    )
+    }
+    
  fun `generatePathChallengeTokens`(): PathChallengeResult {
             return FfiConverterTypePathChallengeResult.lift(
     uniffiRustCall() { _status ->
@@ -1867,6 +2001,16 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_is_duplicate_clipboard(
         FfiConverterString.lower(`contentHash`),FfiConverterSequenceString.lower(`recentHashes`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `performStunHolePunch`(`stunHost`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_perform_stun_hole_punch(
+        FfiConverterString.lower(`stunHost`),_status)
 }
     )
     }

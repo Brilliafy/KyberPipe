@@ -44,6 +44,9 @@ pub fn run() {
             trigger_panic_self_destruct,
             get_connection_status,
             get_app_logs,
+            perform_stun_hole_punch,
+            evaluate_connection_status,
+            get_pairing_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

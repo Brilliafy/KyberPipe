@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.kyberpipe.client.service.PipeService
+import kotlinx.coroutines.*
 import uniffi.core_crypto.*
 
 class MainActivity : ComponentActivity() {
@@ -84,7 +85,40 @@ fun MainScreen(
     var clipboardStatus by remember { mutableStateOf("") }
     var ambientLux by remember { mutableStateOf(250.0f) }
 
+    // Connectivity Tiers State
+    var wifiDirectActive by remember { mutableStateOf(true) }
+    var lanActive by remember { mutableStateOf(false) }
+    var stunHostInput by remember { mutableStateOf("stun.l.google.com:19302") }
+    var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
+    var connectionStatusText by remember { mutableStateOf("Disconnected") }
+    var activeTier by remember { mutableStateOf(0) }
+    var activePathDescription by remember { mutableStateOf("") }
+    var latencyMs by remember { mutableStateOf(0.0) }
+
+    // Pairing states
+    var pairingConfigInput by remember { mutableStateOf("") }
+    var sasCodeDisplay by remember { mutableStateOf("849-201") }
+    var pairingStatusText by remember { mutableStateOf("") }
+
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    // Helper to evaluate connection status using UniFFI
+    fun refreshConnectionStatus() {
+        try {
+            val info = evaluateConnectionHierarchy(wifiDirectActive, lanActive, resolvedPublicIp)
+            activeTier = info.activeTier.toInt()
+            activePathDescription = info.activePathDescription
+            latencyMs = info.latencyMs
+            connectionStatusText = "Active: $activePathDescription ($latencyMs ms)"
+        } catch (e: Exception) {
+            connectionStatusText = "Error: ${e.message}"
+        }
+    }
+
+    LaunchedEffect(wifiDirectActive, lanActive, resolvedPublicIp) {
+        refreshConnectionStatus()
+    }
 
     DisposableEffect(Unit) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -108,6 +142,7 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         try {
             keyPair = generatePqKeypair()
+            refreshConnectionStatus()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -152,6 +187,201 @@ fun MainScreen(
                 }
             }
 
+            // Connection Manager Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "🌐 3-Tier Connectivity Hierarchy",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = connectionStatusText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = when (activeTier) {
+                            1 -> Color(0xFF22D3EE)
+                            2 -> Color(0xFF818CF8)
+                            3 -> Color(0xFFC084FC)
+                            else -> Color(0xFF94A3B8)
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Tier 1: Wi-Fi Direct P2P Radio", fontSize = 13.sp, color = Color.White)
+                        Switch(
+                            checked = wifiDirectActive,
+                            onCheckedChange = { wifiDirectActive = it }
+                        )
+                    }
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Tier 2: Local Network (mDNS)", fontSize = 13.sp, color = Color.White)
+                        Switch(
+                            checked = lanActive,
+                            onCheckedChange = { lanActive = it }
+                        )
+                    }
+                    
+                    Text(
+                        text = "Tier 3: WireGuard WAN Overlay activates automatically when both local links are disabled.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8),
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+
+            // STUN Hole Punching Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "🛡️ STUN Public Endpoint Resolver",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = stunHostInput,
+                        onValueChange = { stunHostInput = it },
+                        label = { Text("STUN Host Endpoint") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF06B6D4),
+                            unfocusedBorderColor = Color(0xFF6366F1),
+                            focusedLabelColor = Color(0xFF06B6D4),
+                            unfocusedLabelColor = Color(0xFF94A3B8),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            coroutineScope.launch {
+                                try {
+                                    resolvedPublicIp = "Querying..."
+                                    val ip = withContext(Dispatchers.IO) {
+                                        performStunHolePunch(stunHostInput)
+                                    }
+                                    resolvedPublicIp = ip
+                                    Toast.makeText(context, "Hole punch success: $ip", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    resolvedPublicIp = "Failed: ${e.message}"
+                                    Toast.makeText(context, "STUN Query Failed", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Query STUN & Punch UDP Hole", fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Reflexive WAN IP: $resolvedPublicIp",
+                        fontSize = 12.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = Color(0xFF4ADE80)
+                    )
+                }
+            }
+
+            // OOB Safe-Pairing Card (Handshake Simulator)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "🔐 Safe-Pairing Handshake (OOB)",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = pairingConfigInput,
+                        onValueChange = { pairingConfigInput = it },
+                        label = { Text("Paste Desktop Pairing JSON") },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 4,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF06B6D4),
+                            unfocusedBorderColor = Color(0xFF6366F1),
+                            focusedLabelColor = Color(0xFF06B6D4),
+                            unfocusedLabelColor = Color(0xFF94A3B8),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            if (pairingConfigInput.isEmpty()) {
+                                pairingStatusText = "Please enter pairing JSON config"
+                                return@Button
+                            }
+                            try {
+                                val json = org.json.JSONObject(pairingConfigInput)
+                                val hostPkHex = json.getString("host_identity_pk_hex")
+                                val wireguardPkHex = json.getString("wireguard_pk_hex")
+                                
+                                val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
+                                val myPkHex = keyPair?.mlkemPkHex ?: ""
+                                val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
+                                sasCodeDisplay = computedSas
+                                pairingStatusText = "PQC Handshake Complete! Shared secret computed."
+                            } catch (e: Exception) {
+                                pairingStatusText = "Error: ${e.message}"
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF818CF8)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Decode Config & Compute Handshake", fontWeight = FontWeight.Bold)
+                    }
+                    if (pairingStatusText.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(pairingStatusText, fontSize = 12.sp, color = Color(0xFFE2E8F0))
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Pairing SAS Verification Code:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Text(
+                        text = sasCodeDisplay,
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = Color(0xFF4ADE80)
+                    )
+                }
+            }
+
             // Dynamic Ambient Light Sensor Gauge Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
@@ -177,35 +407,6 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth().height(8.dp),
                         color = Color(0xFFF59E0B),
                         trackColor = Color(0xFF334155)
-                    )
-                }
-            }
-
-            // SAS Out-of-Band Verification Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "🔐 Safe-Pairing SAS Code (OOB)",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF38BDF8)
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Confirm this 6-digit code matches your Linux Desktop screen:",
-                        fontSize = 12.sp,
-                        color = Color(0xFF94A3B8)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "849-201",
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF4ADE80)
                     )
                 }
             }

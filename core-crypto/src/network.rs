@@ -220,6 +220,94 @@ pub async fn send_p2p_beacon(peer_identity_hex: &str, target_addr: Option<Socket
     Ok(())
 }
 
+/// Query a public STUN server for the external/reflexive SocketAddr (RFC 5389 compliant)
+pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError> {
+    let addrs = tokio::net::lookup_host(stun_host)
+        .await
+        .map_err(|e| KyberError::NetworkError(format!("STUN host lookup failed for {stun_host}: {e}")))?;
+    
+    let stun_addr = addrs.into_iter().next()
+        .ok_or_else(|| KyberError::NetworkError(format!("No IP address found for STUN host {stun_host}")))?;
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| KyberError::NetworkError(format!("Failed to bind UDP socket for STUN: {e}")))?;
+
+    // STUN Binding Request (RFC 5389) header - 20 bytes
+    let mut request = [0u8; 20];
+    request[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Message Type: Binding Request
+    request[2..4].copy_from_slice(&0x0000u16.to_be_bytes()); // Message Length: 0
+    request[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // Magic Cookie
+
+    // Generate random 12-byte Transaction ID
+    let tx_id = rand::RngCore::next_u64(&mut rand::thread_rng());
+    request[8..16].copy_from_slice(&tx_id.to_be_bytes());
+    let tx_id_extra = rand::RngCore::next_u32(&mut rand::thread_rng());
+    request[16..20].copy_from_slice(&tx_id_extra.to_be_bytes());
+
+    socket.send_to(&request, stun_addr)
+        .await
+        .map_err(|e| KyberError::NetworkError(format!("Failed to send STUN request: {e}")))?;
+
+    let mut buf = [0u8; 512];
+    let (len, _) = tokio::time::timeout(std::time::Duration::from_secs(3), socket.recv_from(&mut buf))
+        .await
+        .map_err(|_| KyberError::NetworkError("STUN response timeout".to_string()))?
+        .map_err(|e| KyberError::NetworkError(format!("Failed to receive STUN response: {e}")))?;
+
+    if len < 20 {
+        return Err(KyberError::NetworkError("STUN response too short".to_string()));
+    }
+
+    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+    if msg_type != 0x0101 { // Binding Success Response
+        return Err(KyberError::NetworkError(format!("STUN response was not success: {msg_type:04x}")));
+    }
+
+    let mut pos = 20;
+    while pos < len {
+        if pos + 4 > len { break; }
+        let attr_type = u16::from_be_bytes([buf[pos], buf[pos+1]]);
+        let attr_len = u16::from_be_bytes([buf[pos+2], buf[pos+3]]) as usize;
+        pos += 4;
+
+        if pos + attr_len > len { break; }
+        let attr_value = &buf[pos..pos + attr_len];
+        pos += attr_len;
+
+        if attr_type == 0x0001 { // MAPPED-ADDRESS
+            if attr_len >= 8 {
+                let family = attr_value[1];
+                let port = u16::from_be_bytes([attr_value[2], attr_value[3]]);
+                if family == 1 { // IPv4
+                    let ip = std::net::Ipv4Addr::new(attr_value[4], attr_value[5], attr_value[6], attr_value[7]);
+                    return Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                }
+            }
+        } else if attr_type == 0x0020 { // XOR-MAPPED-ADDRESS
+            if attr_len >= 8 {
+                let family = attr_value[1];
+                let xport = u16::from_be_bytes([attr_value[2], attr_value[3]]);
+                let port = xport ^ 0x2112; // XOR port
+                if family == 1 { // IPv4
+                    let xip = [attr_value[4], attr_value[5], attr_value[6], attr_value[7]];
+                    let cookie_bytes = 0x2112A442u32.to_be_bytes();
+                    let ip = std::net::Ipv4Addr::new(
+                        xip[0] ^ cookie_bytes[0],
+                        xip[1] ^ cookie_bytes[1],
+                        xip[2] ^ cookie_bytes[2],
+                        xip[3] ^ cookie_bytes[3],
+                    );
+                    return Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                }
+            }
+        }
+    }
+
+    Err(KyberError::NetworkError("No valid mapped address found in STUN response".to_string()))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +328,13 @@ mod tests {
         let (challenge, response) = PathMigrationManager::create_path_challenge();
         assert!(PathMigrationManager::verify_path_response(&challenge, &response));
         assert!(!PathMigrationManager::verify_path_response(&challenge, "invalid-token"));
+    }
+
+    #[tokio::test]
+    async fn test_stun_query() {
+        let res = query_stun_server("stun.l.google.com:19302").await;
+        if let Ok(addr) = res {
+            assert!(addr.port() > 0);
+        }
     }
 }
