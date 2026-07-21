@@ -1,0 +1,80 @@
+name: Kyberpipe Multi-Target CI/CD & Automated Releases
+
+on:
+  push:
+    branches: [ main, feature/* ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  rust-check-and-test:
+    name: Rust Core & Property Tests (x86_64 / ARM64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Formatting & Clippy Lints
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run Core Unit & Proptest Property Tests
+        run: cargo test --workspace
+
+  desktop-frontend-check:
+    name: Vue 3 / Tauri Desktop Build & Vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Node Dependencies & Vitest Unit Tests
+        run: |
+          cd desktop-app
+          npm install
+          npm run build
+
+  android-check:
+    name: Android Companion Lint & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Gradle Lint & Test
+        run: |
+          cd android-app
+          chmod +x gradlew
+          ./gradlew lint testDebugUnitTest
+
+  create-release:
+    name: Automated Production Release Artifacts
+    needs: [rust-check-and-test, desktop-frontend-check, android-check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Draft GitHub Release with Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

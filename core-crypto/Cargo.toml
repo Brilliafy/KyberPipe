@@ -11,6 +11,9 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "uniffi-bindgen"
 path = "src/uniffi_bindgen.rs"
 
+[dev-dependencies]
+proptest = "1.5"
+
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
 
