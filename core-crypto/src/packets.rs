@@ -16,6 +16,14 @@ pub struct ClipboardPacket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BinaryClipboardPacket {
+    pub mime_type: String,
+    pub data_base64: String,
+    pub hash: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SmsPacket {
     pub sender: String,
     pub body: String,
@@ -23,11 +31,34 @@ pub struct SmsPacket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutboundSmsPacket {
+    pub recipient: String,
+    pub body: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotificationPacket {
+    pub sbn_key: String,
     pub title: String,
     pub text: String,
     pub app_package: String,
     pub icon_base64: Option<String>,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationActionPacket {
+    pub sbn_key: String,
+    pub action_index: u32,
+    pub action_title: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HardwareCommandPacket {
+    pub command_type: String, // "battery_status", "ping_device", "toggle_silent"
+    pub payload_json: String,
     pub timestamp: u64,
 }
 
@@ -45,10 +76,16 @@ pub struct FileChunkPacket {
 #[serde(tag = "type", content = "payload")]
 pub enum KyberMessage {
     Sensor(SensorPacket),
-    Clipboard(ClipboardPacket),
+    ClipboardText(ClipboardPacket),
+    ClipboardBinary(BinaryClipboardPacket),
     Sms(SmsPacket),
+    OutboundSms(OutboundSmsPacket),
     Notification(NotificationPacket),
+    NotificationAction(NotificationActionPacket),
+    HardwareCommand(HardwareCommandPacket),
     FileChunk(FileChunkPacket),
+    PathChallenge { challenge_token: String },
+    PathResponse { response_token: String },
     Ping { timestamp: u64 },
     Pong { timestamp: u64 },
 }

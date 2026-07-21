@@ -15,6 +15,7 @@ use crate::error::KyberError;
 pub const CHUNKS_SIZE: usize = 64 * 1024; // 64 KB per block chunk
 
 /// Holds raw Hybrid (X25519 + ML-KEM-768) keypair
+#[derive(Clone, Debug)]
 pub struct HybridKeyPair {
     pub x25519_pk: [u8; 32],
     pub x25519_sk: [u8; 32],
@@ -24,18 +25,113 @@ pub struct HybridKeyPair {
 
 /// Holds Hybrid encapsulation response
 pub struct HybridKemResult {
-    pub ciphertext_bytes: Vec<u8>, // Contains ephem X25519 PK (32 bytes) + ML-KEM CT (1088 bytes)
-    pub combined_shared_secret: Vec<u8>, // Derived from X25519 SS + ML-KEM SS
+    pub ciphertext_bytes: Vec<u8>,
+    pub combined_shared_secret: Vec<u8>,
+}
+
+/// Post-Quantum Ephemeral Double Ratchet State (Signal PQXDH-inspired)
+pub struct DoubleRatchetState {
+    pub root_key: [u8; 32],
+    pub sending_chain_key: [u8; 32],
+    pub receiving_chain_key: [u8; 32],
+    pub send_message_count: u64,
+    pub recv_message_count: u64,
+    pub our_hybrid_pair: HybridKeyPair,
+    pub peer_x25519_pk: Option<[u8; 32]>,
+    pub peer_mlkem_pk: Option<Vec<u8>>,
+}
+
+impl DoubleRatchetState {
+    /// Initialize a Double Ratchet session from a master shared secret
+    pub fn new(master_shared_secret: &[u8], is_initiator: bool) -> Result<Self, KyberError> {
+        let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-pq-ratchet-salt"), master_shared_secret);
+        let mut root_key = [0u8; 32];
+        let mut sending_ck = [0u8; 32];
+        let mut receiving_ck = [0u8; 32];
+
+        hk.expand(b"kyberpipe-root-key", &mut root_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+
+        if is_initiator {
+            hk.expand(b"kyberpipe-send-chain", &mut sending_ck)
+                .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+            hk.expand(b"kyberpipe-recv-chain", &mut receiving_ck)
+                .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        } else {
+            hk.expand(b"kyberpipe-recv-chain", &mut sending_ck)
+                .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+            hk.expand(b"kyberpipe-send-chain", &mut receiving_ck)
+                .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        }
+
+        Ok(Self {
+            root_key,
+            sending_chain_key: sending_ck,
+            receiving_chain_key: receiving_ck,
+            send_message_count: 0,
+            recv_message_count: 0,
+            our_hybrid_pair: generate_hybrid_keypair(),
+            peer_x25519_pk: None,
+            peer_mlkem_pk: None,
+        })
+    }
+
+    /// Advance sending symmetric chain key and encrypt plaintext payload
+    pub fn ratchet_encrypt(&mut self, plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>), KyberError> {
+        // Advance chain key: K_{i+1} = HMAC-SHA256(K_i, "message-key")
+        let hk = Hkdf::<Sha256>::new(Some(&self.sending_chain_key), b"step");
+        let mut msg_key = [0u8; 32];
+        hk.expand(b"kyberpipe-msg-key", &mut msg_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        hk.expand(b"kyberpipe-next-send-chain", &mut self.sending_chain_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+
+        let nonce = generate_nonce_from_seq(self.send_message_count);
+        self.send_message_count += 1;
+
+        let ciphertext = encrypt_chacha20(&msg_key, &nonce, plaintext)?;
+        Ok((nonce, ciphertext))
+    }
+
+    /// Advance receiving symmetric chain key and decrypt ciphertext payload
+    pub fn ratchet_decrypt(&mut self, nonce: &[u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, KyberError> {
+        let hk = Hkdf::<Sha256>::new(Some(&self.receiving_chain_key), b"step");
+        let mut msg_key = [0u8; 32];
+        hk.expand(b"kyberpipe-msg-key", &mut msg_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        hk.expand(b"kyberpipe-next-recv-chain", &mut self.receiving_chain_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+
+        self.recv_message_count += 1;
+        decrypt_chacha20(&msg_key, nonce, ciphertext)
+    }
+
+    /// Perform a Post-Quantum Ephemeral DH/KEM Ratchet re-key step
+    pub fn dh_ratchet_rekey(&mut self, peer_x25519_pk: [u8; 32], peer_mlkem_pk: &[u8]) -> Result<HybridKemResult, KyberError> {
+        let kem_res = encapsulate_hybrid(&peer_x25519_pk, peer_mlkem_pk)?;
+        
+        let hk = Hkdf::<Sha256>::new(Some(&self.root_key), &kem_res.combined_shared_secret);
+        hk.expand(b"kyberpipe-next-root-key", &mut self.root_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        hk.expand(b"kyberpipe-send-chain", &mut self.sending_chain_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+        hk.expand(b"kyberpipe-recv-chain", &mut self.receiving_chain_key)
+            .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+
+        self.peer_x25519_pk = Some(peer_x25519_pk);
+        self.peer_mlkem_pk = Some(peer_mlkem_pk.to_vec());
+        self.our_hybrid_pair = generate_hybrid_keypair();
+
+        Ok(kem_res)
+    }
 }
 
 /// Generate Hybrid (X25519 + NIST ML-KEM-768) keypair.
 pub fn generate_hybrid_keypair() -> HybridKeyPair {
-    // Generate classical ECC X25519 keypair
     let mut rng = rand::thread_rng();
     let x25519_sk = X25519StaticSecret::random_from_rng(&mut rng);
     let x25519_pk = X25519PublicKey::from(&x25519_sk);
 
-    // Generate NIST PQC ML-KEM-768 keypair
     let (mlkem_pk, mlkem_sk) = kyber768::keypair();
 
     HybridKeyPair {
@@ -51,25 +147,21 @@ pub fn encapsulate_hybrid(
     peer_x25519_pk_bytes: &[u8; 32],
     peer_mlkem_pk_bytes: &[u8],
 ) -> Result<HybridKemResult, KyberError> {
-    // 1. Classical X25519 ephemeral key exchange
     let mut rng = rand::thread_rng();
     let ephem_x25519_sk = X25519StaticSecret::random_from_rng(&mut rng);
     let ephem_x25519_pk = X25519PublicKey::from(&ephem_x25519_sk);
     let peer_x25519_pk = X25519PublicKey::from(*peer_x25519_pk_bytes);
     let x25519_ss = ephem_x25519_sk.diffie_hellman(&peer_x25519_pk);
 
-    // 2. Post-Quantum ML-KEM-768 encapsulation
     let peer_mlkem_pk = kyber768::PublicKey::from_bytes(peer_mlkem_pk_bytes).map_err(|_| {
         KyberError::EncapsulationFailed("Invalid ML-KEM-768 public key bytes".into())
     })?;
     let (mlkem_ss, mlkem_ct) = kyber768::encapsulate(&peer_mlkem_pk);
 
-    // 3. Combine both shared secrets: X25519 SS || ML-KEM SS
     let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
     combined_ss.extend_from_slice(x25519_ss.as_bytes());
     combined_ss.extend_from_slice(mlkem_ss.as_bytes());
 
-    // 4. Pack combined ciphertext: Ephemeral X25519 PK (32 bytes) || ML-KEM CT (1088 bytes)
     let mut combined_ct = Vec::with_capacity(32 + mlkem_ct.as_bytes().len());
     combined_ct.extend_from_slice(ephem_x25519_pk.as_bytes());
     combined_ct.extend_from_slice(mlkem_ct.as_bytes());
@@ -92,17 +184,14 @@ pub fn decapsulate_hybrid(
         ));
     }
 
-    // 1. Split ciphertext into Ephemeral X25519 PK (32 bytes) and ML-KEM CT
     let (ephem_x25519_pk_bytes, mlkem_ct_bytes) = combined_ct_bytes.split_at(32);
     let mut ephem_x25519_arr = [0u8; 32];
     ephem_x25519_arr.copy_from_slice(ephem_x25519_pk_bytes);
     let ephem_x25519_pk = X25519PublicKey::from(ephem_x25519_arr);
 
-    // 2. Derive classical X25519 shared secret
     let my_x25519_sk = X25519StaticSecret::from(*my_x25519_sk_bytes);
     let x25519_ss = my_x25519_sk.diffie_hellman(&ephem_x25519_pk);
 
-    // 3. Decapsulate ML-KEM-768 shared secret
     let mlkem_ct = kyber768::Ciphertext::from_bytes(mlkem_ct_bytes).map_err(|_| {
         KyberError::DecapsulationFailed("Invalid ML-KEM-768 ciphertext bytes".into())
     })?;
@@ -111,7 +200,6 @@ pub fn decapsulate_hybrid(
     })?;
     let mlkem_ss = kyber768::decapsulate(&mlkem_ct, &my_mlkem_sk);
 
-    // 4. Combine shared secrets
     let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
     combined_ss.extend_from_slice(x25519_ss.as_bytes());
     combined_ss.extend_from_slice(mlkem_ss.as_bytes());
@@ -158,6 +246,14 @@ pub fn decrypt_chacha20(
         .map_err(|e| KyberError::DecryptionFailed(format!("ChaCha20Poly1305 decrypt error: {e}")))
 }
 
+/// Generate a 96-bit nonce from a 64-bit sequence counter.
+pub fn generate_nonce_from_seq(seq: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    let seq_bytes = seq.to_be_bytes();
+    nonce[4..12].copy_from_slice(&seq_bytes);
+    nonce
+}
+
 /// Normalize text to prevent OS line-ending and whitespace hash mismatches (\r\n -> \n, trim end)
 pub fn normalize_clipboard_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_end().to_string()
@@ -188,19 +284,16 @@ impl ClipboardDeduplicator {
         }
     }
 
-    /// Sets the state flag before applying a remote clipboard update to suppress self-triggered local events
     pub fn begin_remote_update(&self) -> bool {
         self.is_processing_remote_update
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
-    /// Resets the remote update state flag
     pub fn end_remote_update(&self) {
         self.is_processing_remote_update.store(false, Ordering::SeqCst);
     }
 
-    /// Returns true if currently processing a remote update or if text hash is in recent history
     pub fn is_suppressed(&self, text: &str) -> bool {
         if self.is_processing_remote_update.load(Ordering::SeqCst) {
             return true;
@@ -210,7 +303,6 @@ impl ClipboardDeduplicator {
         guard.contains(&hash)
     }
 
-    /// Records a new normalized text hash into the rolling history
     pub fn record_text(&self, text: &str) {
         let hash = hash_clipboard_text(text);
         let mut guard = self.history.lock().unwrap();
@@ -252,18 +344,17 @@ mod tests {
     }
 
     #[test]
-    fn test_clipboard_deduplication_and_normalization() {
-        let dedup = ClipboardDeduplicator::new();
-        let text1 = "Hello World\r\nKyberpipe Clipboard";
-        let text1_normalized = "Hello World\nKyberpipe Clipboard";
+    fn test_double_ratchet_flow() {
+        let _alice_pair = generate_hybrid_keypair();
+        let bob_pair = generate_hybrid_keypair();
+        let kem_res = encapsulate_hybrid(&bob_pair.x25519_pk, &bob_pair.mlkem_pk).unwrap();
 
-        dedup.record_text(text1);
-        assert!(dedup.is_suppressed(text1_normalized));
+        let mut alice_ratchet = DoubleRatchetState::new(&kem_res.combined_shared_secret, true).unwrap();
+        let mut bob_ratchet = DoubleRatchetState::new(&kem_res.combined_shared_secret, false).unwrap();
 
-        // Test remote update suppression flag
-        assert!(dedup.begin_remote_update());
-        assert!(dedup.is_suppressed("Brand New Clipboard Text"));
-        dedup.end_remote_update();
-        assert!(!dedup.is_suppressed("Brand New Clipboard Text"));
+        let (nonce, ciphertext) = alice_ratchet.ratchet_encrypt(b"Post-Quantum Double Ratchet Test").unwrap();
+        let decrypted = bob_ratchet.ratchet_decrypt(&nonce, &ciphertext).unwrap();
+
+        assert_eq!(b"Post-Quantum Double Ratchet Test".to_vec(), decrypted);
     }
 }

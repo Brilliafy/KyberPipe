@@ -10,6 +10,34 @@ pub const DEFAULT_KYBERPIPE_PORT: u16 = 9876;
 pub const P2P_BEACON_PORT: u16 = 9877;
 pub const BEACON_MAGIC: &[u8] = b"KYBERPIPE_P2P_BEACON_V1";
 
+/// Helper for Seamless Path Migration between Wi-Fi Direct and WireGuard interfaces over QUIC CIDs
+pub struct PathMigrationManager;
+
+impl PathMigrationManager {
+    /// Generate a cryptographically secure PATH_CHALLENGE token and matching PATH_RESPONSE token
+    pub fn create_path_challenge() -> (String, String) {
+        let mut challenge_bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge_bytes);
+        let challenge_token = hex::encode(challenge_bytes);
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"kyberpipe-path-response:");
+        hasher.update(challenge_token.as_bytes());
+        let response_token = hex::encode(hasher.finalize());
+
+        (challenge_token, response_token)
+    }
+
+    /// Verify PATH_RESPONSE matches expected challenge
+    pub fn verify_path_response(challenge_token: &str, response_token: &str) -> bool {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"kyberpipe-path-response:");
+        hasher.update(challenge_token.as_bytes());
+        let expected = hex::encode(hasher.finalize());
+        expected.to_lowercase() == response_token.to_lowercase()
+    }
+}
+
 /// Custom Certificate Verifier that verifies the peer's certificate against a pinned certificate hash
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
@@ -84,7 +112,7 @@ pub fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, rust
         .map_err(|e| KyberError::NetworkError(format!("Certificate generation failed: {e}")))?;
     let cert_der = cert.cert.der().to_vec();
     let key_der = cert.key_pair.serialize_der();
-    
+
     Ok((
         vec![CertificateDer::from(cert_der)],
         rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
@@ -100,9 +128,9 @@ pub fn configure_quic_server(
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| KyberError::NetworkError(format!("Rustls ServerConfig error: {e}")))?;
-    
+
     server_crypto.alpn_protocols = vec![b"kyberpipe-pqc-v1".to_vec()];
-    
+
     let server_config = quinn::ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).map_err(|e| KyberError::NetworkError(e.to_string()))?));
     Ok(server_config)
 }
@@ -116,9 +144,9 @@ pub fn configure_quic_client(pinned_cert_hash: Option<String>) -> Result<quinn::
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    
+
     client_crypto.alpn_protocols = vec![b"kyberpipe-pqc-v1".to_vec()];
-    
+
     let client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).map_err(|e| KyberError::NetworkError(e.to_string()))?));
     Ok(client_config)
 }
@@ -128,7 +156,7 @@ pub async fn send_p2p_beacon(peer_identity_hex: &str, target_addr: Option<Socket
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| KyberError::NetworkError(format!("Failed to bind UDP socket: {e}")))?;
-    
+
     socket
         .set_broadcast(true)
         .map_err(|e| KyberError::NetworkError(format!("Failed to set broadcast: {e}")))?;
@@ -161,5 +189,11 @@ mod tests {
         let client_config = configure_quic_client(None);
         assert!(client_config.is_ok());
     }
-}
 
+    #[test]
+    fn test_path_migration_challenge_response() {
+        let (challenge, response) = PathMigrationManager::create_path_challenge();
+        assert!(PathMigrationManager::verify_path_response(&challenge, &response));
+        assert!(!PathMigrationManager::verify_path_response(&challenge, "invalid-token"));
+    }
+}
