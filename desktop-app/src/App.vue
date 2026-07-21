@@ -49,6 +49,10 @@ const systemInfo = ref<SystemInfo | null>(null);
 const keyPair = ref<KeyPair | null>(null);
 const logs = ref<string[]>([]);
 const connectionStatus = ref("Ready (Listening on UDP :9876)");
+const wifiDirectActive = ref(true);
+const lanActive = ref(false);
+const resolvedPublicIp = ref("Not Queried");
+const pairingConfigJson = ref("");
 
 // Ambient Light Sandbox State
 const currentLux = ref(250.0);
@@ -177,10 +181,65 @@ async function handleGenerateKeyPair() {
   try {
     keyPair.value = await invoke<KeyPair>("generate_keypair");
     await refreshLogs();
+    await loadPairingConfig();
   } catch (e) {
     console.error("Key generation error: ", e);
   }
 }
+
+const runStunHolePunch = async (host: string) => {
+  try {
+    resolvedPublicIp.value = "Querying STUN...";
+    const res = await invoke<string>("perform_stun_hole_punch", { stunHost: host });
+    resolvedPublicIp.value = res;
+    await refreshLogs();
+    await updateConnectionStatus();
+  } catch (e: any) {
+    resolvedPublicIp.value = "Failed: " + e;
+    await refreshLogs();
+  }
+};
+
+const updateConnectionStatus = async () => {
+  try {
+    const info = await invoke<{
+      active_tier: number;
+      active_path_description: string;
+      latency_ms: number;
+      public_endpoint: string;
+    }>("evaluate_connection_status", {
+      wifiDirectActive: wifiDirectActive.value,
+      lanActive: lanActive.value,
+      publicEndpoint: resolvedPublicIp.value,
+    });
+    connectionStatus.value = `Active: ${info.active_path_description} (${info.latency_ms}ms)`;
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const loadPairingConfig = async () => {
+  if (!keyPair.value) return;
+  try {
+    const config = await invoke<{
+      host_identity_pk_hex: string;
+      local_ip: string;
+      wifi_direct_mac: string;
+      wireguard_pk_hex: string;
+      stun_endpoint: string;
+      pairing_nonce_hex: string;
+    }>("get_pairing_config", {
+      hostPkHex: keyPair.value.mlkem_pk_hex,
+      wireguardPkHex: keyPair.value.x25519_pk_hex,
+    });
+    pairingConfigJson.value = JSON.stringify(config, null, 2);
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
 
 async function handleRunScript(code: string) {
   try {
@@ -254,9 +313,10 @@ async function refreshLogs() {
   }
 }
 
-onMounted(() => {
-  loadSystemInfo();
-  handleGenerateKeyPair();
+onMounted(async () => {
+  await loadSystemInfo();
+  await handleGenerateKeyPair();
+  await updateConnectionStatus();
 });
 </script>
 
@@ -287,6 +347,13 @@ onMounted(() => {
       <Dashboard 
         v-if="currentTab === 'dashboard'" 
         :sasCode="sasCode" 
+        :wifiDirectActive="wifiDirectActive"
+        :lanActive="lanActive"
+        :resolvedPublicIp="resolvedPublicIp"
+        :pairingConfigJson="pairingConfigJson"
+        @update:wifiDirectActive="wifiDirectActive = $event; updateConnectionStatus()"
+        @update:lanActive="lanActive = $event; updateConnectionStatus()"
+        @runStunHolePunch="runStunHolePunch"
         @regenerateKeys="handleGenerateKeyPair" 
         @navigate="currentTab = $event as any" 
       />

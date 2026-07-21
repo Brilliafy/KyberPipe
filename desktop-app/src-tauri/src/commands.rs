@@ -366,3 +366,49 @@ pub fn get_connection_status(state: State<'_, AppState>) -> String {
 pub fn get_app_logs(state: State<'_, AppState>) -> Vec<String> {
     state.logs.lock().map(|l| l.clone()).unwrap_or_default()
 }
+
+#[tauri::command]
+pub fn perform_stun_hole_punch(stun_host: String, state: State<'_, AppState>) -> Result<String, String> {
+    state.add_log(format!("[STUN] Initiating UDP hole punch via STUN: {stun_host}"));
+    let addr = core_crypto::perform_stun_hole_punch(stun_host)
+        .map_err(|e| e.to_string())?;
+    state.add_log(format!("[STUN] Mapped public reflexive address: {addr}"));
+    
+    if let Ok(mut status) = state.connection_status.lock() {
+        *status = format!("Connected (WAN STUN: {addr})");
+    }
+    
+    Ok(addr)
+}
+
+#[tauri::command]
+pub fn evaluate_connection_status(
+    wifi_direct_active: bool,
+    lan_active: bool,
+    public_endpoint: String,
+    state: State<'_, AppState>,
+) -> Result<core_crypto::ConnectionInfo, String> {
+    let info = core_crypto::evaluate_connection_hierarchy(wifi_direct_active, lan_active, public_endpoint);
+    state.add_log(format!(
+        "[Connection Manager] Active path: {} (Tier {}, Latency {}ms)",
+        info.active_path_description, info.active_tier, info.latency_ms
+    ));
+    
+    if let Ok(mut status) = state.connection_status.lock() {
+        *status = format!("Connected ({})", info.active_path_description);
+    }
+    
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn get_pairing_config(
+    host_pk_hex: String,
+    wireguard_pk_hex: String,
+    state: State<'_, AppState>,
+) -> Result<core_crypto::PairingConfig, String> {
+    state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
+    core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
+        .map_err(|e| e.to_string())
+}
+
