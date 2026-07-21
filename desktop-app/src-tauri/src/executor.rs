@@ -48,6 +48,21 @@ pub fn run_boa_sandboxed_script(script_code: &str, lux: f64) -> ScriptExecutionR
         Attribute::all(),
     );
 
+    // Inject getAmbientLight native function
+    let get_ambient_light = boa_engine::native_function::NativeFunction::from_fn_ptr(|_this, _args, ctx| {
+        let global_obj = ctx.global_object().clone();
+        let val = global_obj.get(js_string!("ambientLight"), ctx).unwrap_or(JsValue::from(0.0));
+        Ok(val)
+    });
+
+    let get_light_obj = boa_engine::object::FunctionObjectBuilder::new(context.realm(), get_ambient_light).build();
+
+    let _ = context.register_global_property(
+        js_string!("getAmbientLight"),
+        get_light_obj,
+        Attribute::all(),
+    );
+
     match context.eval(Source::from_bytes(script_code.as_bytes())) {
         Ok(res) => ScriptExecutionResult {
             success: true,
