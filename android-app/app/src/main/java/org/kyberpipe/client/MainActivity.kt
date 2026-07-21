@@ -152,6 +152,42 @@ fun MainScreen(
                 }
             }
 
+            // Emergency Panic Self-Destruct Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0x33EF4444)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "⚠️ Emergency Panic Destruction",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFEF4444)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Instantly zeroizes active ratchet memory and purges TEE/StrongBox master keys.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFFCA5A5)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            try {
+                                uniffi.kyberpipe.triggerPanicHardwareWipe()
+                                Toast.makeText(this@MainActivity, "Hardware KeyStore Purged & RAM Zeroized!", Toast.LENGTH_LONG).show()
+                            } catch (e: Exception) {
+                                Log.e("KyberpipePanic", "Panic error: ${e.message}")
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                    ) {
+                        Text("PURGE MASTER KEYS & ZEROIZE RAM", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
             // Foreground Service Toggle Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
