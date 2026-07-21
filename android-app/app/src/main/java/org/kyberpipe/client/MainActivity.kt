@@ -28,7 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.kyberpipe.client.service.PipeService
-import uniffi.kyberpipe.*
+import uniffi.core_crypto.*
 
 class MainActivity : ComponentActivity() {
 

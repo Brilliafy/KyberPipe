@@ -24,7 +24,7 @@ class NotificationHook : NotificationListenerService() {
         Log.i("KyberpipeNotifHook", "Intercepted notification from $packageName: $title")
 
         try {
-            val jsonPacket = uniffi.kyberpipe.createNotificationPacket(
+            val jsonPacket = uniffi.core_crypto.createNotificationPacket(
                 title,
                 text,
                 packageName,

@@ -32,7 +32,7 @@ class SmsReceiver : BroadcastReceiver() {
             Log.i("KyberpipeSmsReceiver", "Intercepted SMS from $sender: $body")
 
             try {
-                val jsonPacket = uniffi.kyberpipe.createSmsPacket(sender, body, timestamp.toULong())
+                val jsonPacket = uniffi.core_crypto.createSmsPacket(sender, body, timestamp.toULong())
                 Log.d("KyberpipeSmsReceiver", "Serialized SMS packet: $jsonPacket")
             } catch (e: Exception) {
                 Log.e("KyberpipeSmsReceiver", "Failed to create SMS packet: ${e.message}")
