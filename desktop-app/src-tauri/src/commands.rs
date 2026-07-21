@@ -148,12 +148,23 @@ pub fn push_notification_packet(
     let pkt = NotificationPacket {
         sbn_key: format!("{app_package}_{timestamp}"),
         title: title.clone(),
-        text,
+        text: text.clone(),
         app_package: app_package.clone(),
         icon_base64: None,
         timestamp,
     };
-    state.add_log(format!("[Mirror] Notification from {app_package}: {title}"));
+    // Emit native Linux desktop notification via notify-rust
+    let notif_title = title.clone();
+    let notif_text = text.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = notify_rust::Notification::new()
+            .summary(&notif_title)
+            .body(&notif_text)
+            .icon("dialog-information")
+            .show();
+    });
+
+    state.add_log(format!("[Notification Sync] {app_package}: {title} - {text}"));
     if let Ok(mut hist) = state.notification_history.lock() {
         if hist.len() >= 50 {
             hist.remove(0);
