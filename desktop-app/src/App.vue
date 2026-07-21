@@ -451,11 +451,14 @@ onMounted(() => {
         </div>
 
         <div class="editor-section">
-          <h3>Fallback Subprocess (Strict Argument Passing)</h3>
+          <h3>Fallback Subprocess & Zero-Copy IPC</h3>
           <div class="input-row">
             <input type="text" v-model="fallbackScriptPath" placeholder="/path/to/script.sh" />
             <button class="btn btn-secondary" @click="handleRunFallbackScript">
               🚀 Run Native Subprocess
+            </button>
+            <button class="btn btn-primary" style="margin-left: 0.5rem;" @click="invoke('stream_binary_file')">
+              ⚡ Test Zero-Copy IPC Stream
             </button>
           </div>
         </div>

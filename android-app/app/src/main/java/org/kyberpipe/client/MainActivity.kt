@@ -123,6 +123,35 @@ fun MainScreen(
                 }
             }
 
+            // Dynamic Ambient Light Sensor Gauge Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "💡 Dynamic Ambient Light Visualizer",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFF59E0B)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Real-time debounced lux level ($ambientLux lux)",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = (ambientLux / 1000.0f).coerceIn(0.0f, 1.0f),
+                        modifier = Modifier.fillMaxWidth().height(8.dp),
+                        color = Color(0xFFF59E0B),
+                        trackColor = Color(0xFF334155)
+                    )
+                }
+            }
+
             // SAS Out-of-Band Verification Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
