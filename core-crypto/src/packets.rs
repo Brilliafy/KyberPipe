@@ -102,6 +102,16 @@ impl KyberMessage {
     }
 }
 
+/// Zero-panic safe packet decoder for raw untrusted byte streams
+pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {
+    if data.is_empty() {
+        return Err(KyberError::SerializationError("Empty payload".into()));
+    }
+    let s = std::str::from_utf8(data)
+        .map_err(|e| KyberError::SerializationError(format!("Invalid UTF-8 bytes: {e}")))?;
+    KyberMessage::from_json(s)
+}
+
 pub fn compute_sha256_hex(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());

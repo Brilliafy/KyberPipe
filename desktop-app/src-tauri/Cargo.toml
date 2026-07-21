@@ -23,6 +23,7 @@ ashpd = "0.9"
 boa_engine = "0.19"
 arboard = "3.4"
 notify-rust = "4.11"
+keyring = "2.1"
 tracing = "0.1"
 
 

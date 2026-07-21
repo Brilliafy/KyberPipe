@@ -23,6 +23,9 @@ pub fn run() {
             send_outbound_sms,
             trigger_notification_action,
             send_hardware_command,
+            get_telemetry_metrics,
+            generate_sas_pairing_code,
+            store_key_in_secure_enclave,
             get_connection_status,
             get_app_logs,
         ])
