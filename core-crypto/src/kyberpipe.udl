@@ -1,0 +1,63 @@
+namespace kyberpipe {
+    [Throws=KyberError]
+    PqKeyPair generate_pq_keypair();
+
+    [Throws=KyberError]
+    PqKemResponse encapsulate_pq_secret(string public_key_hex);
+
+    [Throws=KyberError]
+    string decapsulate_pq_secret(string ciphertext_hex, string secret_key_hex);
+
+    [Throws=KyberError]
+    string derive_session_key(string shared_secret_hex, string salt_hex);
+
+    [Throws=KyberError]
+    EncryptedPayload encrypt_payload_with_key(string session_key_hex, string data);
+
+    [Throws=KyberError]
+    string decrypt_payload_with_key(string session_key_hex, string nonce_hex, string ciphertext_hex);
+
+    [Throws=KyberError]
+    string create_sensor_packet(double lux, u64 timestamp);
+
+    [Throws=KyberError]
+    string create_clipboard_packet(string text, u64 timestamp);
+
+    [Throws=KyberError]
+    string create_sms_packet(string sender, string body, u64 timestamp);
+
+    [Throws=KyberError]
+    string create_notification_packet(string title, string text, string app_package, u64 timestamp);
+
+    boolean is_duplicate_clipboard(string content_hash, sequence<string> recent_hashes);
+
+    string compute_sha256(string data);
+};
+
+[Error]
+enum KyberError {
+    "CryptoError",
+    "KeyGenerationFailed",
+    "EncapsulationFailed",
+    "DecapsulationFailed",
+    "EncryptionFailed",
+    "DecryptionFailed",
+    "SerializationError",
+    "NetworkError",
+    "InvalidKeyLength",
+};
+
+dictionary PqKeyPair {
+    string public_key_hex;
+    string secret_key_hex;
+};
+
+dictionary PqKemResponse {
+    string ciphertext_hex;
+    string shared_secret_hex;
+};
+
+dictionary EncryptedPayload {
+    string nonce_hex;
+    string ciphertext_hex;
+};

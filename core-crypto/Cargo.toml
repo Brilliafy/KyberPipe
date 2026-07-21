@@ -1,0 +1,42 @@
+[package]
+name = "core-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "core_crypto"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/uniffi_bindgen.rs"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[dependencies]
+# Async runtime engine
+tokio = { version = "1.0", features = ["full"] }
+# Ultra high-speed multiplexed network pipeline over UDP
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+# Post-Quantum Cryptography implementations (NIST-approved ML-KEM / Kyber)
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+# Key derivation and hashing
+hkdf = "0.12"
+sha2 = "0.10"
+# Fast local symmetric encryption layer once key exchange completes
+chacha20poly1305 = "0.10"
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+bytes = "1.5"
+thiserror = "2.0"
+tracing = "0.1"
+rand = "0.8"
+# Cross-platform library layout helper to bridge Rust into Android Kotlin
+uniffi = { version = "0.28", features = ["cli", "tokio"] }
+
