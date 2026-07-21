@@ -26,6 +26,7 @@ arboard = "3.4"
 notify-rust = "4.11"
 keyring = "2.1"
 hex = "0.4"
+mimalloc = "0.1"
 tracing = "0.1"
 
 

@@ -4,6 +4,9 @@ mod portal;
 mod browser_bridge;
 mod state;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use commands::*;
 use state::AppState;
 
