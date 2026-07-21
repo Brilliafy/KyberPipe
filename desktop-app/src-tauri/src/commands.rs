@@ -276,6 +276,23 @@ pub fn merge_mesh_crdt_state(
 }
 
 #[tauri::command]
+pub fn generate_shamir_recovery_shares(k: usize, n: usize) -> Result<Vec<String>, String> {
+    let dummy_master_secret = b"MasterIdentityKeyRecoverySeed_GF28_Kyberpipe_P2P";
+    let shares = core_crypto::crypto::split_secret_shamir(dummy_master_secret, k, n)
+        .map_err(|e| e.to_string())?;
+    Ok(shares.into_iter().map(hex::encode).collect())
+}
+
+#[tauri::command]
+pub fn reconstruct_key_from_shamir_shares(shares_hex: Vec<String>, k: usize) -> Result<String, String> {
+    let shares: Result<Vec<Vec<u8>>, _> = shares_hex.into_iter().map(|s| hex::decode(&s)).collect();
+    let decoded_shares = shares.map_err(|e| format!("Invalid hex share: {e}"))?;
+    let recovered_bytes = core_crypto::crypto::reconstruct_secret_shamir(&decoded_shares, k)
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&recovered_bytes).to_string())
+}
+
+#[tauri::command]
 pub fn trigger_panic_self_destruct(state: State<'_, AppState>) -> Result<String, String> {
     core_crypto::trigger_panic_hardware_wipe().map_err(|e| e.to_string())?;
     let mut status = state.connection_status.lock().unwrap();

@@ -1574,6 +1574,7 @@ dependencies = [
  "ashpd",
  "boa_engine",
  "core-crypto",
+ "hex",
  "keyring",
  "notify-rust",
  "serde",
