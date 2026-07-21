@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "org.kyberpipe.client"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "org.kyberpipe.client"
