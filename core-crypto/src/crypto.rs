@@ -267,6 +267,26 @@ pub fn hash_clipboard_text(text: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Generate a 6-digit Short Authentication String (SAS) for out-of-band verification
+pub fn generate_sas_code(
+    host_pk_bytes: &[u8],
+    client_pk_bytes: &[u8],
+    shared_secret: &[u8],
+) -> Result<String, KyberError> {
+    let mut hkdf_input = Vec::with_capacity(host_pk_bytes.len() + client_pk_bytes.len() + shared_secret.len());
+    hkdf_input.extend_from_slice(host_pk_bytes);
+    hkdf_input.extend_from_slice(client_pk_bytes);
+    hkdf_input.extend_from_slice(shared_secret);
+
+    let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-sas-salt"), &hkdf_input);
+    let mut okm = [0u8; 4];
+    hk.expand(b"kyberpipe-sas-code", &mut okm)
+        .map_err(|e| KyberError::CryptoError(e.to_string()))?;
+
+    let val = u32::from_be_bytes(okm) % 1_000_000;
+    Ok(format!("{:06}", val))
+}
+
 /// Thread-safe clipboard deduplicator ring buffer with AtomicBool state flag
 #[derive(Clone)]
 pub struct ClipboardDeduplicator {
@@ -356,5 +376,13 @@ mod tests {
         let decrypted = bob_ratchet.ratchet_decrypt(&nonce, &ciphertext).unwrap();
 
         assert_eq!(b"Post-Quantum Double Ratchet Test".to_vec(), decrypted);
+    }
+
+    #[test]
+    fn test_sas_code_generation() {
+        let sas1 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
+        let sas2 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
+        assert_eq!(sas1.len(), 6);
+        assert_eq!(sas1, sas2);
     }
 }

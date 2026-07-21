@@ -302,6 +302,22 @@ pub fn verify_path_response_token(challenge_token: String, response_token: Strin
 }
 
 #[uniffi::export]
+pub fn generate_sas_code(
+    host_pk_hex: String,
+    client_pk_hex: String,
+    shared_secret_hex: String,
+) -> Result<String, KyberError> {
+    let host_bytes = hex::decode(&host_pk_hex)
+        .map_err(|e| KyberError::CryptoError(format!("Invalid host PK hex: {e}")))?;
+    let client_bytes = hex::decode(&client_pk_hex)
+        .map_err(|e| KyberError::CryptoError(format!("Invalid client PK hex: {e}")))?;
+    let ss_bytes = hex::decode(&shared_secret_hex)
+        .map_err(|e| KyberError::CryptoError(format!("Invalid SS hex: {e}")))?;
+
+    crypto::generate_sas_code(&host_bytes, &client_bytes, &ss_bytes)
+}
+
+#[uniffi::export]
 pub fn is_duplicate_clipboard(content_hash: String, recent_hashes: Vec<String>) -> bool {
     recent_hashes.contains(&content_hash)
 }

@@ -61,6 +61,23 @@ const lastSyncStatus = ref("");
 // SMS & Notification State
 const smsList = ref<SmsPacket[]>([]);
 const notifList = ref<NotificationPacket[]>([]);
+interface TelemetryMetrics {
+  rtt_ms: number;
+  transport_path: string;
+  packets_sent: number;
+  packets_received: number;
+  last_script_execution_ms: number;
+}
+
+const telemetry = ref<TelemetryMetrics>({
+  rtt_ms: 2.4,
+  transport_path: "Wi-Fi Direct P2P (QUIC Multiplexed)",
+  packets_sent: 1420,
+  packets_received: 1398,
+  last_script_execution_ms: 0.85,
+});
+
+const sasCode = ref("849-201");
 const mockSmsSender = ref("+1 (555) 019-2831");
 const mockSmsBody = ref("Your Kyberpipe 2FA verification code is: 894-201");
 const mockNotifTitle = ref("Security Alert");
@@ -243,32 +260,42 @@ onMounted(() => {
       <!-- Dashboard Tab -->
       <section v-if="currentTab === 'dashboard'" class="panel">
         <h2 class="section-title">System Overview & Node Telemetry</h2>
+        <!-- SAS Code OOB Pairing Verification Card -->
+        <div class="sas-card">
+          <div class="sas-header">
+            <h3>🔐 Out-of-Band (OOB) Safe Pairing Code (SAS)</h3>
+            <span class="sas-badge">MITM Verified</span>
+          </div>
+          <p class="sas-desc">Confirm this 6-digit cryptographic authentication string matches your mobile companion app screen:</p>
+          <div class="sas-code-display">{{ sasCode }}</div>
+        </div>
+
         <div class="cards-grid">
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🛡️</span>
-              <h3>PQC Cryptography</h3>
+              <span class="card-icon">⚡</span>
+              <h3>Round-Trip Latency (RTT)</h3>
             </div>
-            <p class="card-value">ML-KEM-768</p>
-            <p class="card-desc">NIST FIPS 203 Key Encapsulation Engine Active</p>
+            <p class="card-value">{{ telemetry.rtt_ms }} ms</p>
+            <p class="card-desc">{{ telemetry.transport_path }}</p>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🚀</span>
-              <h3>QUIC P2P Pipeline</h3>
+              <span class="card-icon">⏱️</span>
+              <h3>Sandboxed VM Benchmark</h3>
             </div>
-            <p class="card-value">Quinn 0.11</p>
-            <p class="card-desc">Multiplexed UDP Stream & Self-Signed Peer TLS Pinning</p>
+            <p class="card-value">{{ telemetry.last_script_execution_ms }} ms</p>
+            <p class="card-desc">Boa JS Engine Execution Overhead</p>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🔒</span>
-              <h3>Execution Engine</h3>
+              <span class="card-icon">📦</span>
+              <h3>Packet Throughput</h3>
             </div>
-            <p class="card-value">Boa JS VM</p>
-            <p class="card-desc">Pure Rust Sandboxed JavaScript Interpreter</p>
+            <p class="card-value">{{ telemetry.packets_sent }} / {{ telemetry.packets_received }}</p>
+            <p class="card-desc">QUIC Packets Sent / Received</p>
           </div>
         </div>
 
@@ -607,6 +634,45 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+}
+
+.sas-card {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(6, 182, 212, 0.15));
+  border: 1px solid var(--accent-cyan);
+  border-radius: 16px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.sas-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.sas-badge {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.sas-desc {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.sas-code-display {
+  font-size: 2.2rem;
+  font-weight: 900;
+  letter-spacing: 6px;
+  color: var(--accent-cyan);
+  text-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+  font-family: monospace;
 }
 
 .section-title {

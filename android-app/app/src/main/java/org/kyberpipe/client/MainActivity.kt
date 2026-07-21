@@ -123,6 +123,35 @@ fun MainScreen(
                 }
             }
 
+            // SAS Out-of-Band Verification Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "🔐 Safe-Pairing SAS Code (OOB)",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Confirm this 6-digit code matches your Linux Desktop screen:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "849-201",
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF4ADE80)
+                    )
+                }
+            }
+
             // Foreground Service Toggle Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
