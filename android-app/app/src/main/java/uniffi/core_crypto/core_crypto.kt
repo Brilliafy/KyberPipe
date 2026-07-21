@@ -3,7 +3,7 @@
 
 @file:Suppress("NAME_SHADOWING")
 
-package uniffi.kyberpipe
+package uniffi.core_crypto
 
 // Common helper code.
 //
@@ -374,7 +374,7 @@ private fun findLibraryName(componentName: String): String {
     if (libOverride != null) {
         return libOverride
     }
-    return "uniffi_kyberpipe"
+    return "core_crypto"
 }
 
 private inline fun <reified Lib : Library> loadIndirect(
@@ -735,13 +735,35 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
 internal interface UniffiLib : Library {
     companion object {
         internal val INSTANCE: UniffiLib by lazy {
-            loadIndirect<UniffiLib>(componentName = "kyberpipe")
+            loadIndirect<UniffiLib>(componentName = "core_crypto")
             .also { lib: UniffiLib ->
                 uniffiCheckContractApiVersion(lib)
                 uniffiCheckApiChecksums(lib)
@@ -752,27 +774,49 @@ internal interface UniffiLib : Library {
 
     fun uniffi_core_crypto_fn_func_compute_sha256(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_create_binary_clipboard_packet(`mimeType`: RustBuffer.ByValue,`dataBase64`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_clipboard_packet(`text`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_create_hardware_command_packet(`commandType`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_create_notification_action_packet(`sbnKey`: RustBuffer.ByValue,`actionIndex`: Int,`actionTitle`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_notification_packet(`title`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,`appPackage`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_create_outbound_sms_packet(`recipient`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_sensor_packet(`lux`: Double,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_sms_packet(`sender`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_decapsulate_pq_secret(`ciphertextHex`: RustBuffer.ByValue,`secretKeyHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_decapsulate_pq_secret(`ciphertextHex`: RustBuffer.ByValue,`myX25519SkHex`: RustBuffer.ByValue,`myMlkemSkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_decrypt_payload_with_key(`sessionKeyHex`: RustBuffer.ByValue,`nonceHex`: RustBuffer.ByValue,`ciphertextHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_derive_session_key(`sharedSecretHex`: RustBuffer.ByValue,`saltHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_encapsulate_pq_secret(`publicKeyHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_dump_flight_data_recorder(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_encapsulate_pq_secret(`peerX25519PkHex`: RustBuffer.ByValue,`peerMlkemPkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_encrypt_payload_with_key(`sessionKeyHex`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_generate_path_challenge_tokens(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_generate_pq_keypair(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_generate_sas_code(`hostPkHex`: RustBuffer.ByValue,`clientPkHex`: RustBuffer.ByValue,`sharedSecretHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_initialize_pq_handshake(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_core_crypto_fn_func_is_duplicate_clipboard(`contentHash`: RustBuffer.ByValue,`recentHashes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_toggle_flight_data_recorder(`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_trigger_panic_hardware_wipe(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_verify_path_response_token(`challengeToken`: RustBuffer.ByValue,`responseToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun ffi_core_crypto_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -888,9 +932,17 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_core_crypto_checksum_func_compute_sha256(
     ): Short
+    fun uniffi_core_crypto_checksum_func_create_binary_clipboard_packet(
+    ): Short
     fun uniffi_core_crypto_checksum_func_create_clipboard_packet(
     ): Short
+    fun uniffi_core_crypto_checksum_func_create_hardware_command_packet(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_create_notification_action_packet(
+    ): Short
     fun uniffi_core_crypto_checksum_func_create_notification_packet(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_create_outbound_sms_packet(
     ): Short
     fun uniffi_core_crypto_checksum_func_create_sensor_packet(
     ): Short
@@ -902,13 +954,27 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_derive_session_key(
     ): Short
+    fun uniffi_core_crypto_checksum_func_dump_flight_data_recorder(
+    ): Short
     fun uniffi_core_crypto_checksum_func_encapsulate_pq_secret(
     ): Short
     fun uniffi_core_crypto_checksum_func_encrypt_payload_with_key(
     ): Short
+    fun uniffi_core_crypto_checksum_func_generate_path_challenge_tokens(
+    ): Short
     fun uniffi_core_crypto_checksum_func_generate_pq_keypair(
     ): Short
+    fun uniffi_core_crypto_checksum_func_generate_sas_code(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_initialize_pq_handshake(
+    ): Short
     fun uniffi_core_crypto_checksum_func_is_duplicate_clipboard(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_toggle_flight_data_recorder(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_trigger_panic_hardware_wipe(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_verify_path_response_token(
     ): Short
     fun ffi_core_crypto_uniffi_contract_version(
     ): Int
@@ -927,40 +993,73 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_core_crypto_checksum_func_compute_sha256() != 33009.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_compute_sha256() != 51586.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_clipboard_packet() != 33662.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_binary_clipboard_packet() != 18595.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_notification_packet() != 33723.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_clipboard_packet() != 51241.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_sensor_packet() != 41779.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_hardware_command_packet() != 19744.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_sms_packet() != 58183.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_notification_action_packet() != 25267.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_decapsulate_pq_secret() != 48957.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_notification_packet() != 35837.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_decrypt_payload_with_key() != 12217.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_outbound_sms_packet() != 47502.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_derive_session_key() != 33765.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_sensor_packet() != 50896.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_encapsulate_pq_secret() != 53302.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_create_sms_packet() != 43116.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_encrypt_payload_with_key() != 64336.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_decapsulate_pq_secret() != 28226.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_generate_pq_keypair() != 28721.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_decrypt_payload_with_key() != 53982.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_is_duplicate_clipboard() != 23913.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_derive_session_key() != 22555.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_dump_flight_data_recorder() != 32804.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_encapsulate_pq_secret() != 65289.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_encrypt_payload_with_key() != 32257.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_path_challenge_tokens() != 47384.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_pq_keypair() != 13702.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_sas_code() != 8232.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_initialize_pq_handshake() != 24333.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_is_duplicate_clipboard() != 42674.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_toggle_flight_data_recorder() != 35988.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_trigger_panic_hardware_wipe() != 51324.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_verify_path_response_token() != 19661.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1009,6 +1108,29 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * @suppress
  * */
 object NoPointer
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
 
 /**
  * @suppress
@@ -1170,6 +1292,38 @@ public object FfiConverterTypeEncryptedPayload: FfiConverterRustBuffer<Encrypted
 
 
 
+data class PathChallengeResult (
+    var `challengeToken`: kotlin.String, 
+    var `expectedResponse`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePathChallengeResult: FfiConverterRustBuffer<PathChallengeResult> {
+    override fun read(buf: ByteBuffer): PathChallengeResult {
+        return PathChallengeResult(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PathChallengeResult) = (
+            FfiConverterString.allocationSize(value.`challengeToken`) +
+            FfiConverterString.allocationSize(value.`expectedResponse`)
+    )
+
+    override fun write(value: PathChallengeResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`challengeToken`, buf)
+            FfiConverterString.write(value.`expectedResponse`, buf)
+    }
+}
+
+
+
 data class PqKemResponse (
     var `ciphertextHex`: kotlin.String, 
     var `sharedSecretHex`: kotlin.String
@@ -1203,8 +1357,10 @@ public object FfiConverterTypePqKemResponse: FfiConverterRustBuffer<PqKemRespons
 
 
 data class PqKeyPair (
-    var `publicKeyHex`: kotlin.String, 
-    var `secretKeyHex`: kotlin.String
+    var `x25519PkHex`: kotlin.String, 
+    var `x25519SkHex`: kotlin.String, 
+    var `mlkemPkHex`: kotlin.String, 
+    var `mlkemSkHex`: kotlin.String
 ) {
     
     companion object
@@ -1218,17 +1374,23 @@ public object FfiConverterTypePqKeyPair: FfiConverterRustBuffer<PqKeyPair> {
         return PqKeyPair(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: PqKeyPair) = (
-            FfiConverterString.allocationSize(value.`publicKeyHex`) +
-            FfiConverterString.allocationSize(value.`secretKeyHex`)
+            FfiConverterString.allocationSize(value.`x25519PkHex`) +
+            FfiConverterString.allocationSize(value.`x25519SkHex`) +
+            FfiConverterString.allocationSize(value.`mlkemPkHex`) +
+            FfiConverterString.allocationSize(value.`mlkemSkHex`)
     )
 
     override fun write(value: PqKeyPair, buf: ByteBuffer) {
-            FfiConverterString.write(value.`publicKeyHex`, buf)
-            FfiConverterString.write(value.`secretKeyHex`, buf)
+            FfiConverterString.write(value.`x25519PkHex`, buf)
+            FfiConverterString.write(value.`x25519SkHex`, buf)
+            FfiConverterString.write(value.`mlkemPkHex`, buf)
+            FfiConverterString.write(value.`mlkemSkHex`, buf)
     }
 }
 
@@ -1236,30 +1398,88 @@ public object FfiConverterTypePqKeyPair: FfiConverterRustBuffer<PqKeyPair> {
 
 
 
-sealed class KyberException(message: String): kotlin.Exception(message) {
+sealed class KyberException: kotlin.Exception() {
+    
+    class CryptoException(
         
-        class CryptoException(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class KeyGenerationFailed(
         
-        class KeyGenerationFailed(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class EncapsulationFailed(
         
-        class EncapsulationFailed(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class DecapsulationFailed(
         
-        class DecapsulationFailed(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class EncryptionFailed(
         
-        class EncryptionFailed(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class DecryptionFailed(
         
-        class DecryptionFailed(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class SerializationException(
         
-        class SerializationException(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class NetworkException(
         
-        class NetworkException(message: String) : KyberException(message)
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    class InvalidKeyLength(
         
-        class InvalidKeyLength(message: String) : KyberException(message)
+        val `expected`: kotlin.ULong, 
         
+        val `got`: kotlin.ULong
+        ) : KyberException() {
+        override val message
+            get() = "expected=${ `expected` }, got=${ `got` }"
+    }
+    
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<KyberException> {
         override fun lift(error_buf: RustBuffer.ByValue): KyberException = FfiConverterTypeKyberError.lift(error_buf)
     }
+
+    
 }
 
 /**
@@ -1268,61 +1488,137 @@ sealed class KyberException(message: String): kotlin.Exception(message) {
 public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException> {
     override fun read(buf: ByteBuffer): KyberException {
         
-            return when(buf.getInt()) {
-            1 -> KyberException.CryptoException(FfiConverterString.read(buf))
-            2 -> KyberException.KeyGenerationFailed(FfiConverterString.read(buf))
-            3 -> KyberException.EncapsulationFailed(FfiConverterString.read(buf))
-            4 -> KyberException.DecapsulationFailed(FfiConverterString.read(buf))
-            5 -> KyberException.EncryptionFailed(FfiConverterString.read(buf))
-            6 -> KyberException.DecryptionFailed(FfiConverterString.read(buf))
-            7 -> KyberException.SerializationException(FfiConverterString.read(buf))
-            8 -> KyberException.NetworkException(FfiConverterString.read(buf))
-            9 -> KyberException.InvalidKeyLength(FfiConverterString.read(buf))
+
+        return when(buf.getInt()) {
+            1 -> KyberException.CryptoException(
+                FfiConverterString.read(buf),
+                )
+            2 -> KyberException.KeyGenerationFailed(
+                FfiConverterString.read(buf),
+                )
+            3 -> KyberException.EncapsulationFailed(
+                FfiConverterString.read(buf),
+                )
+            4 -> KyberException.DecapsulationFailed(
+                FfiConverterString.read(buf),
+                )
+            5 -> KyberException.EncryptionFailed(
+                FfiConverterString.read(buf),
+                )
+            6 -> KyberException.DecryptionFailed(
+                FfiConverterString.read(buf),
+                )
+            7 -> KyberException.SerializationException(
+                FfiConverterString.read(buf),
+                )
+            8 -> KyberException.NetworkException(
+                FfiConverterString.read(buf),
+                )
+            9 -> KyberException.InvalidKeyLength(
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
-        
     }
 
     override fun allocationSize(value: KyberException): ULong {
-        return 4UL
+        return when(value) {
+            is KyberException.CryptoException -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.KeyGenerationFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.EncapsulationFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.DecapsulationFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.EncryptionFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.DecryptionFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.SerializationException -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.NetworkException -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.InvalidKeyLength -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterULong.allocationSize(value.`expected`)
+                + FfiConverterULong.allocationSize(value.`got`)
+            )
+        }
     }
 
     override fun write(value: KyberException, buf: ByteBuffer) {
         when(value) {
             is KyberException.CryptoException -> {
                 buf.putInt(1)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.KeyGenerationFailed -> {
                 buf.putInt(2)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.EncapsulationFailed -> {
                 buf.putInt(3)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.DecapsulationFailed -> {
                 buf.putInt(4)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.EncryptionFailed -> {
                 buf.putInt(5)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.DecryptionFailed -> {
                 buf.putInt(6)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.SerializationException -> {
                 buf.putInt(7)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.NetworkException -> {
                 buf.putInt(8)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is KyberException.InvalidKeyLength -> {
                 buf.putInt(9)
+                FfiConverterULong.write(value.`expected`, buf)
+                FfiConverterULong.write(value.`got`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -1366,11 +1662,41 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+    @Throws(KyberException::class) fun `createBinaryClipboardPacket`(`mimeType`: kotlin.String, `dataBase64`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_binary_clipboard_packet(
+        FfiConverterString.lower(`mimeType`),FfiConverterString.lower(`dataBase64`),FfiConverterULong.lower(`timestamp`),_status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `createClipboardPacket`(`text`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_clipboard_packet(
         FfiConverterString.lower(`text`),FfiConverterULong.lower(`timestamp`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `createHardwareCommandPacket`(`commandType`: kotlin.String, `payloadJson`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_hardware_command_packet(
+        FfiConverterString.lower(`commandType`),FfiConverterString.lower(`payloadJson`),FfiConverterULong.lower(`timestamp`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `createNotificationActionPacket`(`sbnKey`: kotlin.String, `actionIndex`: kotlin.UInt, `actionTitle`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_notification_action_packet(
+        FfiConverterString.lower(`sbnKey`),FfiConverterUInt.lower(`actionIndex`),FfiConverterString.lower(`actionTitle`),FfiConverterULong.lower(`timestamp`),_status)
 }
     )
     }
@@ -1386,6 +1712,19 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+    @Throws(KyberException::class) fun `createOutboundSmsPacket`(`recipient`: kotlin.String, `body`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_outbound_sms_packet(
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`body`),FfiConverterULong.lower(`timestamp`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Packet creation helpers
+         */
     @Throws(KyberException::class) fun `createSensorPacket`(`lux`: kotlin.Double, `timestamp`: kotlin.ULong): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -1406,16 +1745,22 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
-    @Throws(KyberException::class) fun `decapsulatePqSecret`(`ciphertextHex`: kotlin.String, `secretKeyHex`: kotlin.String): kotlin.String {
+        /**
+         * UniFFI export: Decapsulate shared secret against ciphertext & secret keys
+         */
+    @Throws(KyberException::class) fun `decapsulatePqSecret`(`ciphertextHex`: kotlin.String, `myX25519SkHex`: kotlin.String, `myMlkemSkHex`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_decapsulate_pq_secret(
-        FfiConverterString.lower(`ciphertextHex`),FfiConverterString.lower(`secretKeyHex`),_status)
+        FfiConverterString.lower(`ciphertextHex`),FfiConverterString.lower(`myX25519SkHex`),FfiConverterString.lower(`myMlkemSkHex`),_status)
 }
     )
     }
     
 
+        /**
+         * UniFFI export: Decrypt ciphertext string with 256-bit session key & nonce
+         */
     @Throws(KyberException::class) fun `decryptPayloadWithKey`(`sessionKeyHex`: kotlin.String, `nonceHex`: kotlin.String, `ciphertextHex`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -1426,6 +1771,9 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+        /**
+         * UniFFI export: HKDF-SHA256 key derivation
+         */
     @Throws(KyberException::class) fun `deriveSessionKey`(`sharedSecretHex`: kotlin.String, `saltHex`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -1435,17 +1783,32 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
-
-    @Throws(KyberException::class) fun `encapsulatePqSecret`(`publicKeyHex`: kotlin.String): PqKemResponse {
-            return FfiConverterTypePqKemResponse.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encapsulate_pq_secret(
-        FfiConverterString.lower(`publicKeyHex`),_status)
+ fun `dumpFlightDataRecorder`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_dump_flight_data_recorder(
+        _status)
 }
     )
     }
     
 
+        /**
+         * UniFFI export: Encapsulate shared secret against peer's Hybrid public keys
+         */
+    @Throws(KyberException::class) fun `encapsulatePqSecret`(`peerX25519PkHex`: kotlin.String, `peerMlkemPkHex`: kotlin.String): PqKemResponse {
+            return FfiConverterTypePqKemResponse.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encapsulate_pq_secret(
+        FfiConverterString.lower(`peerX25519PkHex`),FfiConverterString.lower(`peerMlkemPkHex`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * UniFFI export: Encrypt plaintext string with 256-bit session key
+         */
     @Throws(KyberException::class) fun `encryptPayloadWithKey`(`sessionKeyHex`: kotlin.String, `data`: kotlin.String): EncryptedPayload {
             return FfiConverterTypeEncryptedPayload.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -1455,7 +1818,19 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
+ fun `generatePathChallengeTokens`(): PathChallengeResult {
+            return FfiConverterTypePathChallengeResult.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_path_challenge_tokens(
+        _status)
+}
+    )
+    }
+    
 
+        /**
+         * UniFFI export: Generate Hybrid (X25519 + ML-KEM-768) keypair returning hex-encoded strings
+         */
     @Throws(KyberException::class) fun `generatePqKeypair`(): PqKeyPair {
             return FfiConverterTypePqKeyPair.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -1465,11 +1840,59 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
+
+    @Throws(KyberException::class) fun `generateSasCode`(`hostPkHex`: kotlin.String, `clientPkHex`: kotlin.String, `sharedSecretHex`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_sas_code(
+        FfiConverterString.lower(`hostPkHex`),FfiConverterString.lower(`clientPkHex`),FfiConverterString.lower(`sharedSecretHex`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Standalone UniFFI initialization helper for Hybrid post-quantum handshake
+         */
+    @Throws(KyberException::class) fun `initializePqHandshake`()
+        = 
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_initialize_pq_handshake(
+        _status)
+}
+    
+    
  fun `isDuplicateClipboard`(`contentHash`: kotlin.String, `recentHashes`: List<kotlin.String>): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_is_duplicate_clipboard(
         FfiConverterString.lower(`contentHash`),FfiConverterSequenceString.lower(`recentHashes`),_status)
+}
+    )
+    }
+    
+ fun `toggleFlightDataRecorder`(`enabled`: kotlin.Boolean)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_toggle_flight_data_recorder(
+        FfiConverterBoolean.lower(`enabled`),_status)
+}
+    
+    
+
+    @Throws(KyberException::class) fun `triggerPanicHardwareWipe`()
+        = 
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_trigger_panic_hardware_wipe(
+        _status)
+}
+    
+    
+ fun `verifyPathResponseToken`(`challengeToken`: kotlin.String, `responseToken`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_verify_path_response_token(
+        FfiConverterString.lower(`challengeToken`),FfiConverterString.lower(`responseToken`),_status)
 }
     )
     }
