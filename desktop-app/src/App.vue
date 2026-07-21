@@ -288,6 +288,15 @@ onMounted(() => {
         <div class="cards-grid">
           <div class="card">
             <div class="card-header">
+              <span class="card-icon">📷</span>
+              <h3>Optical Data Pipe</h3>
+            </div>
+            <p class="card-value">Animated LT QR</p>
+            <p class="card-desc">Zero-RF Air-Gapped Screen/Camera Sync</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
               <span class="card-icon">⚡</span>
               <h3>Round-Trip Latency (RTT)</h3>
             </div>
@@ -297,20 +306,20 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🛡️</span>
-              <h3>Step-Up Authorization</h3>
+              <span class="card-icon">🔑</span>
+              <h3>Threshold Disaster Recovery</h3>
             </div>
-            <p class="card-value">Gated Tier 2</p>
-            <p class="card-desc">Biometric & Polkit Privilege Protection Active</p>
+            <p class="card-value">2-of-3 Shamir GF(2⁸)</p>
+            <p class="card-desc">Master Key QR Share Reconstruction Active</p>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🌐</span>
-              <h3>Decentralized Mesh Ring</h3>
+              <span class="card-icon">🛡️</span>
+              <h3>Hardware Attestation</h3>
             </div>
-            <p class="card-value">1-to-N CRDT</p>
-            <p class="card-desc">Delta-State Conflict-Free Multi-Peer Sync</p>
+            <p class="card-value">TPM 2.0 / KeyAttest</p>
+            <p class="card-desc">Google Root & TPM PCR Enforced</p>
           </div>
         </div>
 

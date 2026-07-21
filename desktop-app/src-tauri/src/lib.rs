@@ -1,6 +1,7 @@
 mod commands;
 mod executor;
 mod portal;
+mod browser_bridge;
 mod state;
 
 use commands::*;
@@ -28,6 +29,8 @@ pub fn run() {
             store_key_in_secure_enclave,
             check_stepup_authorization,
             merge_mesh_crdt_state,
+            generate_shamir_recovery_shares,
+            reconstruct_key_from_shamir_shares,
             trigger_panic_self_destruct,
             get_connection_status,
             get_app_logs,

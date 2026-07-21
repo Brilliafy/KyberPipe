@@ -25,6 +25,7 @@ wasmtime = "22.0"
 arboard = "3.4"
 notify-rust = "4.11"
 keyring = "2.1"
+hex = "0.4"
 tracing = "0.1"
 
 
