@@ -302,6 +302,25 @@ pub fn toggle_neural_anomaly_engine(enabled: bool, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
+pub fn toggle_flight_recorder(enabled: bool, state: State<'_, AppState>) -> Result<String, String> {
+    core_crypto::telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
+    let status_str = if enabled { "ENABLED (sub-nanosecond qlog ring buffer active)" } else { "DISABLED (zero overhead)" };
+    state.add_log(format!("[Flight Data Recorder] {status_str}"));
+    Ok(format!("Flight Data Recorder is now {status_str}"))
+}
+
+#[tauri::command]
+pub fn dump_flight_recorder_events() -> Result<String, String> {
+    Ok(core_crypto::telemetry::GLOBAL_FLIGHT_RECORDER.dump_events_json())
+}
+
+#[tauri::command]
+pub fn init_sentry_desktop_telemetry(dsn: String) -> Result<String, String> {
+    core_crypto::telemetry::init_sentry_desktop_diagnostics(&dsn);
+    Ok("Sentry Desktop Error Diagnostics Initialized".to_string())
+}
+
+#[tauri::command]
 pub fn bind_pkcs11_yubikey_hardware_token(slot_id: u32, _user_pin: String) -> Result<String, String> {
     tracing::info!("[PKCS#11 YubiKey] Master identity key bound to hardware token (Slot {slot_id}). Touch confirmation required.");
     Ok(format!("YubiKey PIV Smartcard bound to Slot {slot_id}. Physical touch required for re-keying."))

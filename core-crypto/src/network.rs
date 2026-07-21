@@ -38,7 +38,39 @@ impl PathMigrationManager {
     }
 }
 
-/// Custom Certificate Verifier that verifies the peer's certificate against a pinned certificate hash
+/// Multipath QUIC (MPQUIC) Link Aggregation Path Identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum MpquicPathId {
+    WifiDirectP2p = 0,
+    WifiLocalLan = 1,
+    WireguardWan = 2,
+}
+
+/// Simultaneous Multipath QUIC (MPQUIC) Link Aggregator & Scheduler
+pub struct MultipathScheduler {
+    active_paths: Vec<MpquicPathId>,
+    next_path_idx: std::sync::atomic::AtomicUsize,
+}
+
+impl MultipathScheduler {
+    pub fn new() -> Self {
+        Self {
+            active_paths: vec![MpquicPathId::WifiDirectP2p, MpquicPathId::WifiLocalLan, MpquicPathId::WireguardWan],
+            next_path_idx: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Select next active path for packet striping (Round-Robin MPQUIC scheduler)
+    pub fn schedule_next_path(&self) -> MpquicPathId {
+        if self.active_paths.is_empty() {
+            return MpquicPathId::WireguardWan;
+        }
+        let idx = self.next_path_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.active_paths[idx % self.active_paths.len()]
+    }
+}
+
+/// QUIC Certificate Pinning Verifier that verifies the peer's certificate against a pinned certificate hash
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
     pub pinned_sha256_hex: Option<String>,
