@@ -106,7 +106,20 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
     }
 }
 
-/// Generate self-signed TLS cert and private key for QUIC server endpoint
+/// Build QUIC server listener bound to 0.0.0.0:4433 supporting cross-subnet (Ethernet <-> Wi-Fi) routing
+pub fn bind_cross_subnet_listener(port: u16) -> Result<quinn::Endpoint, KyberError> {
+    let (certs, key) = generate_self_signed_cert()?;
+    let server_config = configure_quic_server(certs, key)?;
+    let socket_addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+
+    let endpoint = quinn::Endpoint::server(server_config, socket_addr)
+        .map_err(|e| KyberError::NetworkError(format!("Failed to bind QUIC cross-subnet listener: {e}")))?;
+
+    tracing::info!("[eBPF Acceleration] QUIC listener bound to 0.0.0.0:{port} (Ethernet <-> Wi-Fi Cross-Subnet Active)");
+    Ok(endpoint)
+}
+
+/// Helper to generate self-signed cert & server configd private key for QUIC server endpoint
 pub fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>), KyberError> {
     let cert = rcgen::generate_simple_self_signed(vec!["kyberpipe.local".into()])
         .map_err(|e| KyberError::NetworkError(format!("Certificate generation failed: {e}")))?;

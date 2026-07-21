@@ -78,6 +78,18 @@ const telemetry = ref<TelemetryMetrics>({
 });
 
 const sasCode = ref("849-201");
+const triggerSelfDestruct = async () => {
+  if (confirm("⚠️ CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
+    try {
+      const res = await invoke<string>("trigger_panic_self_destruct");
+      alert(res);
+      await refreshLogs();
+    } catch (e: any) {
+      alert("Self Destruct error: " + e);
+    }
+  }
+};
+
 const mockSmsSender = ref("+1 (555) 019-2831");
 const mockSmsBody = ref("Your Kyberpipe 2FA verification code is: 894-201");
 const mockNotifTitle = ref("Security Alert");
@@ -247,9 +259,12 @@ onMounted(() => {
     <main class="main-content">
       <!-- Top Status Header -->
       <header class="top-bar">
-        <div class="status-indicator">
-          <span class="dot green"></span>
-          <span class="status-text">{{ connectionStatus }}</span>
+        <div class="header-right">
+          <button class="btn-panic" @click="triggerSelfDestruct">⚠️ Self-Destruct Wipe</button>
+          <div class="status-badge" :class="{ connected: connectionStatus.includes('Active') }">
+            <span class="status-dot"></span>
+            {{ connectionStatus }}
+          </div>
         </div>
 
         <div class="crypto-tag">
@@ -673,6 +688,24 @@ body {
   color: var(--accent-cyan);
   text-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
   font-family: monospace;
+}
+
+.btn-panic {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  padding: 0.4rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-right: 1rem;
+  transition: all 0.2s ease;
+}
+
+.btn-panic:hover {
+  background: rgba(239, 68, 68, 0.4);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
 }
 
 .section-title {

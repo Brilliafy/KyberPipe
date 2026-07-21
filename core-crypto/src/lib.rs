@@ -52,8 +52,8 @@ pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
     Ok(PqKeyPair {
         x25519_pk_hex: hex::encode(pair.x25519_pk),
         x25519_sk_hex: hex::encode(pair.x25519_sk),
-        mlkem_pk_hex: hex::encode(pair.mlkem_pk),
-        mlkem_sk_hex: hex::encode(pair.mlkem_sk),
+        mlkem_pk_hex: hex::encode(pair.mlkem_pk.clone()),
+        mlkem_sk_hex: hex::encode(pair.mlkem_sk.clone()),
     })
 }
 
@@ -315,6 +315,11 @@ pub fn generate_sas_code(
         .map_err(|e| KyberError::CryptoError(format!("Invalid SS hex: {e}")))?;
 
     crypto::generate_sas_code(&host_bytes, &client_bytes, &ss_bytes)
+}
+
+#[uniffi::export]
+pub fn trigger_panic_hardware_wipe() -> Result<(), KyberError> {
+    crypto::trigger_panic_hardware_wipe()
 }
 
 #[uniffi::export]

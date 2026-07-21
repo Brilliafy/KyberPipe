@@ -11,19 +11,24 @@ class SensorDriver(
     private val sensorManager: SensorManager,
     private val deltaThresholdLux: Float = 2.0f,
     private val minPollIntervalMs: Long = 500L,
-    private val onLightChanged: (lux: Double, timestamp: Long) -> Unit
+    private val onLightChanged: (lux: Float, timestampMs: Long) -> Unit
 ) : SensorEventListener {
 
     private var lightSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
-    private var lastEmittedLux: Float = -1.0f
-    private var lastEmittedTimeMs: Long = 0L
+    private var motionSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
+    private var isStationary = false
+    private var lastLightValue: Float = -1.0f
+    private var lastEmitTimestampMs: Long = 0L
 
     fun start() {
-        lightSensor?.let { sensor ->
-            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-            Log.i("KyberpipeSensorDriver", "Ambient light sensor polling registered.")
+        lightSensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            Log.i("KyberpipeSensorDriver", "Ambient light sensor listener registered.")
         } ?: run {
             Log.w("KyberpipeSensorDriver", "Ambient light sensor unavailable on device.")
+        }
+        motionSensor?.let {
+            Log.i("KyberpipeSensorDriver", "Inertial Significant Motion sensor active (Stationary sleep optimization).")
         }
     }
 

@@ -276,6 +276,15 @@ pub fn merge_mesh_crdt_state(
 }
 
 #[tauri::command]
+pub fn trigger_panic_self_destruct(state: State<'_, AppState>) -> Result<String, String> {
+    core_crypto::trigger_panic_hardware_wipe().map_err(|e| e.to_string())?;
+    let mut status = state.connection_status.lock().unwrap();
+    *status = "SELF_DESTRUCTED_MEMORY_ZEROIZED".to_string();
+    state.add_log("[PANIC DESTRUCTION] Memory zeroized & Hardware KeyStore invalidated!".to_string());
+    Ok("Hardware master key destroyed and active ratchet zeroized.".to_string())
+}
+
+#[tauri::command]
 pub fn get_connection_status(state: State<'_, AppState>) -> String {
     state.connection_status.lock().map(|s| s.clone()).unwrap_or_else(|_| "Disconnected".to_string())
 }

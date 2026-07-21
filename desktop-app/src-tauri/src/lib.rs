@@ -28,6 +28,7 @@ pub fn run() {
             store_key_in_secure_enclave,
             check_stepup_authorization,
             merge_mesh_crdt_state,
+            trigger_panic_self_destruct,
             get_connection_status,
             get_app_logs,
         ])

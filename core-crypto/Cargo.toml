@@ -37,8 +37,8 @@ serde_json = "1.0"
 hex = "0.4"
 bytes = "1.5"
 thiserror = "2.0"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tracing = "0.1"
 rand = "0.8"
 # Cross-platform library layout helper to bridge Rust into Android Kotlin
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
-
