@@ -443,18 +443,6 @@ pub fn evaluate_bft_mesh_consensus(peer_votes: Vec<bool>) -> bool {
     (valid_votes as f64 / peer_votes.len() as f64) > (2.0 / 3.0)
 }
 
-/// Encode binary payload into LRA Vibration Motor BPSK Pulse Durations (Kinetic Haptic Pipe)
-pub fn encode_kinetic_haptic_vibration(data: &[u8]) -> Vec<u8> {
-    let mut pattern = Vec::with_capacity(data.len() * 8);
-    for &b in data {
-        for i in 0..8 {
-            let bit = (b >> i) & 1;
-            pattern.push(if bit == 1 { 50 } else { 20 }); // 50ms vibration vs 20ms pause
-        }
-    }
-    pattern
-}
-
 /// Threshold Post-Quantum Multi-Party Computation KEM decapsulation share combination
 pub fn mpc_mlkem_decapsulate_shares(shares: Vec<Vec<u8>>, threshold: usize) -> Result<Vec<u8>, KyberError> {
     if shares.len() < threshold {
@@ -699,13 +687,6 @@ mod tests {
     fn test_bft_consensus() {
         let votes = vec![true, true, true, false];
         assert!(evaluate_bft_mesh_consensus(votes));
-    }
-
-    #[test]
-    fn test_kinetic_haptic_encoding() {
-        let payload = b"Haptic Kinetic Pulse Data";
-        let pattern = encode_kinetic_haptic_vibration(payload);
-        assert!(!pattern.is_empty());
     }
 }
 

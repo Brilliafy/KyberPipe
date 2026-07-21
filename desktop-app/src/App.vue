@@ -35,7 +35,7 @@ interface NotificationPacket {
   timestamp: number;
 }
 
-const currentTab = ref<"dashboard" | "crypto" | "light" | "clipboard" | "sms" | "logs">("dashboard");
+const currentTab = ref<"dashboard" | "light" | "clipboard" | "notifications" | "logs" | "settings">("dashboard");
 
 const systemInfo = ref<SystemInfo | null>(null);
 const keyPair = ref<KeyPair | null>(null);
@@ -43,20 +43,75 @@ const logs = ref<string[]>([]);
 const connectionStatus = ref("Ready (Listening on UDP :9876)");
 
 // Ambient Light Sandbox State
-const currentLux = ref(12.5);
-const boaCode = ref(`// Sandboxed JavaScript VM Execution (Boa Engine)
-// No filesystem, network, or process access
-if (ambientLight < 15) {
-    log("Dark environment detected (" + ambientLight + " lux). Activating Cyberpunk Night Mode!");
+const currentLux = ref(250.0);
+const boaCode = ref(`// Sandboxed Ambient Automation Script
+const ambientLight = getAmbientLight();
+if (ambientLight < 15.0) {
+    log("Low-light threshold detected. Safeguarding night vision.");
 } else {
-    log("Bright environment (" + ambientLight + " lux). System nominal.");
+    log("Ambient illumination within nominal range.");
 }`);
 const fallbackScriptPath = ref("/usr/local/bin/kyber_ambient_hook.sh");
 const scriptResult = ref<ScriptResult | null>(null);
 
 // Clipboard State
-const clipboardInput = ref("");
 const lastSyncStatus = ref("");
+const clipboardItems = ref<string[]>([
+  "Secure synchronization token block",
+  "Identity public key fingerprint verification hash",
+  "Kyberpipe active connection metadata"
+]);
+const newClipboardText = ref("");
+
+const addClipboardItem = async () => {
+  const text = newClipboardText.value.trim();
+  if (!text) return;
+  clipboardItems.value.unshift(text);
+  newClipboardText.value = "";
+  try {
+    await invoke("sync_clipboard", { text });
+    lastSyncStatus.value = "Synced item to local and remote hosts";
+    await refreshLogs();
+  } catch (e) {
+    lastSyncStatus.value = "Sync warning: " + e;
+  }
+};
+
+const copyClipboardItem = async (text: string) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    lastSyncStatus.value = "Copied item to system clipboard";
+  } catch (e) {
+    lastSyncStatus.value = "Copy failed: " + e;
+  }
+};
+
+const removeClipboardItem = (index: number) => {
+  clipboardItems.value.splice(index, 1);
+  lastSyncStatus.value = "Item removed";
+};
+
+const editIndex = ref<number | null>(null);
+const editText = ref("");
+
+const startEdit = (index: number) => {
+  editIndex.value = index;
+  editText.value = clipboardItems.value[index];
+};
+
+const saveEdit = async (index: number) => {
+  const text = editText.value.trim();
+  if (!text) return;
+  clipboardItems.value[index] = text;
+  editIndex.value = null;
+  try {
+    await invoke("sync_clipboard", { text });
+    lastSyncStatus.value = "Updated and synced item";
+    await refreshLogs();
+  } catch (e) {
+    lastSyncStatus.value = "Update warning: " + e;
+  }
+};
 
 // Ambient-Adaptive Theme Computed Property
 const currentThemeClass = computed(() => {
@@ -70,16 +125,17 @@ const currentThemeClass = computed(() => {
 const optimisticStatus = ref<string | null>(null);
 const sendOptimisticSms = async () => {
   const previousState = [...smsList.value];
-  optimisticStatus.value = "Delivered (0ms Optimistic)";
+  optimisticStatus.value = "Outgoing message dispatched";
   
   try {
-    await sendRemoteSms();
+    await handlePushMockSms();
     setTimeout(() => { optimisticStatus.value = null; }, 2000);
   } catch (e) {
     smsList.value = previousState; // Auto-rollback
-    optimisticStatus.value = "Failed (Rolled Back)";
+    optimisticStatus.value = "Transmission failed (Rolled Back)";
   }
 };
+
 const smsList = ref<SmsPacket[]>([]);
 const notifList = ref<NotificationPacket[]>([]);
 interface TelemetryMetrics {
@@ -100,42 +156,39 @@ const telemetry = ref<TelemetryMetrics>({
 
 const sasCode = ref("849-201");
 const neuralAnomalyEnabled = ref(false); // Off by default
-const flightRecorderEnabled = ref(false); // Disabled by default for zero overhead
+const flightRecorderEnabled = ref(false); // Disabled by default
 
 const toggleFlightRecorder = async () => {
   try {
-    const res = await invoke<string>("toggle_flight_recorder", { enabled: flightRecorderEnabled.value });
-    alert(res);
+    await invoke<string>("toggle_flight_recorder", { enabled: flightRecorderEnabled.value });
     await refreshLogs();
   } catch (e: any) {
-    alert("Flight recorder toggle error: " + e);
+    console.error("Flight recorder error: ", e);
   }
 };
 
 const toggleNeuralAnomaly = async () => {
   try {
-    const res = await invoke<string>("toggle_neural_anomaly_engine", { enabled: neuralAnomalyEnabled.value });
-    alert(res);
+    await invoke<string>("toggle_neural_anomaly_engine", { enabled: neuralAnomalyEnabled.value });
     await refreshLogs();
   } catch (e: any) {
-    alert("Anomaly toggle error: " + e);
+    console.error("Anomaly error: ", e);
   }
 };
 
 const triggerSelfDestruct = async () => {
-  if (confirm("⚠️ CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
+  if (confirm("CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
     try {
-      const res = await invoke<string>("trigger_panic_self_destruct");
-      alert(res);
+      await invoke<string>("trigger_panic_self_destruct");
       await refreshLogs();
     } catch (e: any) {
-      alert("Self Destruct error: " + e);
+      console.error("Self destruct error: ", e);
     }
   }
 };
 
 const mockSmsSender = ref("+1 (555) 019-2831");
-const mockSmsBody = ref("Your Kyberpipe 2FA verification code is: 894-201");
+const mockSmsBody = ref("Verification code: 894-201");
 const mockNotifTitle = ref("Security Alert");
 const mockNotifText = ref("ML-KEM-768 Key Exchange initialized successfully.");
 const mockNotifApp = ref("com.kyberpipe.client");
@@ -154,7 +207,7 @@ async function handleGenerateKeyPair() {
     keyPair.value = await invoke<KeyPair>("generate_keypair");
     await refreshLogs();
   } catch (e) {
-    alert("Key generation error: " + e);
+    console.error("Key generation error: ", e);
   }
 }
 
@@ -166,7 +219,7 @@ async function handleRunBoaScript() {
     });
     await refreshLogs();
   } catch (e) {
-    alert("Execution failed: " + e);
+    console.error("Execution failed: ", e);
   }
 }
 
@@ -178,20 +231,7 @@ async function handleRunFallbackScript() {
     });
     await refreshLogs();
   } catch (e) {
-    alert("Subprocess launch error: " + e);
-  }
-}
-
-async function handleSyncClipboard() {
-  if (!clipboardInput.value) return;
-  try {
-    const synced = await invoke<boolean>("sync_clipboard", { text: clipboardInput.value });
-    lastSyncStatus.value = synced
-      ? "Successfully synced to system clipboard!"
-      : "Suppressed duplicate clipboard payload (loop prevention hash match).";
-    await refreshLogs();
-  } catch (e) {
-    lastSyncStatus.value = "Error: " + e;
+    console.error("Subprocess launch error: ", e);
   }
 }
 
@@ -204,10 +244,9 @@ async function handlePushMockSms() {
     });
     await refreshLogs();
   } catch (e) {
-    alert(e);
+    console.error(e);
   }
 }
-const sendRemoteSms = handlePushMockSms;
 
 async function handlePushMockNotification() {
   try {
@@ -223,9 +262,43 @@ async function handlePushMockNotification() {
     });
     await refreshLogs();
   } catch (e) {
-    alert(e);
+    console.error(e);
   }
 }
+
+interface UnifiedNotification {
+  id: string;
+  source: string;
+  title: string;
+  body: string;
+  appPackage: string;
+  timestamp: string;
+}
+
+const displayNotifications = computed<UnifiedNotification[]>(() => {
+  const list: UnifiedNotification[] = [];
+  for (const s of smsList.value) {
+    list.push({
+      id: `sms_${s.timestamp}`,
+      source: "SMS Message",
+      title: s.sender,
+      body: s.body,
+      appPackage: "telephony.sms",
+      timestamp: new Date(s.timestamp).toLocaleTimeString(),
+    });
+  }
+  for (const n of notifList.value) {
+    list.push({
+      id: `notif_${n.timestamp}`,
+      source: "App Notification",
+      title: n.title,
+      body: n.text,
+      appPackage: n.app_package,
+      timestamp: new Date(n.timestamp).toLocaleTimeString(),
+    });
+  }
+  return list.sort((a, b) => b.id.localeCompare(a.id));
+});
 
 async function refreshLogs() {
   try {
@@ -246,7 +319,7 @@ onMounted(() => {
     <!-- Sidebar Navigation -->
     <aside class="sidebar">
       <div class="brand">
-        <div class="logo-badge">⚡</div>
+        <div class="logo-badge">KP</div>
         <div class="brand-text">
           <h2>KYBERPIPE</h2>
           <span class="subtext">POST-QUANTUM ENGINE</span>
@@ -258,45 +331,42 @@ onMounted(() => {
           :class="{ active: currentTab === 'dashboard' }"
           @click="currentTab = 'dashboard'"
         >
-          <span class="icon">📊</span> Overview
-        </button>
-        <button
-          :class="{ active: currentTab === 'crypto' }"
-          @click="currentTab = 'crypto'"
-        >
-          <span class="icon">🔐</span> PQC Key Vault
-        </button>
-        <button
-          :class="{ active: currentTab === 'light' }"
-          @click="currentTab = 'light'"
-        >
-          <span class="icon">💡</span> Ambient Light JS VM
+          Overview
         </button>
         <button
           :class="{ active: currentTab === 'clipboard' }"
           @click="currentTab = 'clipboard'"
         >
-          <span class="icon">📋</span> Clipboard Sync
+          Clipboard Manager
         </button>
         <button
-          :class="{ active: currentTab === 'sms' }"
-          @click="currentTab = 'sms'"
+          :class="{ active: currentTab === 'notifications' }"
+          @click="currentTab = 'notifications'"
         >
-          <span class="icon">📱</span> SMS & Notifications
+          Notifications
+        </button>
+        <button
+          :class="{ active: currentTab === 'light' }"
+          @click="currentTab = 'light'"
+        >
+          Ambient Automation
         </button>
         <button
           :class="{ active: currentTab === 'logs' }"
           @click="currentTab = 'logs'; refreshLogs()"
         >
-          <span class="icon">📜</span> System Logs
+          System Logs
+        </button>
+        <button
+          :class="{ active: currentTab === 'settings' }"
+          @click="currentTab = 'settings'"
+        >
+          Settings
         </button>
       </nav>
 
       <div class="sidebar-footer" v-if="systemInfo">
-        <div class="mode-badge" :class="systemInfo.is_flatpak ? 'flatpak' : 'native'">
-          {{ systemInfo.is_flatpak ? '📦 Flatpak Sandbox' : '💻 Native Linux' }}
-        </div>
-        <div class="version">v{{ systemInfo.app_version }}</div>
+        <div class="version">Version {{ systemInfo.app_version }}</div>
       </div>
     </aside>
 
@@ -304,59 +374,38 @@ onMounted(() => {
     <main class="main-content">
       <!-- Top Status Header -->
       <header class="top-bar">
-        <div class="header-right">
-          <button class="btn-panic" @click="triggerSelfDestruct">⚠️ Self-Destruct Wipe</button>
-          <div class="status-badge" :class="{ connected: connectionStatus.includes('Active') }">
+        <div class="status-indicator">
+          <div class="status-badge" :class="{ connected: connectionStatus.includes('Ready') || connectionStatus.includes('Active') }">
             <span class="status-dot"></span>
             {{ connectionStatus }}
           </div>
         </div>
 
-        <div class="crypto-tag">
-          NIST ML-KEM-768 / ChaCha20-Poly1305
+        <div class="header-right">
+          <button class="btn btn-secondary btn-sm" style="margin-right: 0.5rem;" @click="currentTab = 'settings'">
+            Settings
+          </button>
+          <button class="btn-panic" @click="triggerSelfDestruct">Self-Destruct Wipe</button>
         </div>
       </header>
 
       <!-- Dashboard Tab -->
       <section v-if="currentTab === 'dashboard'" class="panel">
-        <h2 class="section-title">System Overview & Node Telemetry</h2>
-        <!-- SAS Code OOB Pairing Verification Card -->
+        <h2 class="section-title">System Overview</h2>
+        
         <!-- SAS Code OOB Pairing Verification Card -->
         <div class="sas-card">
           <div class="sas-header">
-            <h3>🔐 Out-of-Band (OOB) Safe Pairing Code (SAS)</h3>
+            <h3>Out-of-Band Safe Pairing</h3>
             <span class="sas-badge">MITM Verified</span>
           </div>
           <p class="sas-desc">Confirm this 6-digit cryptographic authentication string matches your mobile companion app screen:</p>
           <div class="sas-code-display">{{ sasCode }}</div>
         </div>
 
-        <!-- Flight Data Recorder Toggle Card -->
-        <div class="sas-card" style="background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(236, 72, 153, 0.15)); border-color: #ec4899;">
-          <div class="sas-header">
-            <h3>🛸 Sub-Nanosecond Flight Data Recorder (qlog)</h3>
-            <button class="btn-panic" style="background: rgba(236, 72, 153, 0.2); color: #ec4899; border-color: rgba(236, 72, 153, 0.4);" @click="toggleFlightRecorder">
-              {{ flightRecorderEnabled ? 'ACTIVE (qlog Ring Buffer)' : 'DISABLED (Zero Overhead)' }}
-            </button>
-          </div>
-          <p class="sas-desc">Lock-free sub-nanosecond binary event tracing ring buffer for post-mortem diagnostics. Disabled by default.</p>
-        </div>
-
-        <!-- Neural Anomaly Engine Toggle Card -->
-        <div class="sas-card" style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(16, 185, 129, 0.15)); border-color: #f59e0b;">
-          <div class="sas-header">
-            <h3>🧠 Neuromorphic On-Device Anomaly Engine</h3>
-            <button class="btn-panic" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; border-color: rgba(245, 158, 11, 0.4);" @click="toggleNeuralAnomaly">
-              {{ neuralAnomalyEnabled ? 'ACTIVE (eBPF ONNX)' : 'DISABLED (Battery Optimized)' }}
-            </button>
-          </div>
-          <p class="sas-desc">Real-time eBPF packet-timing anomaly detection & auto-isolation. Disabled by default to preserve battery and maximum performance.</p>
-        </div>
-
         <div class="cards-grid">
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">📷</span>
               <h3>Optical Data Pipe</h3>
             </div>
             <p class="card-value">Animated LT QR</p>
@@ -365,7 +414,6 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">⚡</span>
               <h3>Round-Trip Latency (RTT)</h3>
             </div>
             <p class="card-value">{{ telemetry.rtt_ms }} ms</p>
@@ -374,7 +422,6 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🔀</span>
               <h3>BFT Mesh Self-Healing</h3>
             </div>
             <p class="card-value">&gt; ⅔ Consensus</p>
@@ -383,25 +430,6 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">📳</span>
-              <h3>Kinetic Haptic Pipe</h3>
-            </div>
-            <p class="card-value">LRA Vibration BPSK</p>
-            <p class="card-desc">Zero-Airborne Physical Surface Sync</p>
-          </div>
-
-          <div class="card">
-            <div class="card-header">
-              <span class="card-icon">🚀</span>
-              <h3>Lattice Vector SIMD</h3>
-            </div>
-            <p class="card-value">AVX-512 / ARM NEON</p>
-            <p class="card-desc">40%–60% NTT CPU Cycle Reduction</p>
-          </div>
-
-          <div class="card">
-            <div class="card-header">
-              <span class="card-icon">🔏</span>
               <h3>NIST ML-DSA Code-Signing</h3>
             </div>
             <p class="card-value">Dilithium-65</p>
@@ -410,16 +438,6 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🔊</span>
-              <h3>Ultrasound OFDM Pipe</h3>
-            </div>
-            <p class="card-value">18 kHz - 22 kHz</p>
-            <p class="card-desc">Zero-Light Acoustic Proximity Sync Active</p>
-          </div>
-
-          <div class="card">
-            <div class="card-header">
-              <span class="card-icon">🔑</span>
               <h3>Hardware Smartcard Token</h3>
             </div>
             <p class="card-value">PKCS#11 YubiKey</p>
@@ -428,7 +446,6 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🛡️</span>
               <h3>Hardware Attestation</h3>
             </div>
             <p class="card-value">TPM 2.0 / KeyAttest</p>
@@ -436,50 +453,99 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="quick-actions-box">
-          <h3>Quick Control Actions</h3>
+        <div class="quick-actions-box" style="margin-top: 2rem;">
+          <h3>Quick Actions</h3>
           <div class="button-group">
             <button class="btn btn-primary" @click="handleGenerateKeyPair">
-              🔄 Regenerate Ephemeral PQC Keys
+              Regenerate Ephemeral Keys
             </button>
             <button class="btn btn-secondary" @click="currentTab = 'light'">
-              💡 Test Ambient Light Sandbox
+              Test Ambient Light Sandbox
             </button>
-            <button class="btn btn-secondary" @click="currentTab = 'sms'">
-              💬 Simulate Mobile Notification
+            <button class="btn btn-secondary" @click="currentTab = 'notifications'">
+              Simulate Mobile Notification
             </button>
           </div>
         </div>
       </section>
 
-      <!-- PQC Key Management Tab -->
-      <section v-if="currentTab === 'crypto'" class="panel">
-        <h2 class="section-title">Hybrid Post-Quantum Cryptographic Key Vault</h2>
-        <div class="key-card" v-if="keyPair">
-          <div class="key-field">
-            <label>Classical ECC X25519 Public Key (Hex):</label>
-            <textarea readonly rows="2" class="code-box">{{ keyPair.x25519_pk_hex }}</textarea>
-          </div>
+      <!-- Clipboard Manager Tab -->
+      <section v-if="currentTab === 'clipboard'" class="panel">
+        <h2 class="section-title">Clipboard Manager</h2>
 
-          <div class="key-field">
-            <label>NIST ML-KEM-768 Public Key (Hex):</label>
-            <textarea readonly rows="3" class="code-box">{{ keyPair.mlkem_pk_hex }}</textarea>
+        <div class="editor-section">
+          <h3>Sync New Clipboard Payload</h3>
+          <div class="input-row">
+            <input type="text" v-model="newClipboardText" placeholder="Type or paste payload content..." />
+            <button class="btn btn-primary" @click="addClipboardItem">
+              Add Clipboard Item
+            </button>
           </div>
+          <p class="status-msg" v-if="lastSyncStatus" style="margin-top: 0.5rem; color: var(--accent-cyan);">{{ lastSyncStatus }}</p>
+        </div>
 
-          <div class="key-field">
-            <label>NIST ML-KEM-768 Secret Key (Hex):</label>
-            <textarea readonly rows="3" class="code-box">{{ keyPair.mlkem_sk_hex }}</textarea>
+        <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem;">Active Sync Items</h3>
+        <div class="msg-card-list">
+          <div v-for="(item, index) in clipboardItems" :key="index" class="msg-card" style="padding: 1rem; border-radius: 12px; background: rgba(30, 41, 59, 0.6); margin-bottom: 0.5rem; border: 1px solid rgba(148, 163, 184, 0.2);">
+            <div v-if="editIndex === index">
+              <input type="text" v-model="editText" style="width: 100%; padding: 0.5rem; border-radius: 6px; background: #0f172a; color: white; border: 1px solid var(--border-color); margin-bottom: 0.5rem;" />
+              <button class="btn btn-primary btn-sm" @click="saveEdit(index)">Save</button>
+              <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem;" @click="editIndex = null">Cancel</button>
+            </div>
+            <div v-else>
+              <p style="margin: 0; font-size: 0.95rem; color: #cbd5e1; word-break: break-all;">{{ item }}</p>
+              <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                <button class="btn btn-primary btn-sm" @click="copyClipboardItem(item)">Copy</button>
+                <button class="btn btn-secondary btn-sm" @click="startEdit(index)">Edit</button>
+                <button class="btn btn-panic btn-sm" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border-color: rgba(239, 68, 68, 0.4);" @click="removeClipboardItem(index)">Delete</button>
+              </div>
+            </div>
           </div>
-
-          <button class="btn btn-primary" @click="handleGenerateKeyPair">
-            🔄 Generate New Hybrid Keypair
-          </button>
         </div>
       </section>
 
-      <!-- Ambient Light JS VM Tab -->
+      <!-- Notifications Tab -->
+      <section v-if="currentTab === 'notifications'" class="panel">
+        <h2 class="section-title">Notifications</h2>
+
+        <div class="cards-grid" style="margin-bottom: 1.5rem;">
+          <div class="card">
+            <h3>Simulate Outbound SMS</h3>
+            <div class="mock-form">
+              <input v-model="mockSmsSender" placeholder="Sender Phone" />
+              <input v-model="mockSmsBody" placeholder="Message Body" />
+              <button class="btn btn-secondary btn-sm" @click="sendOptimisticSms">Send Outbound SMS</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Simulate Native Notification</h3>
+            <div v-if="optimisticStatus" class="sas-card" style="background: rgba(34, 197, 94, 0.2); border-color: #22c55e; padding: 0.5rem 1rem; margin-bottom: 0.5rem;">
+              Status: {{ optimisticStatus }}
+            </div>
+            <div class="mock-form">
+              <input v-model="mockNotifTitle" placeholder="Notification Title" />
+              <input v-model="mockNotifText" placeholder="Notification Body" />
+              <button class="btn btn-secondary btn-sm" @click="handlePushMockNotification">Mirror Native Notification</button>
+            </div>
+          </div>
+        </div>
+
+        <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem;">Mirrored Notification Log (Native Linux Desktop Synced)</h3>
+        <div class="msg-card-list">
+          <div class="msg-card" v-for="(n, i) in displayNotifications" :key="i" style="padding: 1rem; border-radius: 12px; background: rgba(30, 41, 59, 0.6); margin-bottom: 0.5rem; border: 1px solid rgba(148, 163, 184, 0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+              <strong style="color: var(--accent-cyan);">[{{ n.source }}] {{ n.title }}</strong>
+              <span class="app-pkg" style="font-size: 0.75rem; opacity: 0.7;">{{ n.timestamp }}</span>
+            </div>
+            <p style="margin: 0; font-size: 0.9rem; color: #cbd5e1;">{{ n.body }}</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Ambient Automation Tab -->
       <section v-if="currentTab === 'light'" class="panel">
-        <h2 class="section-title">Ambient Light Sensor & Dynamic Execution</h2>
+        <h2 class="section-title">Ambient Light Sensor Automation</h2>
 
         <div class="lux-controls">
           <label>Simulated Ambient Light Level (Lux): <strong>{{ currentLux }} lux</strong></label>
@@ -490,7 +556,7 @@ onMounted(() => {
           <h3>Boa Sandboxed JS Code (In-Memory VM Isolation)</h3>
           <textarea v-model="boaCode" rows="6" class="code-editor"></textarea>
           <button class="btn btn-accent" @click="handleRunBoaScript">
-            ▶️ Run Sandboxed JS Script
+            Run Sandboxed JS Script
           </button>
         </div>
 
@@ -499,10 +565,10 @@ onMounted(() => {
           <div class="input-row">
             <input type="text" v-model="fallbackScriptPath" placeholder="/path/to/script.sh" />
             <button class="btn btn-secondary" @click="handleRunFallbackScript">
-              🚀 Run Native Subprocess
+              Run Native Subprocess
             </button>
             <button class="btn btn-primary" style="margin-left: 0.5rem;" @click="invoke('stream_binary_file')">
-              ⚡ Test Zero-Copy IPC Stream
+              Test Zero-Copy IPC Stream
             </button>
           </div>
         </div>
@@ -519,66 +585,6 @@ onMounted(() => {
         </div>
       </section>
 
-      <!-- Clipboard Sync Tab -->
-      <section v-if="currentTab === 'clipboard'" class="panel">
-        <h2 class="section-title">Bidirectional Clipboard Synchronization</h2>
-
-        <div class="clipboard-box">
-          <label>Enter Text to Sync Across Devices:</label>
-          <textarea v-model="clipboardInput" rows="3" placeholder="Type or paste content to sync..."></textarea>
-          <button class="btn btn-primary" @click="handleSyncClipboard">
-            📋 Push to System & Mobile Clipboard
-          </button>
-
-          <p class="status-msg" v-if="lastSyncStatus">{{ lastSyncStatus }}</p>
-        </div>
-      </section>
-
-      <!-- SMS & Notifications Tab -->
-      <section v-if="currentTab === 'sms'" class="panel">
-        <h2 class="section-title">Mirrored Communications</h2>
-
-        <div class="mirror-sections">
-          <div class="mirror-column">
-            <h3>📱 Mirrored SMS Messages</h3>
-            <div class="mock-form">
-              <input v-model="mockSmsSender" placeholder="Sender Phone" />
-              <input v-model="mockSmsBody" placeholder="Message Body" />
-              <button class="btn btn-secondary btn-sm" @click="sendOptimisticSms">⚡ Send Optimistic Outbound SMS</button>
-            </div>
-
-            <div class="message-list">
-              <div class="msg-card" v-for="(s, i) in smsList" :key="i">
-                <div class="msg-header"><strong>{{ s.sender }}</strong></div>
-                <div class="msg-body">{{ s.body }}</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="mirror-column">
-            <h3>🔔 Mirrored Notifications (Native Linux Desktop Synced)</h3>
-            <div v-if="optimisticStatus" class="sas-card" style="background: rgba(34, 197, 94, 0.2); border-color: #22c55e; padding: 0.5rem 1rem; margin-bottom: 0.5rem;">
-              <strong>⚡ Perceived 0ms Status:</strong> {{ optimisticStatus }}
-            </div>
-            <div class="mock-form">
-              <input v-model="mockNotifTitle" placeholder="Notification Title" />
-              <input v-model="mockNotifText" placeholder="Notification Body" />
-              <button class="btn btn-secondary btn-sm" @click="handlePushMockNotification">🔔 Mirror Native Notification</button>
-            </div>
-
-            <div class="message-list">
-              <div class="msg-card" v-for="(n, i) in notifList" :key="i">
-                <div class="msg-header">
-                  <strong>{{ n.title }}</strong>
-                  <span class="app-pkg">{{ n.app_package }}</span>
-                </div>
-                <div class="msg-body">{{ n.text }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <!-- System Logs Tab -->
       <section v-if="currentTab === 'logs'" class="panel">
         <h2 class="section-title">Real-Time System Log Stream</h2>
@@ -586,6 +592,58 @@ onMounted(() => {
           <div v-for="(log, i) in logs" :key="i" class="log-line">
             {{ log }}
           </div>
+        </div>
+      </section>
+
+      <!-- Settings Tab -->
+      <section v-if="currentTab === 'settings'" class="panel">
+        <h2 class="section-title">Settings</h2>
+
+        <div class="cards-grid" style="margin-bottom: 2rem;">
+          <div class="card" style="padding: 1.5rem;">
+            <h3>Sub-Nanosecond Flight Data Recorder</h3>
+            <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+              Lock-free sub-nanosecond binary event tracing ring buffer for post-mortem diagnostics.
+            </p>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <input type="checkbox" id="check-flight" v-model="flightRecorderEnabled" @change="toggleFlightRecorder" />
+              <label for="check-flight">Enable Flight Data Recorder (qlog)</label>
+            </div>
+          </div>
+
+          <div class="card" style="padding: 1.5rem;">
+            <h3>Neuromorphic Anomaly Engine</h3>
+            <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+              Real-time eBPF packet-timing anomaly detection & auto-isolation.
+            </p>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <input type="checkbox" id="check-anomaly" v-model="neuralAnomalyEnabled" @change="toggleNeuralAnomaly" />
+              <label for="check-anomaly">Enable eBPF ONNX Engine</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="key-card" style="background: rgba(15, 23, 42, 0.6); padding: 1.5rem; border-radius: 12px; border: 1px solid var(--border-color);" v-if="keyPair">
+          <h3>Cryptographic Key Vault (NIST ML-KEM-768 & X25519)</h3>
+          
+          <div class="key-field" style="margin-top: 1rem;">
+            <label style="font-size: 0.85rem; color: var(--text-secondary);">Classical ECC X25519 Public Key (Hex):</label>
+            <textarea readonly rows="2" class="code-box" style="width: 100%; margin-top: 0.25rem;">{{ keyPair.x25519_pk_hex }}</textarea>
+          </div>
+
+          <div class="key-field" style="margin-top: 1rem;">
+            <label style="font-size: 0.85rem; color: var(--text-secondary);">NIST ML-KEM-768 Public Key (Hex):</label>
+            <textarea readonly rows="3" class="code-box" style="width: 100%; margin-top: 0.25rem;">{{ keyPair.mlkem_pk_hex }}</textarea>
+          </div>
+
+          <div class="key-field" style="margin-top: 1rem; margin-bottom: 1.5rem;">
+            <label style="font-size: 0.85rem; color: var(--text-secondary);">NIST ML-KEM-768 Secret Key (Hex):</label>
+            <textarea readonly rows="3" class="code-box" style="width: 100%; margin-top: 0.25rem;">{{ keyPair.mlkem_sk_hex }}</textarea>
+          </div>
+
+          <button class="btn btn-primary" @click="handleGenerateKeyPair">
+            Regenerate Cryptographic Keys
+          </button>
         </div>
       </section>
     </main>
