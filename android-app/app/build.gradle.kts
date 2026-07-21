@@ -57,6 +57,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
+    // Biometric Step-Up Authorization
+    implementation("androidx.biometric:biometric:1.1.0")
     // JNA binding runtime for UniFFI
     implementation("net.java.dev.jna:jna:5.14.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

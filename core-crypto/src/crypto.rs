@@ -267,6 +267,85 @@ pub fn hash_clipboard_text(text: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Pad payload to standardized block sizes (256 B, 1024 B, 64 KB) to obscure metadata
+pub fn pad_payload(data: &[u8]) -> Result<Vec<u8>, KyberError> {
+    let orig_len = data.len();
+    if orig_len > 64 * 1024 - 4 {
+        return Err(KyberError::EncryptionFailed("Payload exceeds 64KB max padded block size".into()));
+    }
+
+    let target_size = if orig_len + 4 <= 256 {
+        256
+    } else if orig_len + 4 <= 1024 {
+        1024
+    } else {
+        64 * 1024
+    };
+
+    let mut padded = Vec::with_capacity(target_size);
+    let len_bytes = (orig_len as u32).to_be_bytes();
+    padded.extend_from_slice(&len_bytes);
+    padded.extend_from_slice(data);
+    padded.resize(target_size, 0u8);
+
+    Ok(padded)
+}
+
+/// Unpad standardized block back to original payload bytes
+pub fn unpad_payload(padded: &[u8]) -> Result<Vec<u8>, KyberError> {
+    if padded.len() < 4 {
+        return Err(KyberError::DecryptionFailed("Padded block too short".into()));
+    }
+    let mut len_bytes = [0u8; 4];
+    len_bytes.copy_from_slice(&padded[0..4]);
+    let orig_len = u32::from_be_bytes(len_bytes) as usize;
+
+    if orig_len + 4 > padded.len() {
+        return Err(KyberError::DecryptionFailed("Invalid padded length header".into()));
+    }
+
+    Ok(padded[4..4 + orig_len].to_vec())
+}
+
+/// Generate jittered dummy cover traffic heartbeat payload
+pub fn generate_cover_traffic_packet() -> Vec<u8> {
+    let mut dummy = vec![0u8; 256];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut dummy);
+    dummy
+}
+
+/// Last-Write-Wins Element-Set Conflict-Free Replicated Data Type (LWW-CRDT) for multi-device mesh
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LwwRegisterCRDT<T: Clone> {
+    pub value: T,
+    pub timestamp: u64,
+    pub node_id: String,
+}
+
+impl<T: Clone> LwwRegisterCRDT<T> {
+    pub fn new(value: T, node_id: String, timestamp: u64) -> Self {
+        Self {
+            value,
+            timestamp,
+            node_id,
+        }
+    }
+
+    /// Merge incoming CRDT state; returns true if incoming state superseded local state
+    pub fn merge(&mut self, incoming: LwwRegisterCRDT<T>) -> bool {
+        if incoming.timestamp > self.timestamp
+            || (incoming.timestamp == self.timestamp && incoming.node_id > self.node_id)
+        {
+            self.value = incoming.value;
+            self.timestamp = incoming.timestamp;
+            self.node_id = incoming.node_id;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Generate a 6-digit Short Authentication String (SAS) for out-of-band verification
 pub fn generate_sas_code(
     host_pk_bytes: &[u8],
@@ -384,5 +463,25 @@ mod tests {
         let sas2 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
         assert_eq!(sas1.len(), 6);
         assert_eq!(sas1, sas2);
+    }
+
+    #[test]
+    fn test_padding_and_unpadding() {
+        let original = b"Kyberpipe Cover Traffic Padding Test Payload";
+        let padded = pad_payload(original).unwrap();
+        assert_eq!(padded.len(), 256); // Fits into 256-byte block
+
+        let unpadded = unpad_payload(&padded).unwrap();
+        assert_eq!(original.to_vec(), unpadded);
+    }
+
+    #[test]
+    fn test_crdt_merge() {
+        let mut local_crdt = LwwRegisterCRDT::new("Initial State".to_string(), "node_a".to_string(), 100);
+        let remote_crdt = LwwRegisterCRDT::new("Updated State".to_string(), "node_b".to_string(), 200);
+
+        let updated = local_crdt.merge(remote_crdt);
+        assert!(updated);
+        assert_eq!(local_crdt.value, "Updated State");
     }
 }
