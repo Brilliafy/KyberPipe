@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod error;
 pub mod network;
 pub mod packets;
+pub mod telemetry;
 
 use error::KyberError;
 use network::PathMigrationManager;
@@ -315,6 +316,16 @@ pub fn generate_sas_code(
         .map_err(|e| KyberError::CryptoError(format!("Invalid SS hex: {e}")))?;
 
     crypto::generate_sas_code(&host_bytes, &client_bytes, &ss_bytes)
+}
+
+#[uniffi::export]
+pub fn toggle_flight_data_recorder(enabled: bool) {
+    telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
+}
+
+#[uniffi::export]
+pub fn dump_flight_data_recorder() -> String {
+    telemetry::GLOBAL_FLIGHT_RECORDER.dump_events_json()
 }
 
 #[uniffi::export]

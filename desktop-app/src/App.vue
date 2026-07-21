@@ -99,7 +99,18 @@ const telemetry = ref<TelemetryMetrics>({
 });
 
 const sasCode = ref("849-201");
-const neuralAnomalyEnabled = ref(false); // Off by default to preserve battery & performance
+const neuralAnomalyEnabled = ref(false); // Off by default
+const flightRecorderEnabled = ref(false); // Disabled by default for zero overhead
+
+const toggleFlightRecorder = async () => {
+  try {
+    const res = await invoke<string>("toggle_flight_recorder", { enabled: flightRecorderEnabled.value });
+    alert(res);
+    await refreshLogs();
+  } catch (e: any) {
+    alert("Flight recorder toggle error: " + e);
+  }
+};
 
 const toggleNeuralAnomaly = async () => {
   try {
@@ -318,6 +329,17 @@ onMounted(() => {
           </div>
           <p class="sas-desc">Confirm this 6-digit cryptographic authentication string matches your mobile companion app screen:</p>
           <div class="sas-code-display">{{ sasCode }}</div>
+        </div>
+
+        <!-- Flight Data Recorder Toggle Card -->
+        <div class="sas-card" style="background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(236, 72, 153, 0.15)); border-color: #ec4899;">
+          <div class="sas-header">
+            <h3>🛸 Sub-Nanosecond Flight Data Recorder (qlog)</h3>
+            <button class="btn-panic" style="background: rgba(236, 72, 153, 0.2); color: #ec4899; border-color: rgba(236, 72, 153, 0.4);" @click="toggleFlightRecorder">
+              {{ flightRecorderEnabled ? 'ACTIVE (qlog Ring Buffer)' : 'DISABLED (Zero Overhead)' }}
+            </button>
+          </div>
+          <p class="sas-desc">Lock-free sub-nanosecond binary event tracing ring buffer for post-mortem diagnostics. Disabled by default.</p>
         </div>
 
         <!-- Neural Anomaly Engine Toggle Card -->
