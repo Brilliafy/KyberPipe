@@ -309,7 +309,7 @@ fun MainScreen(
                             color = Color(0xFF94A3B8)
                         )
                         Text(
-                            text = pair.publicKeyHex.take(48) + "...",
+                            text = pair.mlkemPkHex.take(48) + "...",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFFC084FC)
