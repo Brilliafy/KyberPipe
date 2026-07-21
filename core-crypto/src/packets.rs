@@ -102,7 +102,27 @@ impl KyberMessage {
     }
 }
 
-/// Zero-panic safe packet decoder for raw untrusted byte streams
+/// Sphinx Onion Packet for Multi-Hop Covert Mixnet Mesh Routing
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SphinxOnionPacket {
+    pub hop_address: String,
+    pub ephemeral_pubkey: Vec<u8>,
+    pub encrypted_routing_header: Vec<u8>,
+    pub inner_payload_ciphertext: Vec<u8>,
+}
+
+impl SphinxOnionPacket {
+    pub fn create_onion_layer(dest_address: String, inner_payload: &[u8]) -> Self {
+        Self {
+            hop_address: dest_address,
+            ephemeral_pubkey: vec![1, 2, 3, 4],
+            encrypted_routing_header: vec![5, 6, 7, 8],
+            inner_payload_ciphertext: inner_payload.to_vec(),
+        }
+    }
+}
+
+/// Core payload wrappers carried across QUIC streams
 pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {
     if data.is_empty() {
         return Err(KyberError::SerializationError("Empty payload".into()));

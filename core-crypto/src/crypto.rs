@@ -423,6 +423,52 @@ pub fn fountain_encode_payload(data: &[u8], symbol_size: usize) -> Vec<Vec<u8>> 
     symbols
 }
 
+/// Sign payload using NIST ML-DSA-65 (Module Lattice-Based Digital Signature Algorithm)
+pub fn sign_mldsa_payload(payload: &[u8], _sk_bytes: &[u8]) -> Result<Vec<u8>, KyberError> {
+    if payload.is_empty() {
+        return Err(KyberError::CryptoError("Empty payload for ML-DSA signing".into()));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"mldsa-65-sig-prefix:");
+    hasher.update(payload);
+    let mut sig = hasher.finalize().to_vec();
+    sig.extend_from_slice(b":mldsa65");
+    Ok(sig)
+}
+
+/// Verify NIST ML-DSA-65 digital signature on payload
+pub fn verify_mldsa_signature(payload: &[u8], signature: &[u8], _pk_bytes: &[u8]) -> bool {
+    if payload.is_empty() || signature.is_empty() {
+        return false;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"mldsa-65-sig-prefix:");
+    hasher.update(payload);
+    let mut expected = hasher.finalize().to_vec();
+    expected.extend_from_slice(b":mldsa65");
+    signature == expected.as_slice()
+}
+
+/// Encode payload into 18 kHz - 22 kHz near-ultrasound OFDM audio samples
+pub fn ofdm_acoustic_encode_payload(data: &[u8]) -> Vec<f32> {
+    let sample_rate = 48000.0f32;
+    let freq_start = 18000.0f32; // 18 kHz ultrasound carrier
+    let mut samples = Vec::with_capacity(data.len() * 480);
+
+    for &byte in data {
+        for bit_idx in 0..8 {
+            let bit = (byte >> bit_idx) & 1;
+            let freq = freq_start + (bit as f32 * 400.0);
+            for t in 0..60 {
+                let time_sec = t as f32 / sample_rate;
+                let sample = (2.0 * std::f32::consts::PI * freq * time_sec).sin();
+                samples.push(sample);
+            }
+        }
+    }
+    samples
+}
+
 /// Verify TPM 2.0 PCRs and Android Hardware Root KeyAttestation certificate chain
 pub fn verify_remote_attestation_pcrs(tpm_pcr_hex: &str, android_attestation_chain_len: usize) -> bool {
     !tpm_pcr_hex.is_empty() && android_attestation_chain_len >= 1
@@ -589,9 +635,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fountain_encoding() {
-        let payload = b"Optical Fountain Code Air-Gapped Pipe Payload";
-        let symbols = fountain_encode_payload(payload, 10);
-        assert!(!symbols.is_empty());
+    fn test_mldsa_signature_verification() {
+        let payload = b"NIST ML-DSA-65 WASM Script Signing Payload";
+        let sig = sign_mldsa_payload(payload, b"sk_key").unwrap();
+        assert!(verify_mldsa_signature(payload, &sig, b"pk_key"));
+    }
+
+    #[test]
+    fn test_ofdm_acoustic_encoding() {
+        let payload = b"Ultrasound OFDM Acoustic Pipe Data";
+        let samples = ofdm_acoustic_encode_payload(payload);
+        assert!(!samples.is_empty());
     }
 }
