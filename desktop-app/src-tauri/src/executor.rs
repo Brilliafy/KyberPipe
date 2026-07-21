@@ -101,6 +101,7 @@ pub fn run_fallback_subprocess(script_path: &str, lux: f64) -> ScriptExecutionRe
 }
 
 /// WebAssembly WASI Capability-Bounded Executor
+#[allow(dead_code)]
 pub fn execute_wasm_script(wasm_bytes: &[u8]) -> Result<String, String> {
     if wasm_bytes.is_empty() {
         return Err("WASM byte array is empty".into());
