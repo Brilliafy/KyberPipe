@@ -1,0 +1,694 @@
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+
+interface SystemInfo {
+  is_flatpak: boolean;
+  platform: string;
+  app_version: string;
+  pqc_algorithm: String;
+}
+
+interface KeyPair {
+  public_key_hex: string;
+  secret_key_hex: string;
+}
+
+interface ScriptResult {
+  success: boolean;
+  output: string;
+  logs: string[];
+}
+
+interface SmsPacket {
+  sender: string;
+  body: string;
+  timestamp: number;
+}
+
+interface NotificationPacket {
+  title: string;
+  text: string;
+  app_package: string;
+  timestamp: number;
+}
+
+const currentTab = ref<"dashboard" | "crypto" | "light" | "clipboard" | "sms" | "logs">("dashboard");
+
+const systemInfo = ref<SystemInfo | null>(null);
+const keyPair = ref<KeyPair | null>(null);
+const logs = ref<string[]>([]);
+const connectionStatus = ref("Ready (Listening on UDP :9876)");
+
+// Ambient Light Sandbox State
+const currentLux = ref(12.5);
+const boaCode = ref(`// Sandboxed JavaScript VM Execution (Boa Engine)
+// No filesystem, network, or process access
+if (ambientLight < 15) {
+    log("Dark environment detected (" + ambientLight + " lux). Activating Cyberpunk Night Mode!");
+} else {
+    log("Bright environment (" + ambientLight + " lux). System nominal.");
+}`);
+const fallbackScriptPath = ref("/usr/local/bin/kyber_ambient_hook.sh");
+const scriptResult = ref<ScriptResult | null>(null);
+
+// Clipboard State
+const clipboardInput = ref("");
+const lastSyncStatus = ref("");
+
+// SMS & Notification State
+const smsList = ref<SmsPacket[]>([]);
+const notifList = ref<NotificationPacket[]>([]);
+const mockSmsSender = ref("+1 (555) 019-2831");
+const mockSmsBody = ref("Your Kyberpipe 2FA verification code is: 894-201");
+const mockNotifTitle = ref("Security Alert");
+const mockNotifText = ref("ML-KEM-768 Key Exchange initialized successfully.");
+const mockNotifApp = ref("com.kyberpipe.client");
+
+async function loadSystemInfo() {
+  try {
+    systemInfo.value = await invoke<SystemInfo>("get_system_info");
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function handleGenerateKeyPair() {
+  try {
+    keyPair.value = await invoke<KeyPair>("generate_keypair");
+    await refreshLogs();
+  } catch (e) {
+    alert("Key generation error: " + e);
+  }
+}
+
+async function handleRunBoaScript() {
+  try {
+    scriptResult.value = await invoke<ScriptResult>("execute_boa_script", {
+      scriptCode: boaCode.value,
+      lux: Number(currentLux.value),
+    });
+    await refreshLogs();
+  } catch (e) {
+    alert("Execution failed: " + e);
+  }
+}
+
+async function handleRunFallbackScript() {
+  try {
+    scriptResult.value = await invoke<ScriptResult>("execute_fallback_script", {
+      scriptPath: fallbackScriptPath.value,
+      lux: Number(currentLux.value),
+    });
+    await refreshLogs();
+  } catch (e) {
+    alert("Subprocess launch error: " + e);
+  }
+}
+
+async function handleSyncClipboard() {
+  if (!clipboardInput.value) return;
+  try {
+    const synced = await invoke<boolean>("sync_clipboard", { text: clipboardInput.value });
+    lastSyncStatus.value = synced
+      ? "Successfully synced to system clipboard!"
+      : "Suppressed duplicate clipboard payload (loop prevention hash match).";
+    await refreshLogs();
+  } catch (e) {
+    lastSyncStatus.value = "Error: " + e;
+  }
+}
+
+async function handlePushMockSms() {
+  try {
+    smsList.value = await invoke<SmsPacket[]>("push_sms_packet", {
+      sender: mockSmsSender.value,
+      body: mockSmsBody.value,
+      timestamp: Date.now(),
+    });
+    await refreshLogs();
+  } catch (e) {
+    alert(e);
+  }
+}
+
+async function handlePushMockNotification() {
+  try {
+    notifList.value = await invoke<NotificationPacket[]>("push_notification_packet", {
+      title: mockNotifTitle.value,
+      text: mockNotifText.value,
+      appPackage: mockNotifApp.value,
+      timestamp: Date.now(),
+    });
+    await invoke("send_desktop_notification", {
+      title: `[Mirrored] ${mockNotifTitle.value}`,
+      body: mockNotifText.value,
+    });
+    await refreshLogs();
+  } catch (e) {
+    alert(e);
+  }
+}
+
+async function refreshLogs() {
+  try {
+    logs.value = await invoke<string[]>("get_app_logs");
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+onMounted(() => {
+  loadSystemInfo();
+  handleGenerateKeyPair();
+});
+</script>
+
+<template>
+  <div class="app-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo-badge">⚡</div>
+        <div class="brand-text">
+          <h2>KYBERPIPE</h2>
+          <span class="subtext">POST-QUANTUM ENGINE</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button
+          :class="{ active: currentTab === 'dashboard' }"
+          @click="currentTab = 'dashboard'"
+        >
+          <span class="icon">📊</span> Overview
+        </button>
+        <button
+          :class="{ active: currentTab === 'crypto' }"
+          @click="currentTab = 'crypto'"
+        >
+          <span class="icon">🔐</span> PQC Key Vault
+        </button>
+        <button
+          :class="{ active: currentTab === 'light' }"
+          @click="currentTab = 'light'"
+        >
+          <span class="icon">💡</span> Ambient Light JS VM
+        </button>
+        <button
+          :class="{ active: currentTab === 'clipboard' }"
+          @click="currentTab = 'clipboard'"
+        >
+          <span class="icon">📋</span> Clipboard Sync
+        </button>
+        <button
+          :class="{ active: currentTab === 'sms' }"
+          @click="currentTab = 'sms'"
+        >
+          <span class="icon">📱</span> SMS & Notifications
+        </button>
+        <button
+          :class="{ active: currentTab === 'logs' }"
+          @click="currentTab = 'logs'; refreshLogs()"
+        >
+          <span class="icon">📜</span> System Logs
+        </button>
+      </nav>
+
+      <div class="sidebar-footer" v-if="systemInfo">
+        <div class="mode-badge" :class="systemInfo.is_flatpak ? 'flatpak' : 'native'">
+          {{ systemInfo.is_flatpak ? '📦 Flatpak Sandbox' : '💻 Native Linux' }}
+        </div>
+        <div class="version">v{{ systemInfo.app_version }}</div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Status Header -->
+      <header class="top-bar">
+        <div class="status-indicator">
+          <span class="dot green"></span>
+          <span class="status-text">{{ connectionStatus }}</span>
+        </div>
+
+        <div class="crypto-tag">
+          NIST ML-KEM-768 / ChaCha20-Poly1305
+        </div>
+      </header>
+
+      <!-- Dashboard Tab -->
+      <section v-if="currentTab === 'dashboard'" class="panel">
+        <h2 class="section-title">System Overview & Node Telemetry</h2>
+        <div class="cards-grid">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-icon">🛡️</span>
+              <h3>PQC Cryptography</h3>
+            </div>
+            <p class="card-value">ML-KEM-768</p>
+            <p class="card-desc">NIST FIPS 203 Key Encapsulation Engine Active</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-icon">🚀</span>
+              <h3>QUIC P2P Pipeline</h3>
+            </div>
+            <p class="card-value">Quinn 0.11</p>
+            <p class="card-desc">Multiplexed UDP Stream & Self-Signed Peer TLS Pinning</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-icon">🔒</span>
+              <h3>Execution Engine</h3>
+            </div>
+            <p class="card-value">Boa JS VM</p>
+            <p class="card-desc">Pure Rust Sandboxed JavaScript Interpreter</p>
+          </div>
+        </div>
+
+        <div class="quick-actions-box">
+          <h3>Quick Control Actions</h3>
+          <div class="button-group">
+            <button class="btn btn-primary" @click="handleGenerateKeyPair">
+              🔄 Regenerate Ephemeral PQC Keys
+            </button>
+            <button class="btn btn-secondary" @click="currentTab = 'light'">
+              💡 Test Ambient Light Sandbox
+            </button>
+            <button class="btn btn-secondary" @click="currentTab = 'sms'">
+              💬 Simulate Mobile Notification
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- PQC Key Management Tab -->
+      <section v-if="currentTab === 'crypto'" class="panel">
+        <h2 class="section-title">Post-Quantum Cryptographic Key Vault</h2>
+        <div class="key-card" v-if="keyPair">
+          <div class="key-field">
+            <label>Ephemeral ML-KEM-768 Public Key (Hex):</label>
+            <textarea readonly rows="3" class="code-box">{{ keyPair.public_key_hex }}</textarea>
+          </div>
+
+          <div class="key-field">
+            <label>Ephemeral ML-KEM-768 Secret Key (Hex):</label>
+            <textarea readonly rows="4" class="code-box">{{ keyPair.secret_key_hex }}</textarea>
+          </div>
+
+          <button class="btn btn-primary" @click="handleGenerateKeyPair">
+            🔄 Generate New Keypair
+          </button>
+        </div>
+      </section>
+
+      <!-- Ambient Light JS VM Tab -->
+      <section v-if="currentTab === 'light'" class="panel">
+        <h2 class="section-title">Ambient Light Sensor & Dynamic Execution</h2>
+
+        <div class="lux-controls">
+          <label>Simulated Ambient Light Level (Lux): <strong>{{ currentLux }} lux</strong></label>
+          <input type="range" min="0" max="500" step="0.5" v-model="currentLux" />
+        </div>
+
+        <div class="editor-section">
+          <h3>Boa Sandboxed JS Code (In-Memory VM Isolation)</h3>
+          <textarea v-model="boaCode" rows="6" class="code-editor"></textarea>
+          <button class="btn btn-accent" @click="handleRunBoaScript">
+            ▶️ Run Sandboxed JS Script
+          </button>
+        </div>
+
+        <div class="editor-section">
+          <h3>Fallback Subprocess (Strict Argument Passing)</h3>
+          <div class="input-row">
+            <input type="text" v-model="fallbackScriptPath" placeholder="/path/to/script.sh" />
+            <button class="btn btn-secondary" @click="handleRunFallbackScript">
+              🚀 Run Native Subprocess
+            </button>
+          </div>
+        </div>
+
+        <div class="result-box" v-if="scriptResult">
+          <h4>Execution Result (Success: {{ scriptResult.success }})</h4>
+          <pre class="console-output">{{ scriptResult.output }}</pre>
+          <div v-if="scriptResult.logs.length > 0">
+            <h5>Logs:</h5>
+            <ul>
+              <li v-for="(l, i) in scriptResult.logs" :key="i">{{ l }}</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Clipboard Sync Tab -->
+      <section v-if="currentTab === 'clipboard'" class="panel">
+        <h2 class="section-title">Bidirectional Clipboard Synchronization</h2>
+
+        <div class="clipboard-box">
+          <label>Enter Text to Sync Across Devices:</label>
+          <textarea v-model="clipboardInput" rows="3" placeholder="Type or paste content to sync..."></textarea>
+          <button class="btn btn-primary" @click="handleSyncClipboard">
+            📋 Push to System & Mobile Clipboard
+          </button>
+
+          <p class="status-msg" v-if="lastSyncStatus">{{ lastSyncStatus }}</p>
+        </div>
+      </section>
+
+      <!-- SMS & Notifications Tab -->
+      <section v-if="currentTab === 'sms'" class="panel">
+        <h2 class="section-title">Mirrored Communications</h2>
+
+        <div class="mirror-sections">
+          <div class="mirror-column">
+            <h3>📱 Mirrored SMS Messages</h3>
+            <div class="mock-form">
+              <input v-model="mockSmsSender" placeholder="Sender Phone" />
+              <input v-model="mockSmsBody" placeholder="Message Body" />
+              <button class="btn btn-secondary btn-sm" @click="handlePushMockSms">Simulate SMS</button>
+            </div>
+
+            <div class="message-list">
+              <div class="msg-card" v-for="(s, i) in smsList" :key="i">
+                <div class="msg-header"><strong>{{ s.sender }}</strong></div>
+                <div class="msg-body">{{ s.body }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mirror-column">
+            <h3>🔔 Mirrored Notifications</h3>
+            <div class="mock-form">
+              <input v-model="mockNotifTitle" placeholder="Notification Title" />
+              <input v-model="mockNotifText" placeholder="Notification Body" />
+              <button class="btn btn-secondary btn-sm" @click="handlePushMockNotification">Simulate Notification</button>
+            </div>
+
+            <div class="message-list">
+              <div class="msg-card" v-for="(n, i) in notifList" :key="i">
+                <div class="msg-header">
+                  <strong>{{ n.title }}</strong>
+                  <span class="app-pkg">{{ n.app_package }}</span>
+                </div>
+                <div class="msg-body">{{ n.text }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- System Logs Tab -->
+      <section v-if="currentTab === 'logs'" class="panel">
+        <h2 class="section-title">Real-Time System Log Stream</h2>
+        <div class="terminal-box">
+          <div v-for="(log, i) in logs" :key="i" class="log-line">
+            {{ log }}
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</template>
+
+<style>
+:root {
+  --bg-dark: #0b0d17;
+  --bg-card: rgba(22, 27, 46, 0.7);
+  --border-color: rgba(99, 102, 241, 0.2);
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --accent-cyan: #06b6d4;
+  --accent-indigo: #6366f1;
+  --accent-purple: #8b5cf6;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+body {
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+  overflow-x: hidden;
+}
+
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.1) 0%, transparent 40%),
+              radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
+}
+
+.sidebar {
+  width: 260px;
+  background: rgba(15, 20, 36, 0.85);
+  backdrop-filter: blur(16px);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem 1rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+.logo-badge {
+  font-size: 1.5rem;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+  border-radius: 12px;
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
+}
+
+.brand-text h2 {
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.subtext {
+  font-size: 0.65rem;
+  color: var(--accent-cyan);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.nav-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.nav-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.nav-menu button:hover {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--text-primary);
+}
+
+.nav-menu button.active {
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.25), rgba(6, 182, 212, 0.15));
+  color: #ffffff;
+  border-left: 3px solid var(--accent-cyan);
+}
+
+.sidebar-footer {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.8rem;
+}
+
+.mode-badge {
+  padding: 0.4rem 0.75rem;
+  border-radius: 20px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.mode-badge.flatpak {
+  background: rgba(139, 92, 246, 0.2);
+  color: #c084fc;
+}
+
+.mode-badge.native {
+  background: rgba(6, 182, 212, 0.2);
+  color: #38bdf8;
+}
+
+.version {
+  margin-top: 0.5rem;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 2rem;
+}
+
+.top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.dot.green {
+  background-color: #22c55e;
+  box-shadow: 0 0 10px #22c55e;
+}
+
+.crypto-tag {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid var(--border-color);
+  padding: 0.4rem 1rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.section-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.5rem;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 1.5rem;
+  backdrop-filter: blur(12px);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-value {
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: var(--accent-cyan);
+  margin-bottom: 0.4rem;
+}
+
+.card-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.btn {
+  padding: 0.75rem 1.25rem;
+  border-radius: 10px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-indigo), var(--accent-purple));
+  color: white;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.btn-accent {
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+  color: white;
+}
+
+.code-box, .code-editor {
+  width: 100%;
+  background: #060811;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 1rem;
+  color: #38bdf8;
+  font-family: monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.terminal-box {
+  background: #04060d;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1rem;
+  font-family: monospace;
+  height: 400px;
+  overflow-y: auto;
+  color: #4ade80;
+}
+
+.log-line {
+  line-height: 1.6;
+  font-size: 0.85rem;
+}
+</style>

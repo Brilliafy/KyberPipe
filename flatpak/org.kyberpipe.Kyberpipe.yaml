@@ -1,0 +1,22 @@
+id: org.kyberpipe.Kyberpipe
+runtime: org.gnome.Platform
+runtime-version: "46"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: kyberpipe
+finish-args:
+  # Network permissions for Wi-Fi Direct service discovery and WAN tunneling
+  - --share=network
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  # File access pipeline permissions
+  - --filesystem=xdg-downloads
+  # D-Bus talking access for system integration / clipboard mechanics
+  - --talk-name=org.freedesktop.portal.Desktop
+modules:
+  - name: kyberpipe
+    buildsystem: simple
+    build-commands:
+      - install -D -m 755 target/release/desktop-app /app/bin/kyberpipe
