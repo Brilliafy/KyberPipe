@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, PartialEq, Eq, uniffi::Error)]
 pub enum KyberError {
     #[error("Crypto error: {0}")]
     CryptoError(String),
@@ -27,5 +27,5 @@ pub enum KyberError {
     NetworkError(String),
 
     #[error("Invalid key length: expected {expected}, got {got}")]
-    InvalidKeyLength { expected: usize, got: usize },
+    InvalidKeyLength { expected: u64, got: u64 },
 }

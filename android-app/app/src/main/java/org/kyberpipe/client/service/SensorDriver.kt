@@ -10,11 +10,13 @@ import kotlin.math.abs
 class SensorDriver(
     private val sensorManager: SensorManager,
     private val deltaThresholdLux: Float = 2.0f,
+    private val minPollIntervalMs: Long = 500L,
     private val onLightChanged: (lux: Double, timestamp: Long) -> Unit
 ) : SensorEventListener {
 
     private var lightSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
     private var lastEmittedLux: Float = -1.0f
+    private var lastEmittedTimeMs: Long = 0L
 
     fun start() {
         lightSensor?.let { sensor ->
@@ -34,12 +36,17 @@ class SensorDriver(
         if (event == null || event.sensor.type != Sensor.TYPE_LIGHT) return
 
         val currentLux = event.values[0]
+        val now = System.currentTimeMillis()
 
-        // Delta Compression Filter: |L_new - L_last| >= Delta L
-        if (lastEmittedLux < 0 || abs(currentLux - lastEmittedLux) >= deltaThresholdLux) {
+        // 1. Delta Compression Check: |L_new - L_last| >= Delta L
+        val deltaMet = lastEmittedLux < 0 || abs(currentLux - lastEmittedLux) >= deltaThresholdLux
+        // 2. Sliding Time-Gate Check: (T_now - T_last) >= minPollIntervalMs
+        val timeMet = (now - lastEmittedTimeMs) >= minPollIntervalMs
+
+        if (deltaMet && timeMet) {
             lastEmittedLux = currentLux
-            val now = System.currentTimeMillis()
-            Log.d("KyberpipeSensorDriver", "Lux change detected: $currentLux lux")
+            lastEmittedTimeMs = now
+            Log.d("KyberpipeSensorDriver", "Debounced Lux change emitted: $currentLux lux")
             onLightChanged(currentLux.toDouble(), now)
         }
     }

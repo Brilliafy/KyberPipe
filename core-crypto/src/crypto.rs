@@ -5,62 +5,121 @@ use chacha20poly1305::{
 use hkdf::Hkdf;
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use crate::error::KyberError;
 
 pub const CHUNKS_SIZE: usize = 64 * 1024; // 64 KB per block chunk
 
-/// Holds raw ML-KEM-768 keypair
-pub struct PqKeyPair {
-    pub public_key_bytes: Vec<u8>,
-    pub secret_key_bytes: Vec<u8>,
+/// Holds raw Hybrid (X25519 + ML-KEM-768) keypair
+pub struct HybridKeyPair {
+    pub x25519_pk: [u8; 32],
+    pub x25519_sk: [u8; 32],
+    pub mlkem_pk: Vec<u8>,
+    pub mlkem_sk: Vec<u8>,
 }
 
-/// Holds ML-KEM-768 encapsulation result
-pub struct PqKemResult {
-    pub ciphertext_bytes: Vec<u8>,
-    pub shared_secret_bytes: Vec<u8>,
+/// Holds Hybrid encapsulation response
+pub struct HybridKemResult {
+    pub ciphertext_bytes: Vec<u8>, // Contains ephem X25519 PK (32 bytes) + ML-KEM CT (1088 bytes)
+    pub combined_shared_secret: Vec<u8>, // Derived from X25519 SS + ML-KEM SS
 }
 
-/// Generate a NIST FIPS 203 ML-KEM-768 keypair.
-pub fn generate_kyber_keypair() -> PqKeyPair {
-    let (pk, sk) = kyber768::keypair();
-    PqKeyPair {
-        public_key_bytes: pk.as_bytes().to_vec(),
-        secret_key_bytes: sk.as_bytes().to_vec(),
+/// Generate Hybrid (X25519 + NIST ML-KEM-768) keypair.
+pub fn generate_hybrid_keypair() -> HybridKeyPair {
+    // Generate classical ECC X25519 keypair
+    let mut rng = rand::thread_rng();
+    let x25519_sk = X25519StaticSecret::random_from_rng(&mut rng);
+    let x25519_pk = X25519PublicKey::from(&x25519_sk);
+
+    // Generate NIST PQC ML-KEM-768 keypair
+    let (mlkem_pk, mlkem_sk) = kyber768::keypair();
+
+    HybridKeyPair {
+        x25519_pk: x25519_pk.to_bytes(),
+        x25519_sk: x25519_sk.to_bytes(),
+        mlkem_pk: mlkem_pk.as_bytes().to_vec(),
+        mlkem_sk: mlkem_sk.as_bytes().to_vec(),
     }
 }
 
-/// Encapsulate a shared secret against the target peer's ML-KEM-768 public key.
-pub fn encapsulate_kyber(public_key_bytes: &[u8]) -> Result<PqKemResult, KyberError> {
-    let pk = kyber768::PublicKey::from_bytes(public_key_bytes).map_err(|_| {
+/// Encapsulate shared secret using Hybrid Key Exchange (X25519 Diffie-Hellman + ML-KEM-768).
+pub fn encapsulate_hybrid(
+    peer_x25519_pk_bytes: &[u8; 32],
+    peer_mlkem_pk_bytes: &[u8],
+) -> Result<HybridKemResult, KyberError> {
+    // 1. Classical X25519 ephemeral key exchange
+    let mut rng = rand::thread_rng();
+    let ephem_x25519_sk = X25519StaticSecret::random_from_rng(&mut rng);
+    let ephem_x25519_pk = X25519PublicKey::from(&ephem_x25519_sk);
+    let peer_x25519_pk = X25519PublicKey::from(*peer_x25519_pk_bytes);
+    let x25519_ss = ephem_x25519_sk.diffie_hellman(&peer_x25519_pk);
+
+    // 2. Post-Quantum ML-KEM-768 encapsulation
+    let peer_mlkem_pk = kyber768::PublicKey::from_bytes(peer_mlkem_pk_bytes).map_err(|_| {
         KyberError::EncapsulationFailed("Invalid ML-KEM-768 public key bytes".into())
     })?;
-    let (ss, ct) = kyber768::encapsulate(&pk);
-    Ok(PqKemResult {
-        ciphertext_bytes: ct.as_bytes().to_vec(),
-        shared_secret_bytes: ss.as_bytes().to_vec(),
+    let (mlkem_ss, mlkem_ct) = kyber768::encapsulate(&peer_mlkem_pk);
+
+    // 3. Combine both shared secrets: X25519 SS || ML-KEM SS
+    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
+    combined_ss.extend_from_slice(x25519_ss.as_bytes());
+    combined_ss.extend_from_slice(mlkem_ss.as_bytes());
+
+    // 4. Pack combined ciphertext: Ephemeral X25519 PK (32 bytes) || ML-KEM CT (1088 bytes)
+    let mut combined_ct = Vec::with_capacity(32 + mlkem_ct.as_bytes().len());
+    combined_ct.extend_from_slice(ephem_x25519_pk.as_bytes());
+    combined_ct.extend_from_slice(mlkem_ct.as_bytes());
+
+    Ok(HybridKemResult {
+        ciphertext_bytes: combined_ct,
+        combined_shared_secret: combined_ss,
     })
 }
 
-/// Decapsulate the ciphertext using the recipient's ML-KEM-768 secret key.
-pub fn decapsulate_kyber(
-    ciphertext_bytes: &[u8],
-    secret_key_bytes: &[u8],
+/// Decapsulate shared secret using Hybrid Key Exchange.
+pub fn decapsulate_hybrid(
+    combined_ct_bytes: &[u8],
+    my_x25519_sk_bytes: &[u8; 32],
+    my_mlkem_sk_bytes: &[u8],
 ) -> Result<Vec<u8>, KyberError> {
-    let ct = kyber768::Ciphertext::from_bytes(ciphertext_bytes).map_err(|_| {
+    if combined_ct_bytes.len() < 32 + kyber768::ciphertext_bytes() {
+        return Err(KyberError::DecapsulationFailed(
+            "Ciphertext shorter than expected hybrid bundle".into(),
+        ));
+    }
+
+    // 1. Split ciphertext into Ephemeral X25519 PK (32 bytes) and ML-KEM CT
+    let (ephem_x25519_pk_bytes, mlkem_ct_bytes) = combined_ct_bytes.split_at(32);
+    let mut ephem_x25519_arr = [0u8; 32];
+    ephem_x25519_arr.copy_from_slice(ephem_x25519_pk_bytes);
+    let ephem_x25519_pk = X25519PublicKey::from(ephem_x25519_arr);
+
+    // 2. Derive classical X25519 shared secret
+    let my_x25519_sk = X25519StaticSecret::from(*my_x25519_sk_bytes);
+    let x25519_ss = my_x25519_sk.diffie_hellman(&ephem_x25519_pk);
+
+    // 3. Decapsulate ML-KEM-768 shared secret
+    let mlkem_ct = kyber768::Ciphertext::from_bytes(mlkem_ct_bytes).map_err(|_| {
         KyberError::DecapsulationFailed("Invalid ML-KEM-768 ciphertext bytes".into())
     })?;
-    let sk = kyber768::SecretKey::from_bytes(secret_key_bytes).map_err(|_| {
+    let my_mlkem_sk = kyber768::SecretKey::from_bytes(my_mlkem_sk_bytes).map_err(|_| {
         KyberError::DecapsulationFailed("Invalid ML-KEM-768 secret key bytes".into())
     })?;
-    let ss = kyber768::decapsulate(&ct, &sk);
-    Ok(ss.as_bytes().to_vec())
+    let mlkem_ss = kyber768::decapsulate(&mlkem_ct, &my_mlkem_sk);
+
+    // 4. Combine shared secrets
+    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
+    combined_ss.extend_from_slice(x25519_ss.as_bytes());
+    combined_ss.extend_from_slice(mlkem_ss.as_bytes());
+
+    Ok(combined_ss)
 }
 
-/// Derive a 256-bit (32-byte) symmetric key using HKDF-SHA256 from the shared secret.
+/// Derive a 256-bit (32-byte) symmetric key using HKDF-SHA256 from combined shared secret.
 pub fn derive_session_key(
     shared_secret: &[u8],
     salt: &[u8],
@@ -99,37 +158,61 @@ pub fn decrypt_chacha20(
         .map_err(|e| KyberError::DecryptionFailed(format!("ChaCha20Poly1305 decrypt error: {e}")))
 }
 
-/// Generate a 96-bit nonce from a 64-bit sequence counter.
-pub fn generate_nonce_from_seq(seq: u64) -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    let seq_bytes = seq.to_be_bytes();
-    nonce[4..12].copy_from_slice(&seq_bytes);
-    nonce
+/// Normalize text to prevent OS line-ending and whitespace hash mismatches (\r\n -> \n, trim end)
+pub fn normalize_clipboard_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_end().to_string()
 }
 
-/// Thread-safe clipboard deduplicator ring buffer holding the last 3 synchronized SHA-256 hashes
+/// Compute SHA-256 hash of normalized text
+pub fn hash_clipboard_text(text: &str) -> String {
+    let normalized = normalize_clipboard_text(text);
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Thread-safe clipboard deduplicator ring buffer with AtomicBool state flag
 #[derive(Clone)]
 pub struct ClipboardDeduplicator {
     history: Arc<Mutex<VecDeque<String>>>,
+    is_processing_remote_update: Arc<AtomicBool>,
     max_history: usize,
 }
 
 impl ClipboardDeduplicator {
     pub fn new() -> Self {
         Self {
-            history: Arc::new(Mutex::new(VecDeque::with_capacity(3))),
-            max_history: 3,
+            history: Arc::new(Mutex::new(VecDeque::with_capacity(5))),
+            is_processing_remote_update: Arc::new(AtomicBool::new(false)),
+            max_history: 5,
         }
     }
 
-    /// Returns true if the hash is already present in the recent history (duplicate)
-    pub fn is_duplicate(&self, hash: &str) -> bool {
-        let guard = self.history.lock().unwrap();
-        guard.contains(&hash.to_string())
+    /// Sets the state flag before applying a remote clipboard update to suppress self-triggered local events
+    pub fn begin_remote_update(&self) -> bool {
+        self.is_processing_remote_update
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
-    /// Records a new hash into the rolling history
-    pub fn record_hash(&self, hash: String) {
+    /// Resets the remote update state flag
+    pub fn end_remote_update(&self) {
+        self.is_processing_remote_update.store(false, Ordering::SeqCst);
+    }
+
+    /// Returns true if currently processing a remote update or if text hash is in recent history
+    pub fn is_suppressed(&self, text: &str) -> bool {
+        if self.is_processing_remote_update.load(Ordering::SeqCst) {
+            return true;
+        }
+        let hash = hash_clipboard_text(text);
+        let guard = self.history.lock().unwrap();
+        guard.contains(&hash)
+    }
+
+    /// Records a new normalized text hash into the rolling history
+    pub fn record_text(&self, text: &str) {
+        let hash = hash_clipboard_text(text);
         let mut guard = self.history.lock().unwrap();
         if guard.contains(&hash) {
             return;
@@ -152,16 +235,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_crypto_operations() {
-        let pair = generate_kyber_keypair();
-        assert_eq!(pair.public_key_bytes.len(), kyber768::public_key_bytes());
-        assert_eq!(pair.secret_key_bytes.len(), kyber768::secret_key_bytes());
+    fn test_hybrid_key_exchange() {
+        let _alice_pair = generate_hybrid_keypair();
+        let bob_pair = generate_hybrid_keypair();
 
-        let res = encapsulate_kyber(&pair.public_key_bytes).unwrap();
-        assert_eq!(res.ciphertext_bytes.len(), kyber768::ciphertext_bytes());
+        let kem_res = encapsulate_hybrid(&bob_pair.x25519_pk, &bob_pair.mlkem_pk).unwrap();
 
-        let decapsulated = decapsulate_kyber(&res.ciphertext_bytes, &pair.secret_key_bytes).unwrap();
-        assert_eq!(res.shared_secret_bytes, decapsulated);
+        let alice_decapsulated_ss = decapsulate_hybrid(
+            &kem_res.ciphertext_bytes,
+            &bob_pair.x25519_sk,
+            &bob_pair.mlkem_sk,
+        )
+        .unwrap();
+
+        assert_eq!(kem_res.combined_shared_secret, alice_decapsulated_ss);
+    }
+
+    #[test]
+    fn test_clipboard_deduplication_and_normalization() {
+        let dedup = ClipboardDeduplicator::new();
+        let text1 = "Hello World\r\nKyberpipe Clipboard";
+        let text1_normalized = "Hello World\nKyberpipe Clipboard";
+
+        dedup.record_text(text1);
+        assert!(dedup.is_suppressed(text1_normalized));
+
+        // Test remote update suppression flag
+        assert!(dedup.begin_remote_update());
+        assert!(dedup.is_suppressed("Brand New Clipboard Text"));
+        dedup.end_remote_update();
+        assert!(!dedup.is_suppressed("Brand New Clipboard Text"));
     }
 }
-

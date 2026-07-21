@@ -10,8 +10,10 @@ interface SystemInfo {
 }
 
 interface KeyPair {
-  public_key_hex: string;
-  secret_key_hex: string;
+  x25519_pk_hex: string;
+  x25519_sk_hex: string;
+  mlkem_pk_hex: string;
+  mlkem_sk_hex: string;
 }
 
 interface ScriptResult {
@@ -288,20 +290,25 @@ onMounted(() => {
 
       <!-- PQC Key Management Tab -->
       <section v-if="currentTab === 'crypto'" class="panel">
-        <h2 class="section-title">Post-Quantum Cryptographic Key Vault</h2>
+        <h2 class="section-title">Hybrid Post-Quantum Cryptographic Key Vault</h2>
         <div class="key-card" v-if="keyPair">
           <div class="key-field">
-            <label>Ephemeral ML-KEM-768 Public Key (Hex):</label>
-            <textarea readonly rows="3" class="code-box">{{ keyPair.public_key_hex }}</textarea>
+            <label>Classical ECC X25519 Public Key (Hex):</label>
+            <textarea readonly rows="2" class="code-box">{{ keyPair.x25519_pk_hex }}</textarea>
           </div>
 
           <div class="key-field">
-            <label>Ephemeral ML-KEM-768 Secret Key (Hex):</label>
-            <textarea readonly rows="4" class="code-box">{{ keyPair.secret_key_hex }}</textarea>
+            <label>NIST ML-KEM-768 Public Key (Hex):</label>
+            <textarea readonly rows="3" class="code-box">{{ keyPair.mlkem_pk_hex }}</textarea>
+          </div>
+
+          <div class="key-field">
+            <label>NIST ML-KEM-768 Secret Key (Hex):</label>
+            <textarea readonly rows="3" class="code-box">{{ keyPair.mlkem_sk_hex }}</textarea>
           </div>
 
           <button class="btn btn-primary" @click="handleGenerateKeyPair">
-            🔄 Generate New Keypair
+            🔄 Generate New Hybrid Keypair
           </button>
         </div>
       </section>

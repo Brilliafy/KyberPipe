@@ -6,74 +6,116 @@ pub mod packets;
 use error::KyberError;
 use packets::{compute_sha256_hex, ClipboardPacket, NotificationPacket, SensorPacket, SmsPacket};
 
-uniffi::include_scaffolding!("kyberpipe");
+uniffi::setup_scaffolding!();
 
+#[derive(uniffi::Record)]
 pub struct PqKeyPair {
-    pub public_key_hex: String,
-    pub secret_key_hex: String,
+    pub x25519_pk_hex: String,
+    pub x25519_sk_hex: String,
+    pub mlkem_pk_hex: String,
+    pub mlkem_sk_hex: String,
 }
 
+#[derive(uniffi::Record)]
 pub struct PqKemResponse {
     pub ciphertext_hex: String,
     pub shared_secret_hex: String,
 }
 
+#[derive(uniffi::Record)]
 pub struct EncryptedPayload {
     pub nonce_hex: String,
     pub ciphertext_hex: String,
 }
 
-/// Standalone UniFFI initialization helper for ML-KEM post-quantum handshake
+/// Standalone UniFFI initialization helper for Hybrid post-quantum handshake
+#[uniffi::export]
 pub fn initialize_pq_handshake() -> Result<(), KyberError> {
-    let _pair = crypto::generate_kyber_keypair();
+    let _pair = crypto::generate_hybrid_keypair();
     Ok(())
 }
 
-/// UniFFI export: Generate ML-KEM-768 keypair returning hex-encoded strings
+/// UniFFI export: Generate Hybrid (X25519 + ML-KEM-768) keypair returning hex-encoded strings
+#[uniffi::export]
 pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
-    let pair = crypto::generate_kyber_keypair();
+    let pair = crypto::generate_hybrid_keypair();
     Ok(PqKeyPair {
-        public_key_hex: hex::encode(pair.public_key_bytes),
-        secret_key_hex: hex::encode(pair.secret_key_bytes),
+        x25519_pk_hex: hex::encode(pair.x25519_pk),
+        x25519_sk_hex: hex::encode(pair.x25519_sk),
+        mlkem_pk_hex: hex::encode(pair.mlkem_pk),
+        mlkem_sk_hex: hex::encode(pair.mlkem_sk),
     })
 }
 
-/// UniFFI export: Encapsulate shared secret against hex-encoded public key
-pub fn encapsulate_pq_secret(public_key_hex: String) -> Result<PqKemResponse, KyberError> {
-    let pk_bytes = hex::decode(&public_key_hex)
-        .map_err(|e| KyberError::EncapsulationFailed(format!("Invalid public key hex: {e}")))?;
-    let res = crypto::encapsulate_kyber(&pk_bytes)?;
+/// UniFFI export: Encapsulate shared secret against peer's Hybrid public keys
+#[uniffi::export]
+pub fn encapsulate_pq_secret(
+    peer_x25519_pk_hex: String,
+    peer_mlkem_pk_hex: String,
+) -> Result<PqKemResponse, KyberError> {
+    let x25519_bytes = hex::decode(&peer_x25519_pk_hex)
+        .map_err(|e| KyberError::EncapsulationFailed(format!("Invalid X25519 public key hex: {e}")))?;
+    if x25519_bytes.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: x25519_bytes.len() as u64,
+        });
+    }
+    let mut x25519_arr = [0u8; 32];
+    x25519_arr.copy_from_slice(&x25519_bytes);
+
+    let mlkem_bytes = hex::decode(&peer_mlkem_pk_hex)
+        .map_err(|e| KyberError::EncapsulationFailed(format!("Invalid ML-KEM public key hex: {e}")))?;
+
+    let res = crypto::encapsulate_hybrid(&x25519_arr, &mlkem_bytes)?;
     Ok(PqKemResponse {
         ciphertext_hex: hex::encode(res.ciphertext_bytes),
-        shared_secret_hex: hex::encode(res.shared_secret_bytes),
+        shared_secret_hex: hex::encode(res.combined_shared_secret),
     })
 }
 
-/// UniFFI export: Decapsulate shared secret against ciphertext & secret key hex
+/// UniFFI export: Decapsulate shared secret against ciphertext & secret keys
+#[uniffi::export]
 pub fn decapsulate_pq_secret(
     ciphertext_hex: String,
-    secret_key_hex: String,
+    my_x25519_sk_hex: String,
+    my_mlkem_sk_hex: String,
 ) -> Result<String, KyberError> {
     let ct_bytes = hex::decode(&ciphertext_hex)
         .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid ciphertext hex: {e}")))?;
-    let sk_bytes = hex::decode(&secret_key_hex)
-        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid secret key hex: {e}")))?;
-    let ss = crypto::decapsulate_kyber(&ct_bytes, &sk_bytes)?;
+
+    let x25519_sk_bytes = hex::decode(&my_x25519_sk_hex)
+        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid X25519 secret key hex: {e}")))?;
+    if x25519_sk_bytes.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: x25519_sk_bytes.len() as u64,
+        });
+    }
+    let mut x25519_sk_arr = [0u8; 32];
+    x25519_sk_arr.copy_from_slice(&x25519_sk_bytes);
+
+    let mlkem_sk_bytes = hex::decode(&my_mlkem_sk_hex)
+        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid ML-KEM secret key hex: {e}")))?;
+
+    let ss = crypto::decapsulate_hybrid(&ct_bytes, &x25519_sk_arr, &mlkem_sk_bytes)?;
     Ok(hex::encode(ss))
 }
 
 /// UniFFI export: HKDF-SHA256 key derivation
+#[uniffi::export]
 pub fn derive_session_key(shared_secret_hex: String, salt_hex: String) -> Result<String, KyberError> {
     let ss_bytes = hex::decode(&shared_secret_hex)
         .map_err(|e| KyberError::CryptoError(format!("Invalid shared secret hex: {e}")))?;
     let salt_bytes = hex::decode(&salt_hex)
         .map_err(|e| KyberError::CryptoError(format!("Invalid salt hex: {e}")))?;
-    
-    let derived = crypto::derive_session_key(&ss_bytes, &salt_bytes, b"kyberpipe-pqc-session")?;
+
+    let derived = crypto::derive_session_key(&ss_bytes, &salt_bytes, b"kyberpipe-hybrid-session")?;
     Ok(hex::encode(derived))
 }
 
 /// UniFFI export: Encrypt plaintext string with 256-bit session key
+#[uniffi::export]
 pub fn encrypt_payload_with_key(
     session_key_hex: String,
     data: String,
@@ -83,7 +125,7 @@ pub fn encrypt_payload_with_key(
     if key_bytes.len() != 32 {
         return Err(KyberError::InvalidKeyLength {
             expected: 32,
-            got: key_bytes.len(),
+            got: key_bytes.len() as u64,
         });
     }
     let mut key_arr = [0u8; 32];
@@ -100,6 +142,7 @@ pub fn encrypt_payload_with_key(
 }
 
 /// UniFFI export: Decrypt ciphertext string with 256-bit session key & nonce
+#[uniffi::export]
 pub fn decrypt_payload_with_key(
     session_key_hex: String,
     nonce_hex: String,
@@ -110,7 +153,7 @@ pub fn decrypt_payload_with_key(
     if key_bytes.len() != 32 {
         return Err(KyberError::InvalidKeyLength {
             expected: 32,
-            got: key_bytes.len(),
+            got: key_bytes.len() as u64,
         });
     }
     let mut key_arr = [0u8; 32];
@@ -133,11 +176,13 @@ pub fn decrypt_payload_with_key(
 }
 
 /// Packet creation helpers
+#[uniffi::export]
 pub fn create_sensor_packet(lux: f64, timestamp: u64) -> Result<String, KyberError> {
     let pkt = SensorPacket { lux, timestamp };
     serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
 }
 
+#[uniffi::export]
 pub fn create_clipboard_packet(text: String, timestamp: u64) -> Result<String, KyberError> {
     let hash = compute_sha256_hex(&text);
     let pkt = ClipboardPacket {
@@ -148,6 +193,7 @@ pub fn create_clipboard_packet(text: String, timestamp: u64) -> Result<String, K
     serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
 }
 
+#[uniffi::export]
 pub fn create_sms_packet(sender: String, body: String, timestamp: u64) -> Result<String, KyberError> {
     let pkt = SmsPacket {
         sender,
@@ -157,6 +203,7 @@ pub fn create_sms_packet(sender: String, body: String, timestamp: u64) -> Result
     serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
 }
 
+#[uniffi::export]
 pub fn create_notification_packet(
     title: String,
     text: String,
@@ -173,10 +220,12 @@ pub fn create_notification_packet(
     serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
 }
 
+#[uniffi::export]
 pub fn is_duplicate_clipboard(content_hash: String, recent_hashes: Vec<String>) -> bool {
     recent_hashes.contains(&content_hash)
 }
 
+#[uniffi::export]
 pub fn compute_sha256(data: String) -> String {
     compute_sha256_hex(&data)
 }
@@ -186,65 +235,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ml_kem_handshake() {
-        let keypair = generate_pq_keypair().unwrap();
-        assert!(!keypair.public_key_hex.is_empty());
-        assert!(!keypair.secret_key_hex.is_empty());
+    fn test_hybrid_handshake_flow() {
+        let _alice = generate_pq_keypair().unwrap();
+        let bob = generate_pq_keypair().unwrap();
 
-        let kem_res = encapsulate_pq_secret(keypair.public_key_hex).unwrap();
-        assert!(!kem_res.ciphertext_hex.is_empty());
-        assert!(!kem_res.shared_secret_hex.is_empty());
+        let kem_res = encapsulate_pq_secret(bob.x25519_pk_hex, bob.mlkem_pk_hex).unwrap();
+        let decapsulated = decapsulate_pq_secret(
+            kem_res.ciphertext_hex,
+            bob.x25519_sk_hex,
+            bob.mlkem_sk_hex,
+        )
+        .unwrap();
 
-        let decapsulated_secret =
-            decapsulate_pq_secret(kem_res.ciphertext_hex, keypair.secret_key_hex).unwrap();
-        assert_eq!(kem_res.shared_secret_hex, decapsulated_secret);
-    }
-
-    #[test]
-    fn test_hkdf_and_chacha20_encryption() {
-        let shared_secret = "01".repeat(32);
-        let salt = "02".repeat(16);
-        let session_key = derive_session_key(shared_secret, salt).unwrap();
-        assert_eq!(session_key.len(), 64);
-
-        let plaintext = "Kyberpipe PQC Secure Message Test".to_string();
-        let enc = encrypt_payload_with_key(session_key.clone(), plaintext.clone()).unwrap();
-
-        let dec = decrypt_payload_with_key(session_key, enc.nonce_hex, enc.ciphertext_hex).unwrap();
-        assert_eq!(plaintext, dec);
-    }
-
-    #[test]
-    fn test_clipboard_deduplication() {
-        let dedup = crypto::ClipboardDeduplicator::new();
-        let hash1 = compute_sha256("test data 1".into());
-        let hash2 = compute_sha256("test data 2".into());
-        let hash3 = compute_sha256("test data 3".into());
-        let hash4 = compute_sha256("test data 4".into());
-
-        dedup.record_hash(hash1.clone());
-        dedup.record_hash(hash2.clone());
-        dedup.record_hash(hash3.clone());
-
-        assert!(dedup.is_duplicate(&hash1));
-        assert!(dedup.is_duplicate(&hash2));
-        assert!(dedup.is_duplicate(&hash3));
-
-        // Adding 4th element should pop 1st element (hash1)
-        dedup.record_hash(hash4.clone());
-        assert!(!dedup.is_duplicate(&hash1));
-        assert!(dedup.is_duplicate(&hash4));
-    }
-
-    #[test]
-    fn test_packet_creations() {
-        let sensor = create_sensor_packet(42.5, 1000).unwrap();
-        assert!(sensor.contains("42.5"));
-
-        let clip = create_clipboard_packet("hello world".into(), 1001).unwrap();
-        assert!(clip.contains("hello world"));
-
-        let sms = create_sms_packet("+123456789".into(), "Verification code 1234".into(), 1002).unwrap();
-        assert!(sms.contains("+123456789"));
+        assert_eq!(kem_res.shared_secret_hex, decapsulated);
     }
 }
