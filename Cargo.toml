@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "core-crypto",
-    "desktop-app/src-tauri"
+    "desktop-app/src-tauri",
+    "kyberpipe-cli"
 ]
 resolver = "2"

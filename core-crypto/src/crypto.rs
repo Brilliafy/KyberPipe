@@ -708,3 +708,16 @@ mod tests {
         assert!(!pattern.is_empty());
     }
 }
+
+#[cfg(test)]
+proptest::proptest! {
+    #[test]
+    fn test_packet_padding_roundtrip_proptest(ref data in "\\PC*") {
+        let original = data.as_bytes();
+        if original.len() < 60000 {
+            let padded = pad_payload(original).unwrap();
+            let unpadded = unpad_payload(&padded).unwrap();
+            assert_eq!(original, unpadded.as_slice());
+        }
+    }
+}
