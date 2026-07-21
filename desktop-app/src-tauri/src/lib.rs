@@ -29,6 +29,7 @@ pub fn run() {
             store_key_in_secure_enclave,
             check_stepup_authorization,
             merge_mesh_crdt_state,
+            stream_binary_file,
             toggle_neural_anomaly_engine,
             bind_pkcs11_yubikey_hardware_token,
             execute_enclave_confidential_wasm,

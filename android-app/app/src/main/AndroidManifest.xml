@@ -53,6 +53,18 @@
             </intent-filter>
         </service>
 
+        <!-- Android Quick Settings Tile Service -->
+        <service
+            android:name=".service.KyberTileService"
+            android:icon="@android:drawable/ic_menu_compass"
+            android:label="Kyberpipe PQC Core"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".receiver.SmsReceiver"
             android:permission="android.permission.BROADCAST_SMS"

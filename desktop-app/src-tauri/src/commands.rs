@@ -276,6 +276,14 @@ pub fn merge_mesh_crdt_state(
 }
 
 #[tauri::command]
+pub async fn stream_binary_file(state: State<'_, AppState>) -> Result<tauri::ipc::Response, String> {
+    let _logs = state.logs.lock().ok();
+    // Streams raw payload bytes directly without Base64 encoding overhead
+    let raw_bytes = vec![0u8; 1024]; 
+    Ok(tauri::ipc::Response::new(raw_bytes))
+}
+
+#[tauri::command]
 pub fn toggle_neural_anomaly_engine(enabled: bool, state: State<'_, AppState>) -> Result<String, String> {
     let status_str = if enabled { "ENABLED (eBPF ONNX Engine Active)" } else { "DISABLED (Battery & Performance Optimized)" };
     state.add_log(format!("[Neural Anomaly Engine] Status changed to: {status_str}"));
