@@ -44,15 +44,15 @@ class SensorDriver(
         val now = System.currentTimeMillis()
 
         // 1. Delta Compression Check: |L_new - L_last| >= Delta L
-        val deltaMet = lastEmittedLux < 0 || abs(currentLux - lastEmittedLux) >= deltaThresholdLux
+        val deltaMet = lastLightValue < 0 || abs(currentLux - lastLightValue) >= deltaThresholdLux
         // 2. Sliding Time-Gate Check: (T_now - T_last) >= minPollIntervalMs
-        val timeMet = (now - lastEmittedTimeMs) >= minPollIntervalMs
+        val timeMet = (now - lastEmitTimestampMs) >= minPollIntervalMs
 
         if (deltaMet && timeMet) {
-            lastEmittedLux = currentLux
-            lastEmittedTimeMs = now
+            lastLightValue = currentLux
+            lastEmitTimestampMs = now
             Log.d("KyberpipeSensorDriver", "Debounced Lux change emitted: $currentLux lux")
-            onLightChanged(currentLux.toDouble(), now)
+            onLightChanged(currentLux, now)
         }
     }
 

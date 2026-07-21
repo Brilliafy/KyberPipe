@@ -35,7 +35,7 @@ class PipeService : Service() {
             minPollIntervalMs = 500L
         ) { lux, timestamp ->
             try {
-                val sensorJson = uniffi.kyberpipe.createSensorPacket(lux, timestamp.toULong())
+                val sensorJson = uniffi.kyberpipe.createSensorPacket(lux.toDouble(), timestamp.toULong())
                 Log.d("KyberpipeService", "Sensor packet emitted: $sensorJson")
             } catch (e: Exception) {
                 Log.e("KyberpipeService", "Failed to create sensor packet: ${e.message}")

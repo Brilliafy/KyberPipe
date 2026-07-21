@@ -1,9 +1,17 @@
 package org.kyberpipe.client
 
+import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -20,13 +28,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.kyberpipe.client.service.PipeService
-import uniffi.kyberpipe.PqKeyPair
-import uniffi.kyberpipe.generatePqKeypair
+import uniffi.kyberpipe.*
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate()
+        super.onCreate(savedInstanceState)
 
         setContent {
             KyberpipeTheme {
@@ -75,6 +82,28 @@ fun MainScreen(
     var serviceRunning by remember { mutableStateOf(false) }
     var clipboardInput by remember { mutableStateOf("") }
     var clipboardStatus by remember { mutableStateOf("") }
+    var ambientLux by remember { mutableStateOf(250.0f) }
+
+    val context = LocalContext.current
+
+    DisposableEffect(Unit) {
+        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                event?.let {
+                    ambientLux = it.values[0]
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        lightSensor?.let {
+            sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+        onDispose {
+            sensorManager.unregisterListener(listener)
+        }
+    }
 
     LaunchedEffect(Unit) {
         try {
@@ -204,8 +233,8 @@ fun MainScreen(
                     Button(
                         onClick = {
                             try {
-                                uniffi.kyberpipe.triggerPanicHardwareWipe()
-                                Toast.makeText(this@MainActivity, "Hardware KeyStore Purged & RAM Zeroized!", Toast.LENGTH_LONG).show()
+                                triggerPanicHardwareWipe()
+                                Toast.makeText(context, "Hardware KeyStore Purged & RAM Zeroized!", Toast.LENGTH_LONG).show()
                             } catch (e: Exception) {
                                 Log.e("KyberpipePanic", "Panic error: ${e.message}")
                             }
@@ -331,8 +360,8 @@ fun MainScreen(
                         onClick = {
                             if (clipboardInput.isNotEmpty()) {
                                 try {
-                                    val hash = uniffi.kyberpipe.computeSha256(clipboardInput)
-                                    val pkt = uniffi.kyberpipe.createClipboardPacket(
+                                    val hash = computeSha256(clipboardInput)
+                                    val pkt = createClipboardPacket(
                                         clipboardInput,
                                         System.currentTimeMillis().toULong()
                                     )
