@@ -29,6 +29,8 @@ pub fn run() {
             store_key_in_secure_enclave,
             check_stepup_authorization,
             merge_mesh_crdt_state,
+            bind_pkcs11_yubikey_hardware_token,
+            execute_enclave_confidential_wasm,
             generate_shamir_recovery_shares,
             reconstruct_key_from_shamir_shares,
             trigger_panic_self_destruct,

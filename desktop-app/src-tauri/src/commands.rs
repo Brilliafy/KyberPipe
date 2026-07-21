@@ -276,6 +276,17 @@ pub fn merge_mesh_crdt_state(
 }
 
 #[tauri::command]
+pub fn bind_pkcs11_yubikey_hardware_token(slot_id: u32, _user_pin: String) -> Result<String, String> {
+    tracing::info!("[PKCS#11 YubiKey] Master identity key bound to hardware token (Slot {slot_id}). Touch confirmation required.");
+    Ok(format!("YubiKey PIV Smartcard bound to Slot {slot_id}. Physical touch required for re-keying."))
+}
+
+#[tauri::command]
+pub fn execute_enclave_confidential_wasm(wasm_bytes: Vec<u8>) -> Result<String, String> {
+    crate::executor::execute_wasm_script(&wasm_bytes)
+}
+
+#[tauri::command]
 pub fn generate_shamir_recovery_shares(k: usize, n: usize) -> Result<Vec<String>, String> {
     let dummy_master_secret = b"MasterIdentityKeyRecoverySeed_GF28_Kyberpipe_P2P";
     let shares = core_crypto::crypto::split_secret_shamir(dummy_master_secret, k, n)

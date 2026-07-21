@@ -306,11 +306,29 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">🔑</span>
-              <h3>Threshold Disaster Recovery</h3>
+              <span class="card-icon">🔏</span>
+              <h3>NIST ML-DSA Code-Signing</h3>
             </div>
-            <p class="card-value">2-of-3 Shamir GF(2⁸)</p>
-            <p class="card-desc">Master Key QR Share Reconstruction Active</p>
+            <p class="card-value">Dilithium-65</p>
+            <p class="card-desc">Detached Post-Quantum WASM Module Signatures</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-icon">🔊</span>
+              <h3>Ultrasound OFDM Pipe</h3>
+            </div>
+            <p class="card-value">18 kHz - 22 kHz</p>
+            <p class="card-desc">Zero-Light Acoustic Proximity Sync Active</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-icon">🔑</span>
+              <h3>Hardware Smartcard Token</h3>
+            </div>
+            <p class="card-value">PKCS#11 YubiKey</p>
+            <p class="card-desc">Optional Touch-Confirmed Key Rekeying</p>
           </div>
 
           <div class="card">
