@@ -3,7 +3,7 @@ use crate::executor::{run_boa_sandboxed_script, run_fallback_subprocess, ScriptE
 use crate::portal::{is_flatpak, send_notification, sync_clipboard_text};
 use crate::state::AppState;
 use core_crypto::packets::{NotificationPacket, SensorPacket, SmsPacket};
-use core_crypto::{compute_sha256, generate_pq_keypair};
+use core_crypto::generate_pq_keypair;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -16,8 +16,10 @@ pub struct SystemInfo {
 
 #[derive(Serialize)]
 pub struct KeyPairDTO {
-    pub public_key_hex: String,
-    pub secret_key_hex: String,
+    pub x25519_pk_hex: String,
+    pub x25519_sk_hex: String,
+    pub mlkem_pk_hex: String,
+    pub mlkem_sk_hex: String,
 }
 
 #[tauri::command]
@@ -26,7 +28,7 @@ pub fn get_system_info() -> SystemInfo {
         is_flatpak: is_flatpak(),
         platform: std::env::consts::OS.to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        pqc_algorithm: "NIST FIPS 203 ML-KEM-768 & ChaCha20-Poly1305".to_string(),
+        pqc_algorithm: "Hybrid X25519 + NIST ML-KEM-768 & ChaCha20-Poly1305".to_string(),
     }
 }
 
@@ -34,13 +36,15 @@ pub fn get_system_info() -> SystemInfo {
 pub fn generate_keypair(state: State<'_, AppState>) -> Result<KeyPairDTO, String> {
     let pair = generate_pq_keypair().map_err(|e| e.to_string())?;
     let dto = KeyPairDTO {
-        public_key_hex: pair.public_key_hex.clone(),
-        secret_key_hex: pair.secret_key_hex.clone(),
+        x25519_pk_hex: pair.x25519_pk_hex.clone(),
+        x25519_sk_hex: pair.x25519_sk_hex.clone(),
+        mlkem_pk_hex: pair.mlkem_pk_hex.clone(),
+        mlkem_sk_hex: pair.mlkem_sk_hex.clone(),
     };
     if let Ok(mut lock) = state.keypair.lock() {
         *lock = Some(pair);
     }
-    state.add_log("[PQC] Generated new ML-KEM-768 keypair".to_string());
+    state.add_log("[PQC] Generated Hybrid Keypair (X25519 + ML-KEM-768)".to_string());
     Ok(dto)
 }
 
@@ -70,12 +74,11 @@ pub fn execute_fallback_script(
 
 #[tauri::command]
 pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let hash = compute_sha256(text.clone());
-    if state.dedup.is_duplicate(&hash) {
-        state.add_log("[Clipboard] Suppressed duplicate sync loop".to_string());
+    if state.dedup.is_suppressed(&text) {
+        state.add_log("[Clipboard] Suppressed duplicate or loop-back clipboard sync".to_string());
         return Ok(false);
     }
-    state.dedup.record_hash(hash);
+    state.dedup.record_text(&text);
     sync_clipboard_text(&text)?;
     state.add_log(format!("[Clipboard] Synced: \"{}\"", &text.chars().take(30).collect::<String>()));
     Ok(true)

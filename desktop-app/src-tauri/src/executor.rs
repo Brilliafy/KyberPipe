@@ -20,6 +20,9 @@ pub fn run_boa_sandboxed_script(script_code: &str, lux: f64) -> ScriptExecutionR
 
     let mut context = Context::default();
 
+    // Set loop iteration limit to prevent infinite loops (e.g. while(true) {})
+    context.runtime_limits_mut().set_loop_iteration_limit(100_000);
+
     // Inject ambientLight global variable
     let _ = context.register_global_property(
         js_string!("ambientLight"),

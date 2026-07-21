@@ -24,6 +24,8 @@ rcgen = "0.13"
 # Post-Quantum Cryptography implementations (NIST-approved ML-KEM / Kyber)
 pqcrypto-kyber = "0.8"
 pqcrypto-traits = "0.3"
+# Classical ECC X25519 fallback for hybrid KEM
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 # Key derivation and hashing
 hkdf = "0.12"
 sha2 = "0.10"
