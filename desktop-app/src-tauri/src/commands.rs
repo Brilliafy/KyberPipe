@@ -5,6 +5,7 @@ use crate::state::AppState;
 use core_crypto::packets::{NotificationPacket, SensorPacket, SmsPacket};
 use core_crypto::generate_pq_keypair;
 use serde::Serialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
 pub struct SystemInfo {
@@ -145,6 +146,7 @@ pub fn push_notification_packet(
     state: State<'_, AppState>,
 ) -> Vec<NotificationPacket> {
     let pkt = NotificationPacket {
+        sbn_key: format!("{app_package}_{timestamp}"),
         title: title.clone(),
         text,
         app_package: app_package.clone(),
@@ -161,6 +163,40 @@ pub fn push_notification_packet(
     } else {
         vec![]
     }
+}
+
+#[tauri::command]
+pub fn send_outbound_sms(
+    recipient: String,
+    body: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state.add_log(format!("[Outbound SMS] Dispatching to {recipient}: {body}"));
+    core_crypto::create_outbound_sms_packet(recipient, body, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn trigger_notification_action(
+    sbn_key: String,
+    action_index: u32,
+    action_title: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state.add_log(format!("[Notification Action] Triggered action '{action_title}' on {sbn_key}"));
+    core_crypto::create_notification_action_packet(sbn_key, action_index, action_title, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn send_hardware_command(
+    command_type: String,
+    payload_json: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state.add_log(format!("[Hardware Command] Dispatching: {command_type}"));
+    core_crypto::create_hardware_command_packet(command_type, payload_json, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

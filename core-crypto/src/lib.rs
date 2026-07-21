@@ -4,7 +4,11 @@ pub mod network;
 pub mod packets;
 
 use error::KyberError;
-use packets::{compute_sha256_hex, ClipboardPacket, NotificationPacket, SensorPacket, SmsPacket};
+use network::PathMigrationManager;
+use packets::{
+    compute_sha256_hex, BinaryClipboardPacket, ClipboardPacket, HardwareCommandPacket,
+    NotificationActionPacket, NotificationPacket, OutboundSmsPacket, SensorPacket, SmsPacket,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -26,6 +30,12 @@ pub struct PqKemResponse {
 pub struct EncryptedPayload {
     pub nonce_hex: String,
     pub ciphertext_hex: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct PathChallengeResult {
+    pub challenge_token: String,
+    pub expected_response: String,
 }
 
 /// Standalone UniFFI initialization helper for Hybrid post-quantum handshake
@@ -194,9 +204,35 @@ pub fn create_clipboard_packet(text: String, timestamp: u64) -> Result<String, K
 }
 
 #[uniffi::export]
+pub fn create_binary_clipboard_packet(
+    mime_type: String,
+    data_base64: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let hash = compute_sha256_hex(&data_base64);
+    let pkt = BinaryClipboardPacket {
+        mime_type,
+        data_base64,
+        hash,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
 pub fn create_sms_packet(sender: String, body: String, timestamp: u64) -> Result<String, KyberError> {
     let pkt = SmsPacket {
         sender,
+        body,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_outbound_sms_packet(recipient: String, body: String, timestamp: u64) -> Result<String, KyberError> {
+    let pkt = OutboundSmsPacket {
+        recipient,
         body,
         timestamp,
     };
@@ -211,6 +247,7 @@ pub fn create_notification_packet(
     timestamp: u64,
 ) -> Result<String, KyberError> {
     let pkt = NotificationPacket {
+        sbn_key: format!("{app_package}_{timestamp}"),
         title,
         text,
         app_package,
@@ -218,6 +255,50 @@ pub fn create_notification_packet(
         timestamp,
     };
     serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_notification_action_packet(
+    sbn_key: String,
+    action_index: u32,
+    action_title: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = NotificationActionPacket {
+        sbn_key,
+        action_index,
+        action_title,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_hardware_command_packet(
+    command_type: String,
+    payload_json: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = HardwareCommandPacket {
+        command_type,
+        payload_json,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn generate_path_challenge_tokens() -> PathChallengeResult {
+    let (challenge_token, expected_response) = PathMigrationManager::create_path_challenge();
+    PathChallengeResult {
+        challenge_token,
+        expected_response,
+    }
+}
+
+#[uniffi::export]
+pub fn verify_path_response_token(challenge_token: String, response_token: String) -> bool {
+    PathMigrationManager::verify_path_response(&challenge_token, &response_token)
 }
 
 #[uniffi::export]

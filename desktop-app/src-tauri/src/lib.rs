@@ -20,6 +20,9 @@ pub fn run() {
             push_sensor_reading,
             push_sms_packet,
             push_notification_packet,
+            send_outbound_sms,
+            trigger_notification_action,
+            send_hardware_command,
             get_connection_status,
             get_app_logs,
         ])
