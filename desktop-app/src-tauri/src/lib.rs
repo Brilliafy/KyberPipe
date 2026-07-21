@@ -26,6 +26,8 @@ pub fn run() {
             get_telemetry_metrics,
             generate_sas_pairing_code,
             store_key_in_secure_enclave,
+            check_stepup_authorization,
+            merge_mesh_crdt_state,
             get_connection_status,
             get_app_logs,
         ])

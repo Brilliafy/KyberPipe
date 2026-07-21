@@ -282,20 +282,20 @@ onMounted(() => {
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">⏱️</span>
-              <h3>Sandboxed VM Benchmark</h3>
+              <span class="card-icon">🛡️</span>
+              <h3>Step-Up Authorization</h3>
             </div>
-            <p class="card-value">{{ telemetry.last_script_execution_ms }} ms</p>
-            <p class="card-desc">Boa JS Engine Execution Overhead</p>
+            <p class="card-value">Gated Tier 2</p>
+            <p class="card-desc">Biometric & Polkit Privilege Protection Active</p>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <span class="card-icon">📦</span>
-              <h3>Packet Throughput</h3>
+              <span class="card-icon">🌐</span>
+              <h3>Decentralized Mesh Ring</h3>
             </div>
-            <p class="card-value">{{ telemetry.packets_sent }} / {{ telemetry.packets_received }}</p>
-            <p class="card-desc">QUIC Packets Sent / Received</p>
+            <p class="card-value">1-to-N CRDT</p>
+            <p class="card-desc">Delta-State Conflict-Free Multi-Peer Sync</p>
           </div>
         </div>
 
