@@ -7,7 +7,6 @@ import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
-import android.annotation.SuppressLint
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -41,7 +40,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 @Composable
-@SuppressLint("UnsafeOptInUsageError")
 fun QrCodeScannerView(
     onQrScanned: (String) -> Unit,
     onClose: () -> Unit
