@@ -11,6 +11,9 @@ jobs:
   rust-check-and-test:
     name: Rust Core & Property Tests (x86_64 / ARM64)
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
@@ -24,12 +27,16 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Rust Formatting & Clippy Lints
-        run: |
-          cargo fmt --check
-          cargo clippy --workspace -- -D warnings
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
 
-      - name: Run Core Unit & Proptest Property Tests
+      - name: Rust Formatting
+        run: cargo fmt --check
+
+      - name: Clippy Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Core Unit & Proptests
         run: cargo test --workspace
 
   desktop-frontend-check:
