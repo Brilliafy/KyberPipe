@@ -160,6 +160,7 @@ fun FileManagerTab(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Button(
+<<<<<<< HEAD
                             onClick = {
                                 onPermissionRequest()
                                 MainScope().launch {
@@ -167,6 +168,9 @@ fun FileManagerTab(
                                     refreshKey++
                                 }
                             },
+=======
+                            onClick = onPermissionRequest,
+>>>>>>> origin/main
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                         ) {
