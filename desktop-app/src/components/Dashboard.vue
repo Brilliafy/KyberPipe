@@ -1,25 +1,51 @@
 <script setup lang="ts">
 import { ref } from "vue";
 
+interface ClipboardRecord {
+  id: string;
+  text: string;
+  source: "pc" | "phone";
+  timestamp: number;
+}
+
+interface UnifiedNotification {
+  id: string;
+  source: string;
+  title: string;
+  body: string;
+  appPackage: string;
+  timestamp: string;
+  type: "local" | "remote";
+}
+
 const props = defineProps<{
+  isPaired: boolean;
   sasCode: string;
-  wifiDirectActive: boolean;
-  lanActive: boolean;
-  resolvedPublicIp: string;
   pairingConfigJson: string;
+  clipboardItems: ClipboardRecord[];
+  displayNotifications: UnifiedNotification[];
+  currentLux: number;
+  fileAccessGrantedDesktop: boolean;
+  fileAccessGrantedPhone: boolean;
+  deviceName: string;
+  devicePicture: string;
+  pairedDeviceName: string;
+  pairedDevicePicture: string;
+  isConnected: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: "update:wifiDirectActive", val: boolean): void;
-  (e: "update:lanActive", val: boolean): void;
-  (e: "runStunHolePunch", stunHost: string): void;
   (e: "regenerateKeys"): void;
   (e: "navigate", tab: string): void;
+  (e: "completePairing", name: string, pic: string): void;
+  (e: "saveSettings"): void;
 }>();
 
-const stunHostInput = ref("stun.l.google.com:19302");
-const showPairingModal = ref(false);
+const showNameModal = ref(false);
+const inputDeviceName = ref("");
+const inputDevicePic = ref("");
 const copyStatusText = ref("");
+const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const handleCopyLink = async () => {
   try {
@@ -32,153 +58,53 @@ const handleCopyLink = async () => {
     copyStatusText.value = "Failed to copy link";
   }
 };
+
+const handleMockHandshakeConnect = () => {
+  // Triggers the modal asking for the name & avatar
+  inputDeviceName.value = "Android Companion";
+  inputDevicePic.value = "";
+  showNameModal.value = true;
+};
+
+const submitPairingDetails = () => {
+  emit("completePairing", inputDeviceName.value.trim() || "Android Phone", inputDevicePic.value);
+  showNameModal.value = false;
+};
+
+const triggerFilePicker = () => {
+  if (fileInputRef.value) {
+    fileInputRef.value.click();
+  }
+};
+
+const handleFileChange = (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  if (target.files && target.files[0]) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      if (e.target?.result) {
+        inputDevicePic.value = e.target.result as string;
+      }
+    };
+    reader.readAsDataURL(target.files[0]);
+  }
+};
 </script>
 
 <template>
-  <section class="panel">
-    <h2 class="section-title">System Overview</h2>
-
-    <div class="dashboard-grid">
-      <!-- Left Column: Safe Pairing and Connection Hierarchy -->
-      <div class="dashboard-col">
-        <!-- 3-Tier Connectivity Manager -->
-        <div class="card connectivity-card">
-          <div class="card-header">
-            <h3>3-Tier Connectivity Manager</h3>
-            <span class="active-badge">Active Failover</span>
-          </div>
-          <p class="card-desc">Evaluate and control active network interfaces by precedence:</p>
-
-          <div class="interfaces-list">
-            <!-- Tier 1 -->
-            <div class="interface-item" :class="{ active: wifiDirectActive }">
-              <div class="interface-header">
-                <div class="interface-title">
-                  <span class="tier-number">Tier 1</span>
-                  <strong>Wi-Fi Direct (P2P Radio)</strong>
-                </div>
-                <div class="toggle-switch">
-                  <input 
-                    type="checkbox" 
-                    id="toggle-wifi-direct" 
-                    :checked="wifiDirectActive" 
-                    @change="emit('update:wifiDirectActive', ($event.target as HTMLInputElement).checked)" 
-                  />
-                  <label for="toggle-wifi-direct"></label>
-                </div>
-              </div>
-              <p class="interface-desc">Direct peer-to-peer radio connection. Highest speed, lowest latency (2.4ms).</p>
-            </div>
-
-            <!-- Tier 2 -->
-            <div class="interface-item" :class="{ active: !wifiDirectActive && lanActive }">
-              <div class="interface-header">
-                <div class="interface-title">
-                  <span class="tier-number">Tier 2</span>
-                  <strong>Local Network (mDNS LAN)</strong>
-                </div>
-                <div class="toggle-switch">
-                  <input 
-                    type="checkbox" 
-                    id="toggle-lan" 
-                    :checked="lanActive" 
-                    @change="emit('update:lanActive', ($event.target as HTMLInputElement).checked)" 
-                  />
-                  <label for="toggle-lan"></label>
-                </div>
-              </div>
-              <p class="interface-desc">Local discovery over shared Wi-Fi Access Point/LAN via UDP multicast beacon (8.5ms).</p>
-            </div>
-
-            <!-- Tier 3 -->
-            <div class="interface-item" :class="{ active: !wifiDirectActive && !lanActive }">
-              <div class="interface-header">
-                <div class="interface-title">
-                  <span class="tier-number">Tier 3</span>
-                  <strong>WireGuard WAN Tunnel Overlay</strong>
-                </div>
-                <span class="always-on">Fallback</span>
-              </div>
-              <p class="interface-desc">Seamless WAN backup using public STUN UDP hole-punching for off-grid remote sync (45.2ms).</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- STUN & UDP Hole Punching -->
-        <div class="card stun-card">
-          <h3>Decentralized STUN Endpoint Resolver</h3>
-          <p class="card-desc">Query public STUN servers for dynamic WAN reflexive ports without passing data through third-party servers.</p>
-          
-          <div class="stun-action-box">
-            <input 
-              type="text" 
-              class="input-text" 
-              v-model="stunHostInput" 
-              placeholder="e.g. stun.l.google.com:19302"
-            />
-            <button class="btn btn-secondary btn-sm" @click="emit('runStunHolePunch', stunHostInput)">
-              Query STUN & Punch
-            </button>
-          </div>
-
-          <div class="stun-result">
-            <span>Reflexive Public WAN Endpoint:</span>
-            <code class="code-badge">{{ resolvedPublicIp }}</code>
-          </div>
-        </div>
-      </div>
-
-      <!-- Right Column: Safe Pairing -->
-      <div class="dashboard-col">
-        <!-- Out-of-Band safe pairing SAS code -->
-        <div class="card sas-card">
-          <div class="sas-header">
-            <h3>Out-of-Band Safe Pairing</h3>
-            <span class="sas-badge">MITM Verified</span>
-          </div>
-          <p class="sas-desc">Confirm this 6-digit cryptographic authentication string matches your mobile companion app screen:</p>
-          <div class="sas-code-display">{{ sasCode }}</div>
-          
-          <div style="margin-top: 1.5rem; text-align: center;">
-            <button class="btn btn-primary" @click="showPairingModal = true">
-              Pair New Device (OOB Config)
-            </button>
-          </div>
-        </div>
-
-        <!-- Quick Actions -->
-        <div class="card quick-actions-box">
-          <h3>Quick Actions</h3>
-          <div class="button-group-vertical">
-            <button class="btn btn-secondary" @click="emit('regenerateKeys')">
-              Regenerate Ephemeral Keys
-            </button>
-            <button class="btn btn-secondary" @click="emit('navigate', 'light')">
-              Manage Automation Handlers
-            </button>
-            <button class="btn btn-secondary" @click="emit('navigate', 'notifications')">
-              Simulate Notifications
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Out-of-Band Pairing Configuration Modal -->
-    <div class="modal-overlay" v-if="showPairingModal" @click.self="showPairingModal = false">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3>Out-of-Band Pairing Exchange</h3>
-          <button class="close-btn" @click="showPairingModal = false">&times;</button>
-        </div>
+  <div class="dashboard-wrapper">
+    <!-- NOT PAIRED: Connection prompt is ALL the screen -->
+    <div class="welcome-pairing-screen" v-if="!isPaired">
+      <div class="welcome-box">
+        <h2 class="welcome-title">⚡ Welcome to Kyberpipe</h2>
+        <p class="welcome-subtitle">Post-Quantum P2P Sync Node. Pair your companion device to begin.</p>
         
-        <div class="modal-body">
-          <p class="modal-desc">
-            Scan the Out-of-Band credentials using your companion phone camera or export the remote pairing link.
-          </p>
-
-          <div class="pairing-container">
-            <!-- Simulated QR Code -->
+        <div class="pairing-panel-layout">
+          <!-- QR Card -->
+          <div class="pair-card qr-side">
+            <h3>Out-of-Band pairing configuration</h3>
+            <p class="desc">Scan this QR code with the companion mobile app to establish a secure cryptographic trust chain.</p>
+            
             <div class="qr-code-simulator">
               <div class="qr-corner top-left"></div>
               <div class="qr-corner top-right"></div>
@@ -187,265 +113,463 @@ const handleCopyLink = async () => {
                 <div v-for="i in 144" :key="i" class="qr-dot" :class="{ active: (i * 3 + 7) % 5 === 0 || (i * 7 + 13) % 8 === 0 }"></div>
               </div>
             </div>
-
-            <!-- Configuration JSON payload -->
-            <div class="config-json-payload">
-              <h4>Pairing Payload (JSON Metadata)</h4>
-              <pre class="json-box"><code>{{ pairingConfigJson }}</code></pre>
+            
+            <div class="sas-block">
+              <span class="sas-label">Safe pairing SAS code:</span>
+              <strong class="sas-display">{{ sasCode }}</strong>
             </div>
           </div>
 
-          <div class="modal-actions">
-            <button class="btn btn-primary" @click="handleCopyLink">
-              Export Remote Pairing Link
-            </button>
-            <button class="btn btn-secondary" @click="showPairingModal = false">
-              Close
-            </button>
-          </div>
-
-          <div v-if="copyStatusText" class="copy-status-bubble">
-            {{ copyStatusText }}
+          <!-- JSON & Actions Card -->
+          <div class="pair-card config-side">
+            <h3>Pairing Configuration JSON</h3>
+            <pre class="json-box"><code>{{ pairingConfigJson }}</code></pre>
+            
+            <div class="pairing-buttons">
+              <button class="btn btn-accent" @click="handleCopyLink">
+                Export Remote Pairing Link
+              </button>
+              <button class="btn btn-primary" @click="handleMockHandshakeConnect">
+                Simulate Pairing Handshake
+              </button>
+            </div>
+            
+            <p v-if="copyStatusText" class="copy-status">{{ copyStatusText }}</p>
           </div>
         </div>
       </div>
     </div>
-  </section>
+
+    <!-- PAIRED VIEW: Grid of widgets -->
+    <div class="connected-dashboard" v-else>
+      <div class="dashboard-header-profile">
+        <div class="profile-info-block">
+          <div class="avatar-block">
+            <img :src="pairedDevicePicture || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%2306B6D4%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PH</text></svg>'" alt="Companion avatar" />
+          </div>
+          <div>
+            <h2 style="font-weight: 800; color: white;">Connected Node: {{ pairedDeviceName }}</h2>
+            <p style="color: var(--accent-cyan); font-size: 0.85rem; font-weight: 700;">
+              Secure Post-Quantum KEM Tunnel established
+            </p>
+          </div>
+        </div>
+        <button class="btn btn-secondary" @click="emit('navigate', 'settings')">
+          Edit Profile
+        </button>
+      </div>
+
+      <div class="dashboard-widgets-grid">
+        <!-- Clipboard widget (Read-only RICH MIME) -->
+        <div class="widget-card clipboard-widget" @click="emit('navigate', 'clipboard')">
+          <div class="widget-header">
+            <h4>📋 Live Sync Clipboard</h4>
+            <span>View All &rarr;</span>
+          </div>
+          <div class="widget-body">
+            <div class="mini-clipboard-list" v-if="clipboardItems.length > 0">
+              <div v-for="item in clipboardItems.slice(0, 3)" :key="item.id" class="mini-item">
+                <span class="source-lbl" :class="item.source">{{ item.source === 'pc' ? 'PC' : 'Mobile' }}</span>
+                <p class="mini-text">{{ item.text }}</p>
+              </div>
+            </div>
+            <p v-else class="empty-widget-text">No synced clipboard payloads yet.</p>
+          </div>
+        </div>
+
+        <!-- Notifications widget -->
+        <div class="widget-card notifications-widget" @click="emit('navigate', 'notifications')">
+          <div class="widget-header">
+            <h4>🔔 Active Notifications</h4>
+            <span>View All &rarr;</span>
+          </div>
+          <div class="widget-body">
+            <div class="mini-notif-list" v-if="displayNotifications.length > 0">
+              <div v-for="notif in displayNotifications.slice(0, 3)" :key="notif.id" class="mini-item">
+                <span class="source-lbl" :class="notif.type">{{ notif.type === 'local' ? 'PC' : 'Mobile' }}</span>
+                <p class="mini-text"><strong>{{ notif.title }}</strong>: {{ notif.body }}</p>
+              </div>
+            </div>
+            <p v-else class="empty-widget-text">No active notification events logged.</p>
+          </div>
+        </div>
+
+        <!-- Ambient light gauge widget -->
+        <div class="widget-card light-widget" @click="emit('navigate', 'light')">
+          <div class="widget-header">
+            <h4>💡 Ambient Light Telemetry</h4>
+            <span>Run Sandbox &rarr;</span>
+          </div>
+          <div class="widget-body text-center">
+            <div class="lux-label-big">{{ currentLux }} <span style="font-size: 1.25rem;">lux</span></div>
+            <div class="lux-range-indicator">
+              <div class="lux-bar" :style="{ width: Math.min((currentLux / 1000) * 100, 100) + '%' }"></div>
+            </div>
+            <p class="card-desc">Real-time light level reported by companion light sensor</p>
+          </div>
+        </div>
+
+        <!-- Files Manager widget -->
+        <div class="widget-card files-widget" @click="emit('navigate', 'files')">
+          <div class="widget-header">
+            <h4>📁 P2P File Explorer</h4>
+            <span>Explore &rarr;</span>
+          </div>
+          <div class="widget-body">
+            <div class="files-status-block">
+              <div class="status-indicator-pair">
+                <span>💻 PC Access:</span>
+                <span class="badge" :class="{ ok: fileAccessGrantedDesktop }">
+                  {{ fileAccessGrantedDesktop ? 'Granted' : 'Pending' }}
+                </span>
+              </div>
+              <div class="status-indicator-pair">
+                <span>📱 Phone Access:</span>
+                <span class="badge" :class="{ ok: fileAccessGrantedPhone }">
+                  {{ fileAccessGrantedPhone ? 'Granted' : 'Pending' }}
+                </span>
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm btn-full" style="margin-top: 1rem;">
+              Access Folder System
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal to ask for device name and picture on pairing -->
+    <div class="modal-overlay" v-if="showNameModal" @click.self="showNameModal = false">
+      <div class="modal-content text-center">
+        <h3>Secure Node Pairing Verified</h3>
+        <p class="card-desc">Handshake successful! Please give this device a local visual nickname and profile avatar.</p>
+        
+        <div class="avatar-setup-block" style="margin: 1.5rem 0;">
+          <div class="avatar-circle-picker mx-auto" @click="triggerFilePicker">
+            <img :src="inputDevicePic || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%2306B6D4%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PH</text></svg>'" alt="Device Avatar" />
+            <div class="picker-hover"><span>📷</span></div>
+          </div>
+          <input 
+            type="file" 
+            ref="fileInputRef" 
+            style="display: none;" 
+            accept="image/*" 
+            @change="handleFileChange" 
+          />
+        </div>
+
+        <div class="form-group" style="text-align: left; margin-bottom: 1.5rem;">
+          <label>Companion Device visual nickname:</label>
+          <input type="text" v-model="inputDeviceName" class="input-text" placeholder="e.g. My Personal Phone" />
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-primary" @click="submitPairingDetails">
+            Save Visual Profile & Connect
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
-  margin-top: 1.5rem;
+.dashboard-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
-
-@media (max-width: 1024px) {
-  .dashboard-grid {
+.welcome-pairing-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+.welcome-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  padding: 2.5rem;
+  width: 1000px;
+  max-width: 100%;
+}
+.welcome-title {
+  font-size: 2rem;
+  font-weight: 800;
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+.welcome-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  text-align: center;
+  margin-bottom: 2rem;
+}
+.pairing-panel-layout {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 2rem;
+}
+@media (max-width: 768px) {
+  .pairing-panel-layout {
     grid-template-columns: 1fr;
   }
 }
+.pair-card {
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+.pair-card h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  color: white;
+}
+.desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+.qr-code-simulator {
+  width: 140px;
+  height: 140px;
+  background: #ffffff;
+  padding: 8px;
+  border-radius: 10px;
+  position: relative;
+  margin: 1.5rem auto;
+}
+.qr-matrix {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+}
+.qr-dot {
+  background: #cbd5e1;
+}
+.qr-dot.active {
+  background: #0f172a;
+}
+.qr-corner {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  border: 3px solid #0f172a;
+  background: transparent;
+}
+.qr-corner.top-left { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.qr-corner.top-right { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.qr-corner.bottom-left { bottom: 8px; left: 8px; border-right: none; border-top: none; }
 
-.dashboard-col {
+.sas-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 1rem;
+}
+.sas-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.sas-display {
+  font-size: 1.75rem;
+  color: var(--accent-cyan);
+  font-family: monospace;
+  letter-spacing: 2px;
+}
+.json-box {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #a5b4fc;
+  height: 180px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 100%;
+  margin-bottom: 1.5rem;
+}
+.pairing-buttons {
+  display: flex;
+  gap: 1rem;
+}
+.copy-status {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--accent-cyan);
+  text-align: center;
+}
+
+/* Connected view dashboard */
+.connected-dashboard {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
 }
-
-.connectivity-card, .stun-card, .sas-card, .quick-actions-box {
+.dashboard-header-profile {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   padding: 1.5rem;
-}
-
-.card-header {
+  border-radius: 16px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.5rem;
 }
-
-.active-badge {
-  background: rgba(99, 102, 241, 0.2);
-  color: #a5b4fc;
-  font-size: 0.75rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: 9999px;
-  border: 1px solid rgba(99, 102, 241, 0.4);
+.profile-info-block {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
 }
-
-.card-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
+.avatar-block {
+  width: 55px;
+  height: 55px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid var(--accent-cyan);
+}
+.avatar-block img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.dashboard-widgets-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+@media (max-width: 1024px) {
+  .dashboard-widgets-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.widget-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 1.5rem;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+.widget-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 4px 20px rgba(6, 182, 212, 0.15);
+}
+.widget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.75rem;
   margin-bottom: 1rem;
 }
-
-.interfaces-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+.widget-header h4 {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: white;
 }
-
-.interface-item {
-  background: rgba(15, 23, 42, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  transition: all 0.2s ease;
-}
-
-.interface-item.active {
-  border-color: var(--accent-cyan);
-  background: rgba(6, 182, 212, 0.05);
-  box-shadow: 0 0 15px rgba(6, 182, 212, 0.1);
-}
-
-.interface-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.25rem;
-}
-
-.interface-title {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.9rem;
-}
-
-.tier-number {
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-primary);
-  font-size: 0.7rem;
-  font-weight: bold;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-}
-
-.interface-desc {
+.widget-header span {
   font-size: 0.8rem;
   color: var(--text-secondary);
 }
-
-.always-on {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
+.widget-body {
+  min-height: 120px;
 }
-
-/* Custom Toggle Switch */
-.toggle-switch {
-  position: relative;
-  width: 44px;
-  height: 22px;
-}
-
-.toggle-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.toggle-switch label {
-  position: absolute;
-  cursor: pointer;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #334155;
-  transition: .2s;
-  border-radius: 34px;
-}
-
-.toggle-switch label:before {
-  position: absolute;
-  content: "";
-  height: 16px;
-  width: 16px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
-  transition: .2s;
-  border-radius: 50%;
-}
-
-.toggle-switch input:checked + label {
-  background-color: var(--accent-cyan);
-}
-
-.toggle-switch input:checked + label:before {
-  transform: translateX(22px);
-}
-
-/* STUN section */
-.stun-action-box {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.input-text {
-  flex: 1;
-  background: rgba(15, 23, 42, 0.6);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 0.5rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  outline: none;
-}
-
-.input-text:focus {
-  border-color: var(--accent-indigo);
-}
-
-.stun-result {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.85rem;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 0.75rem;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.code-badge {
-  font-family: monospace;
-  background: rgba(99, 102, 241, 0.15);
-  color: #c084fc;
-  padding: 0.15rem 0.4rem;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  border: 1px solid rgba(99, 102, 241, 0.3);
-}
-
-/* Safe Pairing display */
-.sas-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.5rem;
-}
-
-.sas-badge {
-  background: rgba(168, 85, 247, 0.2);
-  color: #d8b4fe;
-  font-size: 0.75rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: 9999px;
-  border: 1px solid rgba(168, 85, 247, 0.4);
-}
-
-.sas-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  line-height: 1.4;
-  margin-bottom: 1.25rem;
-}
-
-.sas-code-display {
-  font-size: 3.5rem;
-  font-weight: 800;
-  letter-spacing: 0.25rem;
-  text-align: center;
-  color: #c084fc;
-  text-shadow: 0 0 20px rgba(192, 132, 252, 0.3);
-  font-family: monospace;
-  background: rgba(15, 23, 42, 0.4);
-  padding: 1rem;
-  border-radius: 12px;
-  border: 1px solid rgba(192, 132, 252, 0.2);
-}
-
-.button-group-vertical {
+.mini-clipboard-list, .mini-notif-list {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  margin-top: 1rem;
+  gap: 0.5rem;
+}
+.mini-item {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.5rem;
+  border-radius: 6px;
+}
+.source-lbl {
+  font-size: 0.65rem;
+  font-weight: bold;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+.source-lbl.pc, .source-lbl.local {
+  background: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+}
+.source-lbl.phone, .source-lbl.remote {
+  background: rgba(6, 182, 212, 0.2);
+  color: #a5f3fc;
+}
+.mini-text {
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.empty-widget-text {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 2.5rem 0;
+}
+.lux-label-big {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #f59e0b;
+}
+.lux-range-indicator {
+  background: #334155;
+  height: 8px;
+  border-radius: 4px;
+  width: 100%;
+  margin: 0.75rem 0;
+  overflow: hidden;
+}
+.lux-bar {
+  background: #f59e0b;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.files-status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.status-indicator-pair {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+}
+.badge {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+.badge.ok {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+.btn-full {
+  width: 100%;
 }
 
-/* Modal Overlay */
+/* Modal and picker styling */
 .modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -456,153 +580,71 @@ const handleCopyLink = async () => {
   align-items: center;
   z-index: 1000;
 }
-
 .modal-content {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 16px;
-  width: 600px;
+  width: 450px;
   max-width: 90%;
   padding: 1.5rem;
   box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
-  animation: modal-fadeIn 0.25s ease-out;
 }
-
-@keyframes modal-fadeIn {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
-  padding-bottom: 0.75rem;
-  margin-bottom: 1rem;
-}
-
-.close-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1.75rem;
-  cursor: pointer;
-  line-height: 1;
-}
-
-.close-btn:hover {
-  color: var(--text-primary);
-}
-
-.modal-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  margin-bottom: 1.5rem;
-}
-
-.pairing-container {
-  display: flex;
-  gap: 1.5rem;
-  align-items: center;
-}
-
-@media (max-width: 600px) {
-  .pairing-container {
-    flex-direction: column;
-  }
-}
-
-.qr-code-simulator {
-  width: 160px;
-  height: 160px;
-  background: #ffffff;
-  padding: 10px;
-  border-radius: 12px;
+.avatar-circle-picker {
   position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid var(--accent-cyan);
+  cursor: pointer;
 }
-
-.qr-matrix {
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 3px;
+.avatar-circle-picker img {
   width: 100%;
   height: 100%;
+  object-fit: cover;
 }
-
-.qr-dot {
-  background: #cbd5e1;
-  border-radius: 1px;
-}
-
-.qr-dot.active {
-  background: #0f172a;
-}
-
-.qr-corner {
+.picker-hover {
   position: absolute;
-  width: 40px;
-  height: 40px;
-  border: 4px solid #0f172a;
-  background: transparent;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  transition: opacity 0.2s ease;
 }
-
-.qr-corner.top-left { top: 10px; left: 10px; border-right: none; border-bottom: none; }
-.qr-corner.top-right { top: 10px; right: 10px; border-left: none; border-bottom: none; }
-.qr-corner.bottom-left { bottom: 10px; left: 10px; border-right: none; border-top: none; }
-
-.config-json-payload {
-  flex: 1;
+.avatar-circle-picker:hover .picker-hover {
+  opacity: 1;
+}
+.mx-auto {
+  margin-left: auto;
+  margin-right: auto;
+}
+.text-center {
+  text-align: center;
+}
+.form-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  width: 100%;
+  gap: 0.35rem;
 }
-
-.config-json-payload h4 {
+.form-group label {
   font-size: 0.85rem;
   color: var(--text-secondary);
 }
-
-.json-box {
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255,255,255,0.05);
-  border-radius: 8px;
-  padding: 0.75rem;
-  font-family: monospace;
-  font-size: 0.75rem;
-  max-height: 150px;
-  overflow-y: auto;
-  color: #a5b4fc;
+.input-text {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  outline: none;
 }
-
 .modal-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
-  border-top: 1px solid rgba(255,255,255,0.1);
-  padding-top: 1rem;
-}
-
-.copy-status-bubble {
-  margin-top: 0.75rem;
-  background: rgba(6, 182, 212, 0.15);
-  color: var(--accent-cyan);
-  border: 1px solid rgba(6, 182, 212, 0.3);
-  padding: 0.5rem;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  text-align: center;
-  animation: fadeIn 0.2s ease-out;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  justify-content: center;
+  margin-top: 1rem;
 }
 </style>
