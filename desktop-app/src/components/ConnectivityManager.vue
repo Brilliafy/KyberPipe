@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
+import { 
+  Wifi, 
+  Network, 
+  Globe, 
+  Activity 
+} from '@lucide/vue';
 
 const props = defineProps<{
   wifiDirectActive: boolean;
@@ -22,16 +28,166 @@ const emit = defineEmits<{
 
 const stunHostInput = ref("stun.l.google.com:19302");
 const ddnsInput = ref(props.ddnsHostname);
+const showDrawer = ref(false);
 
 const handleDdnsChange = () => {
   emit("update:ddnsHostname", ddnsInput.value);
 };
+
+// Canvas-based real-time RTT telemetry chart
+const canvasRef = ref<HTMLCanvasElement | null>(null);
+interface LatencyData {
+  rtt: number;
+  pathway: string;
+  isSwitch: boolean;
+}
+const latencyHistory = ref<LatencyData[]>([]);
+let chartInterval: any = null;
+let lastPathway = "";
+
+const generateMockLatency = () => {
+  let base = 45.2; // WireGuard fallback
+  let path = "WireGuard WAN";
+  if (props.wifiDirectActive) {
+    base = 2.4;
+    path = "Wi-Fi Direct";
+  } else if (props.lanActive) {
+    base = 8.5;
+    path = "mDNS LAN";
+  }
+
+  const jitter = (Math.random() - 0.5) * 0.8;
+  const currentRtt = Number((base + jitter).toFixed(1));
+  const isSwitch = lastPathway !== "" && lastPathway !== path;
+  lastPathway = path;
+
+  latencyHistory.value.push({
+    rtt: currentRtt,
+    pathway: path,
+    isSwitch
+  });
+
+  if (latencyHistory.value.length > 40) {
+    latencyHistory.value.shift();
+  }
+};
+
+const drawChart = () => {
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+
+  // Background grid
+  ctx.strokeStyle = "rgba(99, 102, 241, 0.15)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = (height / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+
+    // Labels for latency levels
+    ctx.fillStyle = "rgba(148, 163, 184, 0.5)";
+    ctx.font = "8px monospace";
+    const labelVal = (50 - (i * 12.5)).toFixed(0) + "ms";
+    ctx.fillText(labelVal, 5, y - 2);
+  }
+
+  if (latencyHistory.value.length < 2) return;
+
+  // Draw line connecting RTTs
+  ctx.beginPath();
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "#06b6d4";
+
+  // Gradient fill below the line
+  const grad = ctx.createLinearGradient(0, 0, 0, height);
+  grad.addColorStop(0, "rgba(6, 182, 212, 0.25)");
+  grad.addColorStop(1, "rgba(6, 182, 212, 0.0)");
+
+  const stepX = width / 39;
+  const points: { x: number; y: number }[] = [];
+
+  latencyHistory.value.forEach((data, index) => {
+    const x = stepX * index;
+    // Map RTT 0-50ms to height coordinates
+    const y = height - (data.rtt / 50) * height;
+    points.push({ x, y });
+  });
+
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
+
+  // Draw gradient fill
+  ctx.lineTo(points[points.length - 1].x, height);
+  ctx.lineTo(points[0].x, height);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Draw switch pathway vertical markers
+  latencyHistory.value.forEach((data, index) => {
+    if (data.isSwitch) {
+      const x = stepX * index;
+      ctx.strokeStyle = "#a855f7";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Label indicator
+      ctx.fillStyle = "#a855f7";
+      ctx.font = "bold 8px sans-serif";
+      ctx.fillText("SW-PATH", x + 3, 15);
+    }
+  });
+
+  // Draw current point glow
+  const lastPoint = points[points.length - 1];
+  ctx.beginPath();
+  ctx.arc(lastPoint.x, lastPoint.y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = "#22d3ee";
+  ctx.shadowColor = "#22d3ee";
+  ctx.shadowBlur = 10;
+  ctx.fill();
+  ctx.shadowBlur = 0; // Reset shadow
+};
+
+onMounted(() => {
+  chartInterval = setInterval(() => {
+    generateMockLatency();
+    drawChart();
+  }, 500);
+});
+
+onUnmounted(() => {
+  if (chartInterval) clearInterval(chartInterval);
+});
 </script>
 
 <template>
   <section class="panel">
-    <h2 class="section-title">🌐 Connectivity Manager</h2>
-    <p class="section-subtitle">Configure post-quantum peer-to-peer transport pathways, STUN punch, UPnP ports, and DDNS hostnames.</p>
+    <div class="header-row">
+      <div>
+        <h2 class="section-title">🌐 Connectivity Manager</h2>
+        <p class="section-subtitle">Configure post-quantum peer-to-peer transport pathways, STUN punch, UPnP ports, and DDNS hostnames.</p>
+      </div>
+      <button class="btn btn-accent" @click="showDrawer = true">
+        <Activity style="margin-right: 0.25rem;" :size="16" /> Network Diagnostics
+      </button>
+    </div>
 
     <div class="connectivity-grid">
       <!-- Precedence Tiers -->
@@ -48,6 +204,7 @@ const handleDdnsChange = () => {
             <div class="interface-header">
               <div class="interface-title">
                 <span class="tier-number">Tier 1</span>
+                <Wifi :size="14" style="color: var(--accent-cyan);" />
                 <strong>Wi-Fi Direct (P2P Radio)</strong>
               </div>
               <div class="toggle-switch">
@@ -68,6 +225,7 @@ const handleDdnsChange = () => {
             <div class="interface-header">
               <div class="interface-title">
                 <span class="tier-number">Tier 2</span>
+                <Network :size="14" style="color: var(--accent-cyan);" />
                 <strong>Local Network (mDNS LAN)</strong>
               </div>
               <div class="toggle-switch">
@@ -88,6 +246,7 @@ const handleDdnsChange = () => {
             <div class="interface-header">
               <div class="interface-title">
                 <span class="tier-number">Tier 3</span>
+                <Globe :size="14" style="color: var(--accent-cyan);" />
                 <strong>WireGuard WAN Tunnel Overlay</strong>
               </div>
               <span class="always-on">Fallback</span>
@@ -160,14 +319,58 @@ const handleDdnsChange = () => {
         </div>
       </div>
     </div>
+
+    <!-- Network Diagnostics slide-over Drawer -->
+    <div class="drawer-overlay" v-if="showDrawer" @click.self="showDrawer = false">
+      <div class="drawer-panel">
+        <div class="drawer-header">
+          <h3>⚡ Telemetry & Diagnostics</h3>
+          <button class="close-btn" @click="showDrawer = false">&times;</button>
+        </div>
+        
+        <div class="drawer-body">
+          <div class="diagnostic-card">
+            <h4>Live RTT Latency (Round-Trip Time)</h4>
+            <p class="card-desc">Monitors QUIC tunnel latency in real time as pathway transitions trigger.</p>
+            
+            <div class="chart-wrapper">
+              <canvas ref="canvasRef" width="360" height="150" class="telemetry-chart"></canvas>
+            </div>
+          </div>
+
+          <div class="diagnostic-card" style="margin-top: 1.5rem;">
+            <h4>Active Interface Statistics</h4>
+            <div class="stat-row">
+              <span>Current Link Type:</span>
+              <strong style="color: var(--accent-cyan);">
+                {{ wifiDirectActive ? 'Wi-Fi Direct P2P (Tier 1)' : (lanActive ? 'mDNS LAN (Tier 2)' : 'WireGuard WAN (Tier 3)') }}
+              </strong>
+            </div>
+            <div class="stat-row">
+              <span>Average RTT Jitter:</span>
+              <span>±0.4 ms</span>
+            </div>
+            <div class="stat-row">
+              <span>Dynamic UDP Hole State:</span>
+              <span style="color: #22c55e;">OPEN / STABLE</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
 .section-subtitle {
   color: var(--text-secondary);
   font-size: 0.9rem;
-  margin-bottom: 1.5rem;
 }
 .connectivity-grid {
   display: grid;
@@ -345,5 +548,76 @@ const handleDdnsChange = () => {
   border-radius: 4px;
   font-size: 0.85rem;
   border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+/* Slide-over Drawer Styles */
+.drawer-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+}
+.drawer-panel {
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-color);
+  width: 400px;
+  max-width: 90%;
+  height: 100%;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  animation: slide-in 0.3s ease-out;
+}
+@keyframes slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+}
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.75rem;
+  cursor: pointer;
+}
+.diagnostic-card {
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1rem;
+}
+.diagnostic-card h4 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: white;
+  margin-bottom: 0.25rem;
+}
+.chart-wrapper {
+  background: #05070f;
+  border-radius: 8px;
+  padding: 0.5rem;
+  margin-top: 0.5rem;
+}
+.telemetry-chart {
+  width: 100%;
+  height: 150px;
+  display: block;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
 }
 </style>

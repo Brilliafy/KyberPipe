@@ -1,5 +1,17 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { 
+  Shield, 
+  QrCode, 
+  Clipboard, 
+  Bell, 
+  Sun, 
+  FolderOpen, 
+  Camera, 
+  CheckCircle, 
+  ExternalLink, 
+  PlusCircle
+} from '@lucide/vue';
 
 interface ClipboardRecord {
   id: string;
@@ -96,13 +108,13 @@ const handleFileChange = (event: Event) => {
     <!-- NOT PAIRED: Connection prompt is ALL the screen -->
     <div class="welcome-pairing-screen" v-if="!isPaired">
       <div class="welcome-box">
-        <h2 class="welcome-title">⚡ Welcome to Kyberpipe</h2>
+        <h2 class="welcome-title"><Shield style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="28" class="text-cyan" /> Welcome to Kyberpipe</h2>
         <p class="welcome-subtitle">Post-Quantum P2P Sync Node. Pair your companion device to begin.</p>
         
         <div class="pairing-panel-layout">
           <!-- QR Card -->
           <div class="pair-card qr-side">
-            <h3>Out-of-Band pairing configuration</h3>
+            <h3><QrCode style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Out-of-Band pairing configuration</h3>
             <p class="desc">Scan this QR code with the companion mobile app to establish a secure cryptographic trust chain.</p>
             
             <div class="qr-code-simulator">
@@ -127,10 +139,10 @@ const handleFileChange = (event: Event) => {
             
             <div class="pairing-buttons">
               <button class="btn btn-accent" @click="handleCopyLink">
-                Export Remote Pairing Link
+                <ExternalLink style="margin-right: 0.25rem;" :size="14" /> Export Pairing Link
               </button>
               <button class="btn btn-primary" @click="handleMockHandshakeConnect">
-                Simulate Pairing Handshake
+                <PlusCircle style="margin-right: 0.25rem;" :size="14" /> Simulate Handshake
               </button>
             </div>
             
@@ -149,8 +161,8 @@ const handleFileChange = (event: Event) => {
           </div>
           <div>
             <h2 style="font-weight: 800; color: white;">Connected Node: {{ pairedDeviceName }}</h2>
-            <p style="color: var(--accent-cyan); font-size: 0.85rem; font-weight: 700;">
-              Secure Post-Quantum KEM Tunnel established
+            <p style="color: var(--accent-cyan); font-size: 0.85rem; font-weight: 700; display: flex; align-items: center; gap: 0.25rem;">
+              <CheckCircle :size="12" /> Secure Post-Quantum KEM Tunnel established
             </p>
           </div>
         </div>
@@ -163,7 +175,7 @@ const handleFileChange = (event: Event) => {
         <!-- Clipboard widget (Read-only RICH MIME) -->
         <div class="widget-card clipboard-widget" @click="emit('navigate', 'clipboard')">
           <div class="widget-header">
-            <h4>📋 Live Sync Clipboard</h4>
+            <h4><Clipboard style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Live Sync Clipboard</h4>
             <span>View All &rarr;</span>
           </div>
           <div class="widget-body">
@@ -180,7 +192,7 @@ const handleFileChange = (event: Event) => {
         <!-- Notifications widget -->
         <div class="widget-card notifications-widget" @click="emit('navigate', 'notifications')">
           <div class="widget-header">
-            <h4>🔔 Active Notifications</h4>
+            <h4><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Active Notifications</h4>
             <span>View All &rarr;</span>
           </div>
           <div class="widget-body">
@@ -197,7 +209,7 @@ const handleFileChange = (event: Event) => {
         <!-- Ambient light gauge widget -->
         <div class="widget-card light-widget" @click="emit('navigate', 'light')">
           <div class="widget-header">
-            <h4>💡 Ambient Light Telemetry</h4>
+            <h4><Sun style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Ambient Light Telemetry</h4>
             <span>Run Sandbox &rarr;</span>
           </div>
           <div class="widget-body text-center">
@@ -212,7 +224,7 @@ const handleFileChange = (event: Event) => {
         <!-- Files Manager widget -->
         <div class="widget-card files-widget" @click="emit('navigate', 'files')">
           <div class="widget-header">
-            <h4>📁 P2P File Explorer</h4>
+            <h4><FolderOpen style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> P2P File Explorer</h4>
             <span>Explore &rarr;</span>
           </div>
           <div class="widget-body">
@@ -242,12 +254,12 @@ const handleFileChange = (event: Event) => {
     <div class="modal-overlay" v-if="showNameModal" @click.self="showNameModal = false">
       <div class="modal-content text-center">
         <h3>Secure Node Pairing Verified</h3>
-        <p class="card-desc">Handshake successful! Please give this device a local visual nickname and profile avatar.</p>
+        <p class="card-desc">Handshake successful! Please give this device a local nickname and profile avatar.</p>
         
         <div class="avatar-setup-block" style="margin: 1.5rem 0;">
           <div class="avatar-circle-picker mx-auto" @click="triggerFilePicker">
             <img :src="inputDevicePic || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%2306B6D4%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PH</text></svg>'" alt="Device Avatar" />
-            <div class="picker-hover"><span>📷</span></div>
+            <div class="picker-hover"><Camera :size="24" style="color:white;" /></div>
           </div>
           <input 
             type="file" 
@@ -259,7 +271,7 @@ const handleFileChange = (event: Event) => {
         </div>
 
         <div class="form-group" style="text-align: left; margin-bottom: 1.5rem;">
-          <label>Companion Device visual nickname:</label>
+          <label>Companion Device nickname:</label>
           <input type="text" v-model="inputDeviceName" class="input-text" placeholder="e.g. My Personal Phone" />
         </div>
 
@@ -274,6 +286,9 @@ const handleFileChange = (event: Event) => {
 </template>
 
 <style scoped>
+.text-cyan {
+  color: var(--accent-cyan);
+}
 .dashboard-wrapper {
   flex: 1;
   display: flex;
@@ -327,6 +342,8 @@ const handleFileChange = (event: Event) => {
   font-weight: 700;
   margin-bottom: 0.5rem;
   color: white;
+  display: flex;
+  align-items: center;
 }
 .desc {
   font-size: 0.8rem;
@@ -476,6 +493,8 @@ const handleFileChange = (event: Event) => {
   font-size: 1.05rem;
   font-weight: 800;
   color: white;
+  display: flex;
+  align-items: center;
 }
 .widget-header span {
   font-size: 0.8rem;

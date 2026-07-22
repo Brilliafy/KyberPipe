@@ -1,5 +1,16 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { 
+  Settings, 
+  User, 
+  Smartphone, 
+  FolderLock, 
+  Activity, 
+  ShieldAlert, 
+  Key, 
+  Camera, 
+  Eye 
+} from '@lucide/vue';
 
 interface KeyPair {
   x25519_pk_hex: string;
@@ -21,6 +32,7 @@ defineProps<{
   enableDdns: boolean;
   fileAccessGrantedDesktop: boolean;
   fileAccessGrantedPhone: boolean;
+  themeMode: string; // "light" | "dark" | "auto"
 }>();
 
 const emit = defineEmits<{
@@ -33,6 +45,7 @@ const emit = defineEmits<{
   (e: "update:enableDdns", val: boolean): void;
   (e: "update:fileAccessGrantedDesktop", val: boolean): void;
   (e: "update:fileAccessGrantedPhone", val: boolean): void;
+  (e: "update:themeMode", val: string): void;
   (e: "regenerateKeys"): void;
   (e: "saveSettings"): void;
 }>();
@@ -62,19 +75,45 @@ const handleFileChange = (event: Event) => {
 
 <template>
   <section class="panel">
-    <h2 class="section-title">⚙️ System Settings</h2>
-    <p class="section-subtitle">Manage device profile identities, connectivity fallbacks, and security authorizations.</p>
+    <h2 class="section-title"><Settings style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> System Settings</h2>
+    <p class="section-subtitle">Manage device profile identities, connectivity fallbacks, theme visual properties, and security authorizations.</p>
+
+    <!-- Theme Visual Properties Card -->
+    <div class="card theme-settings-card" style="margin-bottom: 1.5rem; padding: 1.5rem;">
+      <h3><Eye style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Theme Visual Properties</h3>
+      <p class="card-desc">Configure application color accents and light/dark theme preference toggles.</p>
+      
+      <div class="form-group" style="max-width: 300px;">
+        <label for="theme-select">Visual Color Mode:</label>
+        <select 
+          id="theme-select" 
+          class="input-select" 
+          :value="themeMode" 
+          @change="emit('update:themeMode', ($event.target as HTMLSelectElement).value); emit('saveSettings')"
+        >
+          <option value="light">Light Theme Mode</option>
+          <option value="dark">Dark Theme Mode</option>
+          <option value="auto">System Default (Auto-detect)</option>
+        </select>
+      </div>
+
+      <div class="theme-autodetect-row" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary);">
+        <span v-if="themeMode === 'auto'">
+          ℹ️ Autodetect from OS is currently enabled. Theme changes dynamically based on OS styling.
+        </span>
+      </div>
+    </div>
 
     <!-- Profile Management Section -->
     <div class="card profile-card" style="margin-bottom: 1.5rem;">
-      <h3>Local Node Profile</h3>
+      <h3><User style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Local Node Profile</h3>
       <p class="card-desc">Identify this Linux host visually inside Kyberpipe. Affects local discovery name only.</p>
       
       <div class="profile-editor">
         <div class="avatar-circle" @click="triggerFilePicker">
           <img :src="devicePicture || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%23334155%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PC</text></svg>'" alt="Device Avatar" />
           <div class="avatar-hover">
-            <span>📷</span>
+            <Camera :size="20" style="color:white;" />
           </div>
         </div>
         <input 
@@ -103,7 +142,7 @@ const handleFileChange = (event: Event) => {
 
     <!-- Paired Device profile view -->
     <div class="card profile-card" style="margin-bottom: 1.5rem;" v-if="pairedDeviceName">
-      <h3>Paired Companion Profile</h3>
+      <h3><Smartphone style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Paired Companion Profile</h3>
       <div class="profile-editor">
         <div class="avatar-circle-readonly">
           <img :src="pairedDevicePicture || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%2306B6D4%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PH</text></svg>'" alt="Paired Avatar" />
@@ -117,7 +156,7 @@ const handleFileChange = (event: Event) => {
 
     <!-- Storage Access / Permissions Management -->
     <div class="card" style="margin-bottom: 1.5rem; padding: 1.5rem;">
-      <h3>Shared Folder & Storage Permissions</h3>
+      <h3><FolderLock style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Shared Folder & Storage Permissions</h3>
       <p class="card-desc">Authorize directories read/write options for secure cross-device file transfer.</p>
       <div class="permissions-settings">
         <label class="switch-row">
@@ -142,7 +181,7 @@ const handleFileChange = (event: Event) => {
     <!-- Flight recorder and anomaly engine toggles -->
     <div class="cards-grid" style="margin-bottom: 2rem;">
       <div class="card" style="padding: 1.5rem;">
-        <h3>Sub-Nanosecond Flight Data Recorder</h3>
+        <h3><Activity style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Flight Data Recorder</h3>
         <p class="card-desc">Lock-free sub-nanosecond binary event tracing ring buffer for post-mortem diagnostics.</p>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <input 
@@ -156,7 +195,7 @@ const handleFileChange = (event: Event) => {
       </div>
 
       <div class="card" style="padding: 1.5rem;">
-        <h3>Neuromorphic Anomaly Engine</h3>
+        <h3><ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Neuromorphic Anomaly Engine</h3>
         <p class="card-desc">Real-time eBPF packet-timing anomaly detection & auto-isolation.</p>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <input 
@@ -172,7 +211,7 @@ const handleFileChange = (event: Event) => {
 
     <!-- Keys vault -->
     <div class="key-card" style="background: rgba(15, 23, 42, 0.6); padding: 1.5rem; border-radius: 12px; border: 1px solid var(--border-color);" v-if="keyPair">
-      <h3>Cryptographic Key Vault (NIST ML-KEM-768 & X25519)</h3>
+      <h3><Key style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Cryptographic Key Vault (NIST ML-KEM-768 & X25519)</h3>
       
       <div class="key-field" style="margin-top: 1rem;">
         <label style="font-size: 0.85rem; color: var(--text-secondary);">Classical ECC X25519 Public Key (Hex):</label>
@@ -240,7 +279,6 @@ const handleFileChange = (event: Event) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.25rem;
   transition: opacity 0.2s ease;
 }
 .avatar-circle:hover .avatar-hover {
@@ -265,7 +303,7 @@ const handleFileChange = (event: Event) => {
   font-size: 0.85rem;
   color: var(--text-secondary);
 }
-.input-text {
+.input-text, .input-select {
   background: rgba(15, 23, 42, 0.6);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
@@ -274,7 +312,7 @@ const handleFileChange = (event: Event) => {
   font-size: 0.9rem;
   outline: none;
 }
-.input-text:focus {
+.input-text:focus, .input-select:focus {
   border-color: var(--accent-indigo);
 }
 .permissions-settings {

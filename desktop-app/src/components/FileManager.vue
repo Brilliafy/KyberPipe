@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { 
+  FolderOpen, 
+  Monitor, 
+  Smartphone, 
+  Lock, 
+  AlertCircle, 
+  Folder, 
+  FileText, 
+  Download 
+} from '@lucide/vue';
 
 const props = defineProps<{
   fileAccessGrantedDesktop: boolean;
@@ -70,7 +80,7 @@ const formatSize = (bytes: number) => {
 
 <template>
   <section class="panel">
-    <h2 class="section-title">📁 Cross-Device File Explorer</h2>
+    <h2 class="section-title"><FolderOpen style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Cross-Device File Explorer</h2>
     <p class="section-subtitle">Securely transfer and browse file systems between your Linux PC and Android Companion device.</p>
 
     <!-- Sub tabs for PC vs Phone -->
@@ -80,14 +90,14 @@ const formatSize = (bytes: number) => {
         :class="{ active: activeSubTab === 'pc' }" 
         @click="activeSubTab = 'pc'"
       >
-        💻 This PC Files
+        <Monitor style="margin-right: 0.25rem;" :size="14" /> This PC Files
       </button>
       <button 
         class="tab-btn" 
         :class="{ active: activeSubTab === 'phone' }" 
         @click="activeSubTab = 'phone'"
       >
-        📱 Android Phone Files
+        <Smartphone style="margin-right: 0.25rem;" :size="14" /> Android Phone Files
       </button>
     </div>
 
@@ -98,7 +108,7 @@ const formatSize = (bytes: number) => {
         class="access-denied-box" 
         v-if="(activeSubTab === 'pc' && !fileAccessGrantedDesktop) || (activeSubTab === 'phone' && !fileAccessGrantedPhone && isConnected)"
       >
-        <div class="lock-icon">🔒</div>
+        <Lock class="lock-icon" :size="48" style="color: var(--accent-indigo);" />
         <h3>Access Authorization Required</h3>
         <p>For security, cross-device file browsing requires explicit pairing consent from this host.</p>
         <button 
@@ -111,7 +121,7 @@ const formatSize = (bytes: number) => {
 
       <!-- General Errors (Disconnected, etc) -->
       <div class="access-denied-box" v-else-if="errorText">
-        <div class="lock-icon">⚠️</div>
+        <AlertCircle class="lock-icon" :size="48" style="color: var(--accent-indigo);" />
         <h3>Browsing Unavailable</h3>
         <p>{{ errorText }}</p>
       </div>
@@ -135,7 +145,7 @@ const formatSize = (bytes: number) => {
           <tbody>
             <tr v-for="file in fileList" :key="file.path">
               <td class="file-name-cell">
-                <span class="file-icon">{{ file.is_dir ? '📁' : '📄' }}</span>
+                <component :is="file.is_dir ? Folder : FileText" :size="16" class="file-icon" style="color: var(--accent-cyan);" />
                 <span>{{ file.name }}</span>
               </td>
               <td>{{ file.is_dir ? 'Directory' : 'File' }}</td>
@@ -145,6 +155,7 @@ const formatSize = (bytes: number) => {
                   class="btn btn-secondary btn-sm"
                   @click="windowAlert('Initiating secure peer-to-peer download...')"
                 >
+                  <component :is="file.is_dir ? FolderOpen : Download" :size="12" style="margin-right: 0.25rem;" />
                   {{ file.is_dir ? 'Open' : 'Download' }}
                 </button>
               </td>
@@ -179,6 +190,8 @@ const formatSize = (bytes: number) => {
   border-radius: 8px;
   font-size: 0.95rem;
   transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
 }
 .tab-btn.active {
   background: rgba(99, 102, 241, 0.15);
@@ -207,7 +220,7 @@ const formatSize = (bytes: number) => {
   padding: 2rem;
 }
 .lock-icon {
-  font-size: 3rem;
+  margin-bottom: 0.5rem;
 }
 .access-denied-box h3 {
   font-size: 1.25rem;
@@ -260,6 +273,6 @@ const formatSize = (bytes: number) => {
   font-weight: 600;
 }
 .file-icon {
-  font-size: 1.1rem;
+  flex-shrink: 0;
 }
 </style>

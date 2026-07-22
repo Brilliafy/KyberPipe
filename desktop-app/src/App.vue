@@ -11,6 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
+import { RefreshCw, ShieldAlert, Terminal } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -107,6 +108,14 @@ const optimisticStatus = ref<string | null>(null);
 const sasCode = ref("849-201");
 const neuralAnomalyEnabled = ref(false);
 const flightRecorderEnabled = ref(false);
+const themeMode = ref("auto");
+const isSystemDark = ref(window.matchMedia("(prefers-color-scheme: dark)").matches);
+
+const currentThemeClass = computed(() => {
+  if (themeMode.value === "light") return "theme-daylight";
+  if (themeMode.value === "dark") return ""; // Default dark theme
+  return isSystemDark.value ? "" : "theme-daylight";
+});
 
 // Methods
 
@@ -123,6 +132,7 @@ const loadSettings = async () => {
     isPaired.value = settings.is_paired || false;
     fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
     fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
+    themeMode.value = settings.theme_mode || "auto";
   } catch (e) {
     console.error("Load settings error:", e);
   }
@@ -138,7 +148,8 @@ const saveSettings = async () => {
       ddnsHostname: ddnsHostname.value,
       enableUpnp: enableUpnp.value,
       enableDdns: enableDdns.value,
-      isPaired: isPaired.value
+      isPaired: isPaired.value,
+      themeMode: themeMode.value
     });
   } catch (e) {
     console.error("Save settings error:", e);
@@ -213,13 +224,7 @@ const handleSaveEditClipboard = async (payload: { id: string; text: string }) =>
   }
 };
 
-// Theme classes
-const currentThemeClass = computed(() => {
-  const lux = currentLux.value;
-  if (lux > 500) return "theme-daylight";
-  if (lux < 5) return "theme-oled-black";
-  return "theme-cyber-dark";
-});
+
 
 // Outgoing SMS dispatch
 const sendOptimisticSms = async (payload: { sender: string; body: string }) => {
@@ -461,6 +466,7 @@ const handleCompletePairing = async (name: string, pic: string) => {
 
 let clipPoller: any = null;
 let connPoller: any = null;
+let mediaQueryListener: ((e: MediaQueryListEvent) => void) | null = null;
 
 onMounted(async () => {
   await loadSettings();
@@ -483,11 +489,21 @@ onMounted(async () => {
       triggerConnectionAttempt();
     }
   }, 10000);
+
+  // OS theme preferences change observer
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  mediaQueryListener = (e: MediaQueryListEvent) => {
+    isSystemDark.value = e.matches;
+  };
+  media.addEventListener("change", mediaQueryListener);
 });
 
 onUnmounted(() => {
   if (clipPoller) clearInterval(clipPoller);
   if (connPoller) clearInterval(connPoller);
+  if (mediaQueryListener) {
+    window.matchMedia("(prefers-color-scheme: dark)").removeEventListener("change", mediaQueryListener);
+  }
 });
 </script>
 
@@ -514,7 +530,7 @@ onUnmounted(() => {
               @click="handleManualRetry"
               title="Retry connection"
             >
-              🔄
+              <RefreshCw :size="12" />
             </button>
           </div>
         </div>
@@ -523,7 +539,9 @@ onUnmounted(() => {
           <button class="btn btn-secondary btn-sm" style="margin-right: 0.5rem;" @click="currentTab = 'settings'">
             Settings
           </button>
-          <button class="btn-panic" @click="triggerSelfDestruct">Self-Destruct Wipe</button>
+          <button class="btn-panic" @click="triggerSelfDestruct">
+            <ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="14" /> Self-Destruct Wipe
+          </button>
         </div>
       </header>
 
@@ -603,7 +621,9 @@ onUnmounted(() => {
       />
 
       <section v-else-if="currentTab === 'logs'" class="panel">
-        <h2 class="section-title">Real-Time System Log Stream</h2>
+        <h2 class="section-title">
+          <Terminal style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="20" /> Real-Time System Log Stream
+        </h2>
         <div class="terminal-box">
           <div v-for="(log, i) in logs" :key="i" class="log-line">
             {{ log }}
@@ -625,6 +645,7 @@ onUnmounted(() => {
         :enableDdns="enableDdns"
         :fileAccessGrantedDesktop="fileAccessGrantedDesktop"
         :fileAccessGrantedPhone="fileAccessGrantedPhone"
+        :themeMode="themeMode"
         @update:flightRecorderEnabled="handleToggleFlightRecorder"
         @update:neuralAnomalyEnabled="handleToggleNeuralAnomaly"
         @update:deviceName="deviceName = $event"
@@ -634,6 +655,7 @@ onUnmounted(() => {
         @update:enableDdns="enableDdns = $event"
         @update:fileAccessGrantedDesktop="fileAccessGrantedDesktop = $event"
         @update:fileAccessGrantedPhone="fileAccessGrantedPhone = $event"
+        @update:themeMode="themeMode = $event"
         @regenerateKeys="handleGenerateKeyPair"
         @saveSettings="saveSettings"
       />

@@ -1,4 +1,15 @@
 <script setup lang="ts">
+import { 
+  BarChart2, 
+  Globe, 
+  FolderOpen, 
+  Clipboard, 
+  Bell, 
+  Cpu, 
+  Terminal, 
+  Settings 
+} from '@lucide/vue';
+
 defineProps<{
   currentTab: string;
   systemInfo: {
@@ -29,49 +40,49 @@ const emit = defineEmits<{
         :class="{ active: currentTab === 'dashboard' }"
         @click="emit('update:currentTab', 'dashboard')"
       >
-        <span>📊</span> Overview
+        <BarChart2 class="nav-icon" :size="18" /> Overview
       </button>
       <button
         :class="{ active: currentTab === 'connectivity' }"
         @click="emit('update:currentTab', 'connectivity')"
       >
-        <span>🌐</span> Connection Manager
+        <Globe class="nav-icon" :size="18" /> Connection Manager
       </button>
       <button
         :class="{ active: currentTab === 'files' }"
         @click="emit('update:currentTab', 'files')"
       >
-        <span>📁</span> File Manager
+        <FolderOpen class="nav-icon" :size="18" /> File Manager
       </button>
       <button
         :class="{ active: currentTab === 'clipboard' }"
         @click="emit('update:currentTab', 'clipboard')"
       >
-        <span>📋</span> Clipboard Manager
+        <Clipboard class="nav-icon" :size="18" /> Clipboard Manager
       </button>
       <button
         :class="{ active: currentTab === 'notifications' }"
         @click="emit('update:currentTab', 'notifications')"
       >
-        <span>🔔</span> Notifications
+        <Bell class="nav-icon" :size="18" /> Notifications
       </button>
       <button
         :class="{ active: currentTab === 'light' }"
         @click="emit('update:currentTab', 'light')"
       >
-        <span>⚡</span> Automation
+        <Cpu class="nav-icon" :size="18" /> Automation
       </button>
       <button
         :class="{ active: currentTab === 'logs' }"
         @click="emit('update:currentTab', 'logs')"
       >
-        <span>📟</span> System Logs
+        <Terminal class="nav-icon" :size="18" /> System Logs
       </button>
       <button
         :class="{ active: currentTab === 'settings' }"
         @click="emit('update:currentTab', 'settings')"
       >
-        <span>⚙️</span> Settings
+        <Settings class="nav-icon" :size="18" /> Settings
       </button>
     </nav>
 
@@ -80,3 +91,14 @@ const emit = defineEmits<{
     </div>
   </aside>
 </template>
+
+<style scoped>
+.nav-icon {
+  margin-right: 0.5rem;
+  color: var(--text-secondary);
+  transition: color 0.2s ease;
+}
+button:hover .nav-icon, button.active .nav-icon {
+  color: var(--accent-cyan);
+}
+</style>

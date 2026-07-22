@@ -1,5 +1,18 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { 
+  Clipboard, 
+  Layers, 
+  Monitor, 
+  Smartphone, 
+  Plus, 
+  Copy, 
+  Edit2, 
+  Trash2, 
+  Save, 
+  X, 
+  AlertCircle 
+} from '@lucide/vue';
 
 interface ClipboardRecord {
   id: string;
@@ -57,7 +70,7 @@ const handleSave = (id: string) => {
 
 <template>
   <section class="panel">
-    <h2 class="section-title">📋 Secure Clipboard Sync</h2>
+    <h2 class="section-title"><Clipboard style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Secure Clipboard Sync</h2>
     <p class="section-subtitle">Real-time MIME clipboard sharing over encrypted post-quantum channels.</p>
 
     <!-- Sub tabs -->
@@ -67,21 +80,21 @@ const handleSave = (id: string) => {
         :class="{ active: activeSubTab === 'all' }" 
         @click="activeSubTab = 'all'"
       >
-        ♾️ Combined History
+        <Layers style="margin-right: 0.25rem;" :size="14" /> Combined History
       </button>
       <button 
         class="tab-btn" 
         :class="{ active: activeSubTab === 'pc' }" 
         @click="activeSubTab = 'pc'"
       >
-        💻 This PC
+        <Monitor style="margin-right: 0.25rem;" :size="14" /> This PC
       </button>
       <button 
         class="tab-btn" 
         :class="{ active: activeSubTab === 'phone' }" 
         @click="activeSubTab = 'phone'"
       >
-        📱 Android Companion
+        <Smartphone style="margin-right: 0.25rem;" :size="14" /> Android Companion
       </button>
     </div>
 
@@ -90,7 +103,7 @@ const handleSave = (id: string) => {
       class="not-connected-box" 
       v-if="activeSubTab === 'phone' && !isConnected"
     >
-      <div class="empty-icon">🔌</div>
+      <AlertCircle class="empty-icon" :size="48" style="color: var(--accent-indigo);" />
       <h3>Companion Phone Offline</h3>
       <p>Please pair and connect your Android companion node to view remote clipboard events.</p>
       <button class="btn btn-primary" @click="emit('connectDevice')">
@@ -105,7 +118,7 @@ const handleSave = (id: string) => {
         <div class="input-row">
           <input type="text" v-model="newText" placeholder="Type or paste payload content..." @keyup.enter="handleAdd" />
           <button class="btn btn-primary" @click="handleAdd">
-            Sync Content
+            <Plus style="margin-right: 0.25rem;" :size="16" /> Sync Content
           </button>
         </div>
         <p class="status-msg" v-if="lastSyncStatus">{{ lastSyncStatus }}</p>
@@ -126,21 +139,32 @@ const handleSave = (id: string) => {
         >
           <div v-if="editId === item.id">
             <input type="text" v-model="editText" class="edit-input" @keyup.enter="handleSave(item.id)" />
-            <button class="btn btn-primary btn-sm" @click="handleSave(item.id)">Save</button>
-            <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem;" @click="editId = null">Cancel</button>
+            <button class="btn btn-primary btn-sm" @click="handleSave(item.id)">
+              <Save style="margin-right: 0.25rem;" :size="12" /> Save
+            </button>
+            <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem;" @click="editId = null">
+              <X style="margin-right: 0.25rem;" :size="12" /> Cancel
+            </button>
           </div>
           <div v-else>
             <div class="entry-meta">
               <span class="source-badge" :class="item.source">
-                {{ item.source === 'pc' ? '💻 PC' : '📱 Android' }}
+                <component :is="item.source === 'pc' ? Monitor : Smartphone" :size="12" style="margin-right: 0.25rem; vertical-align: middle;" />
+                {{ item.source === 'pc' ? 'PC' : 'Android' }}
               </span>
               <span class="timestamp">{{ new Date(item.timestamp).toLocaleTimeString() }}</span>
             </div>
             <p class="clipboard-text">{{ item.text }}</p>
             <div class="card-actions">
-              <button class="btn btn-primary btn-sm" @click="emit('copy', item.text)">Copy</button>
-              <button class="btn btn-secondary btn-sm" @click="startEdit(item.id, item.text)">Edit</button>
-              <button class="btn-delete btn-sm" @click="emit('remove', item.id)">Delete</button>
+              <button class="btn btn-primary btn-sm" @click="emit('copy', item.text)">
+                <Copy style="margin-right: 0.25rem;" :size="12" /> Copy
+              </button>
+              <button class="btn btn-secondary btn-sm" @click="startEdit(item.id, item.text)">
+                <Edit2 style="margin-right: 0.25rem;" :size="12" /> Edit
+              </button>
+              <button class="btn-delete btn-sm" @click="emit('remove', item.id)">
+                <Trash2 style="margin-right: 0.25rem;" :size="12" /> Delete
+              </button>
             </div>
           </div>
         </div>
@@ -172,6 +196,8 @@ const handleSave = (id: string) => {
   border-radius: 8px;
   font-size: 0.95rem;
   transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
 }
 .tab-btn.active {
   background: rgba(99, 102, 241, 0.15);
@@ -193,7 +219,6 @@ const handleSave = (id: string) => {
   border-radius: 12px;
 }
 .empty-icon {
-  font-size: 3rem;
   margin-bottom: 1rem;
 }
 .not-connected-box h3 {
@@ -270,6 +295,8 @@ const handleSave = (id: string) => {
   font-weight: bold;
   padding: 0.15rem 0.5rem;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
 }
 .source-badge.pc {
   background: rgba(99, 102, 241, 0.2);
@@ -304,6 +331,8 @@ const handleSave = (id: string) => {
   cursor: pointer;
   transition: all 0.2s ease;
   font-size: 0.8rem;
+  display: flex;
+  align-items: center;
 }
 .btn-delete:hover {
   background: #ef4444;

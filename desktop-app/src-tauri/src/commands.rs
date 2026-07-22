@@ -428,6 +428,7 @@ pub fn save_settings(
     enable_upnp: bool,
     enable_ddns: bool,
     is_paired: bool,
+    theme_mode: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.add_log("[Settings] Updating preferences".to_string());
@@ -447,6 +448,7 @@ pub fn save_settings(
         s.enable_upnp = enable_upnp;
         s.enable_ddns = enable_ddns;
         s.is_paired = is_paired;
+        s.theme_mode = theme_mode;
     }
     state.save_settings();
     Ok(())
