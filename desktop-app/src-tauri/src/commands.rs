@@ -6,6 +6,8 @@ use core_crypto::packets::{SensorPacket, SmsPacket};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[derive(Serialize)]
 pub struct SystemInfo {
@@ -115,7 +117,10 @@ pub fn execute_fallback_script(
 }
 
 #[tauri::command]
-pub fn sync_clipboard(text: String, state: State<'_, std::sync::Arc<AppState>>) -> Result<bool, String> {
+pub fn sync_clipboard(
+    text: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<bool, String> {
     if state.dedup.is_suppressed(&text) {
         state.add_log("[Clipboard] Suppressed duplicate or loop-back clipboard sync".to_string());
         return Ok(false);
@@ -393,7 +398,10 @@ pub fn toggle_neural_anomaly_engine(
 }
 
 #[tauri::command]
-pub fn toggle_flight_recorder(enabled: bool, state: State<'_, std::sync::Arc<AppState>>) -> Result<String, String> {
+pub fn toggle_flight_recorder(
+    enabled: bool,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
     core_crypto::telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
     let status_str = if enabled {
         "ENABLED (sub-nanosecond qlog ring buffer active)"
@@ -463,7 +471,9 @@ pub fn reconstruct_key_from_shamir_shares(
 }
 
 #[tauri::command]
-pub fn trigger_panic_self_destruct(state: State<'_, std::sync::Arc<AppState>>) -> Result<String, String> {
+pub fn trigger_panic_self_destruct(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
     core_crypto::trigger_panic_hardware_wipe().map_err(|e| e.to_string())?;
     let mut status = state.connection_status.lock().unwrap();
     *status = "SELF_DESTRUCTED_MEMORY_ZEROIZED".to_string();
@@ -593,7 +603,9 @@ pub struct ConnectionStatusFull {
 }
 
 #[tauri::command]
-pub fn get_connection_status_full(state: State<'_, std::sync::Arc<AppState>>) -> ConnectionStatusFull {
+pub fn get_connection_status_full(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ConnectionStatusFull {
     ConnectionStatusFull {
         status: state.connection_status.lock().unwrap().clone(),
         method: state.connection_method.lock().unwrap().clone(),
@@ -889,7 +901,10 @@ pub fn read_clipboard_fallback() -> Result<String, String> {
         }
     }
     // Try xclip
-    if let Ok(output) = std::process::Command::new("xclip").args(["-selection", "clipboard", "-o"]).output() {
+    if let Ok(output) = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-o"])
+        .output()
+    {
         if output.status.success() {
             if let Ok(text) = String::from_utf8(output.stdout) {
                 if !text.is_empty() {
@@ -899,7 +914,10 @@ pub fn read_clipboard_fallback() -> Result<String, String> {
         }
     }
     // Try xsel
-    if let Ok(output) = std::process::Command::new("xsel").args(["-o", "-b"]).output() {
+    if let Ok(output) = std::process::Command::new("xsel")
+        .args(["-o", "-b"])
+        .output()
+    {
         if output.status.success() {
             if let Ok(text) = String::from_utf8(output.stdout) {
                 if !text.is_empty() {
@@ -918,7 +936,7 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
     // Try wl-copy
     match std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
-        .spawn() 
+        .spawn()
     {
         Ok(mut child) => {
             use std::io::Write;
@@ -938,7 +956,7 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
     match std::process::Command::new("xclip")
         .args(["-selection", "clipboard"])
         .stdin(std::process::Stdio::piped())
-        .spawn() 
+        .spawn()
     {
         Ok(mut child) => {
             use std::io::Write;
@@ -958,7 +976,7 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
     match std::process::Command::new("xsel")
         .args(["-i", "-b"])
         .stdin(std::process::Stdio::piped())
-        .spawn() 
+        .spawn()
     {
         Ok(mut child) => {
             use std::io::Write;
@@ -1001,10 +1019,12 @@ pub fn read_real_clipboard_internal() -> Result<String, String> {
 }
 
 pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
-    use tokio::net::TcpListener;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    tokio::spawn(async move {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build sync server tokio runtime");
+        rt.block_on(async move {
         let listener = match TcpListener::bind("0.0.0.0:23520").await {
             Ok(l) => l,
             Err(e) => {
@@ -1020,7 +1040,7 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
             };
             
             let state_clone = state.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let mut n = 0;
                 while n < buf.len() {
@@ -1172,13 +1192,16 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
             });
         }
     });
+    });
 }
 
 #[tauri::command]
 pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
     let mut act = state.pending_media_action.lock().unwrap();
     *act = Some(action_index);
-    state.add_log(format!("[Media] Desktop triggered action index: {action_index}"));
+    state.add_log(format!(
+        "[Media] Desktop triggered action index: {action_index}"
+    ));
 }
 
 #[tauri::command]
