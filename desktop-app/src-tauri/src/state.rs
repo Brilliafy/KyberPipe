@@ -47,6 +47,7 @@ pub struct AppState {
     pub connection_color: Mutex<String>,  // "green", "yellow", "red"
     pub settings: Mutex<AppSettings>,
     pub settings_path: String,
+    #[allow(dead_code)]
     pub notifications_path: String,
 }
 
@@ -116,6 +117,7 @@ impl AppState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn save_notifications(&self) {
         if let Ok(notifs) = self.notification_history.lock() {
             if let Ok(serialized) = serde_json::to_string_pretty(&*notifs) {

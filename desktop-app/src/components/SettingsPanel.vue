@@ -9,7 +9,8 @@ import {
   ShieldAlert, 
   Key, 
   Camera, 
-  Eye 
+  Eye,
+  AlertTriangle
 } from '@lucide/vue';
 
 interface KeyPair {
@@ -48,6 +49,7 @@ const emit = defineEmits<{
   (e: "update:themeMode", val: string): void;
   (e: "regenerateKeys"): void;
   (e: "saveSettings"): void;
+  (e: "triggerSelfDestruct"): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -256,6 +258,25 @@ const handleFileChange = (event: Event) => {
         Regenerate Cryptographic Keys
       </button>
     </div>
+
+    <!-- Danger Zone -->
+    <div class="danger-zone" style="margin-top: 2rem;">
+      <div class="danger-header">
+        <AlertTriangle :size="18" style="margin-right: 0.35rem;" />
+        <span>Danger Zone</span>
+      </div>
+      <div class="danger-card">
+        <div class="danger-content">
+          <div>
+            <h4>Emergency Panic Self-Destruct</h4>
+            <p>Zeroize all active cryptographic ratchets, purge TEE/StrongBox master keys, and wipe pairing state.</p>
+          </div>
+          <button class="btn btn-danger" @click="emit('triggerSelfDestruct')">
+            <ShieldAlert :size="14" style="margin-right: 0.35rem;" /> Wipe All Keys
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -361,5 +382,58 @@ const handleFileChange = (event: Event) => {
   font-family: monospace;
   font-size: 0.85rem;
   resize: none;
+}
+.danger-zone {
+  border-top: 1px solid rgba(239, 68, 68, 0.3);
+  padding-top: 1.5rem;
+}
+.danger-header {
+  display: flex;
+  align-items: center;
+  color: #ef4444;
+  font-weight: 800;
+  font-size: 0.95rem;
+  margin-bottom: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.danger-card {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+.danger-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.danger-content h4 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #f87171;
+  margin-bottom: 0.25rem;
+}
+.danger-content p {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.btn-danger {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.btn-danger:hover {
+  background: #b91c1c;
 }
 </style>

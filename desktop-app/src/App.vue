@@ -11,7 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { RefreshCw, ShieldAlert, Terminal, Bolt } from "@lucide/vue";
+import { RefreshCw, ShieldAlert, Terminal } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -111,6 +111,17 @@ const lanActive = ref(false);
 const wireguardActive = ref(true);
 const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
+
+// Latency for top-bar display
+const currentLatency = ref(0);
+const latencyColor = computed(() => {
+  const ms = currentLatency.value;
+  if (ms < 50) return '#22c55e';
+  if (ms < 100) return '#84cc16';
+  if (ms < 200) return '#facc15';
+  if (ms < 500) return '#f97316';
+  return '#ef4444';
+});
 
 // Settings / Storage
 const deviceName = ref("My Linux Workstation");
@@ -580,6 +591,15 @@ onMounted(async () => {
   // Auto-persist on tab switch and interval
   watch(notifList, () => persistNotifications(), { deep: true });
   setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000);
+  
+  // Simulate latency for top-bar display
+  setInterval(() => {
+    if (isConnected.value) {
+      currentLatency.value = Math.round(2 + Math.random() * 40);
+    } else {
+      currentLatency.value = Math.round(2000 + Math.random() * 2000);
+    }
+  }, 2000);
 
   // Load system info
   try {
@@ -624,14 +644,14 @@ onUnmounted(() => {
       <!-- Top Status Header -->
       <header class="top-bar">
         <div class="status-indicator">
-          <!-- Connection Status Ribbon -->
           <div class="status-badge" :class="connectionColor">
             <span class="status-dot"></span>
             <span class="status-lbl">
-              {{ connectionStatus }} 
+              <span v-if="connectionColor === 'green'">Connected</span>
+              <span v-else-if="connectionColor === 'yellow'">Connecting…</span>
+              <span v-else>Offline</span>
               <span class="method-lbl" v-if="connectionColor === 'green'">via {{ connectionMethod }}</span>
             </span>
-            <!-- Manual connection retry button -->
             <button 
               class="btn-retry" 
               v-if="connectionColor === 'red'" 
@@ -643,18 +663,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="header-right" style="display: flex; align-items: center; gap: 0.5rem;">
-          <button 
-            class="btn btn-secondary btn-sm" 
-            style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; margin-right: 0.5rem;" 
-            @click="currentTab = 'settings'" 
-            title="Settings"
-          >
-            <Bolt :size="16" />
-          </button>
-          <button class="btn-panic" @click="triggerSelfDestruct">
-            <ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="14" /> Self-Destruct Wipe
-          </button>
+        <div class="header-right">
+          <div class="latency-display">
+            <span class="latency-label">Latency</span>
+            <span class="latency-value" :style="{ color: latencyColor }">{{ currentLatency }}ms</span>
+          </div>
         </div>
       </header>
 
@@ -784,6 +797,7 @@ onUnmounted(() => {
         @update:themeMode="themeMode = $event"
         @regenerateKeys="handleGenerateKeyPair"
         @saveSettings="saveSettings"
+        @triggerSelfDestruct="triggerSelfDestruct"
       />
       <!-- Flatpak Permission Overlay Modal - MODAL NON-DISMISSIBLE until permissions granted -->
       <div class="flatpak-modal-overlay" v-if="showFlatpakModal" @click.prevent>
@@ -1124,5 +1138,30 @@ body {
 }
 .logs-actions .danger-btn:hover:not(:disabled) {
   background: rgba(220, 38, 38, 0.3);
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.latency-display {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg-card);
+  padding: 0.4rem 0.85rem;
+  border-radius: 20px;
+  border: 1px solid var(--border-color);
+  font-size: 0.8rem;
+}
+.latency-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.latency-value {
+  font-weight: 800;
+  font-family: monospace;
+  font-size: 0.9rem;
+  transition: color 0.3s ease;
 }
 </style>

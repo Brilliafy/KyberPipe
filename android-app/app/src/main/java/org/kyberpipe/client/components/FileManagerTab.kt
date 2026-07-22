@@ -24,6 +24,9 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Security
 import java.io.File
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 data class AndroidFileItem(
     val name: String,
@@ -42,10 +45,13 @@ fun FileManagerTab(
 ) {
     var activeSubTab by remember { mutableStateOf("local") }
     var useScopedStorage by remember { mutableStateOf(false) }
+    var refreshKey by remember { mutableStateOf(0) }
     val context = androidx.compose.ui.platform.LocalContext.current
-    val localGranted = PermissionHelper.hasStoragePermissions(context)
+    val localGranted = remember(refreshKey) { PermissionHelper.hasStoragePermissions(context) }
+    val hasScopedDir = remember { context.getExternalFilesDir(null)?.exists() == true }
 
-    val filesList = remember(activeSubTab, localGranted, useScopedStorage, isConnected, settings.fileAccessGrantedDesktop) {
+                    val filesListKey = "$activeSubTab-$localGranted-$useScopedStorage-$isConnected-${settings.fileAccessGrantedDesktop}-$refreshKey"
+                    val filesList = remember(filesListKey) {
         val list = mutableListOf<AndroidFileItem>()
         if (activeSubTab == "local") {
             if (localGranted && !useScopedStorage) {
@@ -143,7 +149,7 @@ fun FileManagerTab(
                     Text("File System Access Blocked", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Access permissions to your local Android storage are required to explore all files. Otherwise, you can use the permission-free sandbox directory.",
+                        text = "Access permissions to your local Android storage are required to explore all files. Otherwise, you can use the permission-free app sandbox directory.",
                         fontSize = 12.sp,
                         color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
@@ -154,7 +160,17 @@ fun FileManagerTab(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Button(
+<<<<<<< HEAD
+                            onClick = {
+                                onPermissionRequest()
+                                MainScope().launch {
+                                    delay(500)
+                                    refreshKey++
+                                }
+                            },
+=======
                             onClick = onPermissionRequest,
+>>>>>>> origin/main
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                         ) {
