@@ -424,7 +424,7 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
                         })) % 255;
                 }
             }
-            let l_i = if den == 0 { 1 } else { (num / den) as u8 };
+            let l_i = num.checked_div(den).map(|d| d as u8).unwrap_or(1);
             recovered_byte ^= (y_i as u8) ^ l_i;
         }
         secret.push(recovered_byte);
