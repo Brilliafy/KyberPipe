@@ -5,13 +5,17 @@ import {
   Layers, 
   Monitor, 
   Smartphone, 
-  Send, 
-  Zap, 
-  AlertCircle 
+  AlertCircle,
+  Check,
+  Archive,
+  VolumeX,
+  Trash2
 } from '@lucide/vue';
+import { invoke } from "@tauri-apps/api/core";
 
 interface UnifiedNotification {
   id: string;
+  sbn_key?: string;
   source: string;
   title: string;
   body: string;
@@ -27,54 +31,52 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "sendSms", payload: { sender: string; body: string }): void;
-  (e: "sendNotif", payload: { title: string; text: string; app: string }): void;
   (e: "connectDevice"): void;
+  (e: "remove", id: string): void;
 }>();
 
 const activeSubTab = ref<"all" | "local" | "remote">("all");
-const outboundSmsRecipient = ref("");
-const outboundSmsBody = ref("");
-
-const mockNotifTitle = ref("");
-const mockNotifBody = ref("");
-const mockNotifApp = ref("com.android.vending");
+const selectedNotif = ref<UnifiedNotification | null>(null);
+const actionStatus = ref("");
 
 const filteredNotifications = computed(() => {
+  const list = props.displayNotifications;
   if (activeSubTab.value === "local") {
-    return props.displayNotifications.filter(n => n.type === "local");
+    return list.filter(n => n.source === 'desktop' || n.type === "local");
   }
   if (activeSubTab.value === "remote") {
-    return props.displayNotifications.filter(n => n.type === "remote");
+    return list.filter(n => n.source === 'android' || n.type === "remote");
   }
-  return props.displayNotifications;
+  return list;
 });
 
-const handleSendSms = () => {
-  if (!outboundSmsRecipient.value.trim() || !outboundSmsBody.value.trim()) return;
-  emit("sendSms", {
-    sender: outboundSmsRecipient.value.trim(),
-    body: outboundSmsBody.value.trim(),
-  });
-  outboundSmsBody.value = "";
+const selectNotification = (notif: UnifiedNotification) => {
+  selectedNotif.value = notif;
+  actionStatus.value = "";
 };
 
-const handleSendNotif = () => {
-  if (!mockNotifTitle.value.trim() || !mockNotifBody.value.trim()) return;
-  emit("sendNotif", {
-    title: mockNotifTitle.value.trim(),
-    text: mockNotifBody.value.trim(),
-    app: mockNotifApp.value,
-  });
-  mockNotifTitle.value = "";
-  mockNotifBody.value = "";
+const handleTriggerAction = async (index: number, title: string) => {
+  if (!selectedNotif.value) return;
+  try {
+    actionStatus.value = `Triggering ${title}...`;
+    const sbnKey = selectedNotif.value.sbn_key || selectedNotif.value.id;
+    await invoke("trigger_notification_action", {
+      sbnKey: sbnKey,
+      actionIndex: index,
+      actionTitle: title
+    });
+    actionStatus.value = `Action '${title}' executed!`;
+    setTimeout(() => { actionStatus.value = ""; }, 3000);
+  } catch (e) {
+    actionStatus.value = `Action failed: ${e}`;
+  }
 };
 </script>
 
 <template>
   <section class="panel">
-    <h2 class="section-title"><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Notification & SMS Center</h2>
-    <p class="section-subtitle">Real-time notification mirroring and remote SMS dispatching through secure ratchets.</p>
+    <h2 class="section-title"><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Notification Center</h2>
+    <p class="section-subtitle">Real-time notification mirroring and remote PQC reply actions.</p>
 
     <!-- Sub tabs -->
     <div class="tabs-header">
@@ -126,6 +128,8 @@ const handleSendNotif = () => {
             v-for="notif in filteredNotifications" 
             :key="notif.id" 
             class="msg-card"
+            :class="{ active: selectedNotif?.id === notif.id }"
+            @click="selectNotification(notif)"
           >
             <div class="entry-meta">
               <span class="source-badge" :class="notif.type">
@@ -141,57 +145,53 @@ const handleSendNotif = () => {
         </div>
       </div>
 
-      <!-- Right side: Simulators / Senders -->
+      <!-- Right side: Selected notification actions / details -->
       <div class="notifications-actions-col">
-        <!-- Outbound SMS Sender -->
-        <div class="actions-card">
-          <h3>Send Outbound SMS</h3>
-          <p class="card-desc">Simulate sending a secure P2P SMS through your connected Android device.</p>
+        <div class="actions-card" v-if="selectedNotif">
+          <h3>Notification Details</h3>
+          <p class="card-desc">View notification details and execute P2P operations over the secure link.</p>
           
-          <div class="form-group">
-            <label>Recipient Number:</label>
-            <input type="text" v-model="outboundSmsRecipient" placeholder="e.g. +1 (555) 019-2834" class="input-text" />
+          <div class="detail-group">
+            <span class="detail-label">Source app:</span>
+            <span class="detail-value">{{ selectedNotif.appPackage }}</span>
           </div>
 
-          <div class="form-group">
-            <label>Message Content:</label>
-            <textarea v-model="outboundSmsBody" placeholder="Type SMS message..." class="input-textarea"></textarea>
+          <div class="detail-group">
+            <span class="detail-label">Title:</span>
+            <span class="detail-value font-bold">{{ selectedNotif.title }}</span>
           </div>
 
-          <button class="btn btn-primary" @click="handleSendSms" :disabled="!isConnected">
-            <Send style="margin-right: 0.25rem;" :size="14" /> Dispatch SMS
-          </button>
-          <p v-if="optimisticStatus" class="optimistic-msg">{{ optimisticStatus }}</p>
+          <div class="detail-group">
+            <span class="detail-label">Body:</span>
+            <p class="detail-text">{{ selectedNotif.body }}</p>
+          </div>
+
+          <!-- Actions buttons -->
+          <div class="actions-buttons-list">
+            <label class="action-list-label">Available Actions:</label>
+            <div class="buttons-grid">
+              <button class="btn btn-secondary-outline btn-sm" @click="handleTriggerAction(1, 'Mark as Read')" :disabled="!isConnected">
+                <Check :size="12" style="margin-right:0.25rem" /> Mark as Read
+              </button>
+              <button class="btn btn-secondary-outline btn-sm" @click="handleTriggerAction(2, 'Archive')" :disabled="!isConnected">
+                <Archive :size="12" style="margin-right:0.25rem" /> Archive
+              </button>
+              <button class="btn btn-secondary-outline btn-sm" @click="handleTriggerAction(3, 'Mute')" :disabled="!isConnected">
+                <VolumeX :size="12" style="margin-right:0.25rem" /> Mute App
+              </button>
+              <button class="btn btn-secondary-outline btn-sm danger-btn" @click="emit('remove', selectedNotif.id); selectedNotif = null; actionStatus = 'Notification dismissed'">
+                <Trash2 :size="12" style="margin-right:0.25rem" /> Dismiss
+              </button>
+            </div>
+          </div>
+
+          <p v-if="actionStatus" class="action-status-msg">{{ actionStatus }}</p>
         </div>
 
-        <!-- Notification Mirroring Simulator -->
-        <div class="actions-card">
-          <h3>Local Notification Simulator</h3>
-          <p class="card-desc">Mirror a new notification event onto this PC to test post-quantum routing.</p>
-          
-          <div class="form-group">
-            <label>Application Package:</label>
-            <select v-model="mockNotifApp" class="input-select">
-              <option value="com.android.vending">Google Play Store</option>
-              <option value="com.whatsapp">WhatsApp Messenger</option>
-              <option value="org.thoughtcrime.securesms">Signal Private Messenger</option>
-              <option value="com.google.android.apps.messaging">Google Messages</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label>Notification Title:</label>
-            <input type="text" v-model="mockNotifTitle" placeholder="e.g. System Update" class="input-text" />
-          </div>
-
-          <div class="form-group">
-            <label>Notification Body:</label>
-            <input type="text" v-model="mockNotifBody" placeholder="e.g. Dynamic ratchet re-key success." class="input-text" />
-          </div>
-
-          <button class="btn btn-accent" @click="handleSendNotif">
-            <Zap style="margin-right: 0.25rem;" :size="14" /> Mirror Notification
-          </button>
+        <div class="actions-card empty-details" v-else>
+          <AlertCircle :size="36" class="empty-details-icon" />
+          <h4>No Notification Selected</h4>
+          <p>Click any item in the list to view diagnostic parameters, quick replies, and P2P native actions.</p>
         </div>
       </div>
     </div>
@@ -259,7 +259,7 @@ const handleSendNotif = () => {
 }
 .notifications-layout {
   display: grid;
-  grid-template-columns: 1.2fr 0.8fr;
+  grid-template-columns: 1.15fr 0.85fr;
   gap: 1.5rem;
 }
 @media (max-width: 1024px) {
@@ -284,6 +284,16 @@ const handleSendNotif = () => {
   background: var(--bg-card);
   margin-bottom: 0.75rem;
   border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.msg-card:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(255, 255, 255, 0.02);
+}
+.msg-card.active {
+  border-color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.05);
 }
 .entry-meta {
   display: flex;
@@ -331,13 +341,15 @@ const handleSendNotif = () => {
 .notifications-actions-col {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
 }
 .actions-card {
-  background: var(--bg-dark);
+  background: var(--bg-card);
   border: 1px solid var(--border-color);
   padding: 1.5rem;
   border-radius: 12px;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
 }
 .actions-card h3 {
   font-size: 1.1rem;
@@ -346,19 +358,49 @@ const handleSendNotif = () => {
 .card-desc {
   font-size: 0.8rem;
   color: var(--text-secondary);
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.75rem;
+}
+.detail-group {
+  margin-bottom: 0.85rem;
+}
+.detail-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.15rem;
+}
+.detail-value {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  font-family: monospace;
+}
+.detail-value.font-bold {
+  font-family: inherit;
+  font-weight: 700;
+}
+.detail-text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+.reply-section {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 1rem;
 }
 .form-group {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
 }
 .form-group label {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-secondary);
 }
-.input-text, .input-select, .input-textarea {
+.input-text {
   background: var(--bg-dark);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
@@ -367,16 +409,47 @@ const handleSendNotif = () => {
   font-size: 0.85rem;
   outline: none;
 }
-.input-textarea {
-  height: 80px;
-  resize: none;
+.input-text:focus {
+  border-color: var(--accent-cyan);
 }
-.input-text:focus, .input-select:focus, .input-textarea:focus {
-  border-color: var(--accent-indigo);
+.action-list-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
 }
-.optimistic-msg {
+.buttons-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.btn-sm {
+  font-size: 0.75rem !important;
+  padding: 0.35rem 0.65rem !important;
+}
+.action-status-msg {
   font-size: 0.8rem;
   color: var(--accent-cyan);
-  margin-top: 0.5rem;
+  margin-top: 1rem;
+}
+.empty-details {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.empty-details-icon {
+  margin-bottom: 0.75rem;
+  color: var(--text-secondary);
+}
+.empty-details h4 {
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 0.35rem;
+}
+.empty-details p {
+  font-size: 0.8rem;
+  max-width: 240px;
 }
 </style>

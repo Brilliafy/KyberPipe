@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var settingsManager: SettingsManager
     private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val deepLinkData = mutableStateOf<String?>(null)
 
     // Image Picker Launcher
     private val pickImageLauncher = registerForActivityResult(
@@ -61,6 +62,9 @@ class MainActivity : ComponentActivity() {
         // Prompt permissions on launch
         requestInitialPermissions()
 
+        // Handle initial intent
+        handleIntent(intent)
+
         setContent {
             var themeMode by remember { mutableStateOf(settingsManager.themeMode) }
             var amoledMode by remember { mutableStateOf(settingsManager.amoledMode) }
@@ -68,6 +72,8 @@ class MainActivity : ComponentActivity() {
             KyberpipeTheme(themeMode = themeMode, amoledMode = amoledMode) {
                 MainScreen(
                     settings = settingsManager,
+                    initialPairingConfig = deepLinkData.value,
+                    onClearInitialPairingConfig = { deepLinkData.value = null },
                     onAvatarPickerClick = { pickImageLauncher.launch("image/*") },
                     onStartService = { startPipeForegroundService() },
                     onStopService = { stopPipeForegroundService() },
@@ -76,6 +82,24 @@ class MainActivity : ComponentActivity() {
                         amoledMode = amoled
                     }
                 )
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        val uri = intent?.data
+        if (uri != null) {
+            val dataParam = uri.getQueryParameter("data")
+            if (dataParam != null && dataParam.isNotEmpty()) {
+                deepLinkData.value = dataParam
+            } else {
+                // If it's the raw custom uri without query param, use the whole scheme
+                deepLinkData.value = uri.toString()
             }
         }
     }
@@ -132,9 +156,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestInitialPermissions() {
-        if (!PermissionHelper.hasSmsPermissions(this)) {
-            PermissionHelper.requestSmsPermissions(this)
-        }
         if (!PermissionHelper.isNotificationListenerEnabled(this)) {
             PermissionHelper.requestNotificationListenerPermission(this)
         }
@@ -213,6 +234,8 @@ fun KyberpipeTheme(
 @Composable
 fun MainScreen(
     settings: SettingsManager,
+    initialPairingConfig: String?,
+    onClearInitialPairingConfig: () -> Unit,
     onAvatarPickerClick: () -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
@@ -241,17 +264,86 @@ fun MainScreen(
     // Toggles
     var wifiDirectActive by remember { mutableStateOf(true) }
     var lanActive by remember { mutableStateOf(false) }
+    var wireguardActive by remember { mutableStateOf(true) }
     var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
     var pairingConfigInput by remember { mutableStateOf("") }
     var sasCodeDisplay by remember { mutableStateOf("849-201") }
 
-    // Clipboard and Notification feeds (Real data synced)
-    val clipboardList = remember { mutableStateListOf<AndroidClipboardRecord>() }
-    val notificationsList = remember { mutableStateListOf<AndroidNotificationRecord>() }
-
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val activity = context as MainActivity
+
+    val notifStore = remember { org.kyberpipe.client.utils.NotificationStore(context) }
+
+    // Clipboard and Notification feeds (Real data synced)
+    val clipboardList = remember { mutableStateListOf<AndroidClipboardRecord>() }
+    val notificationsList = remember { 
+        mutableStateListOf<AndroidNotificationRecord>().apply {
+            addAll(notifStore.loadNotifications())
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        notifStore.purgeOldRecords(settings.purgeDays, notificationsList)
+    }
+
+    // Auto-sync notifications every 30 seconds
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30000)
+            val stored = notifStore.loadNotifications()
+            val changed = notifStore.mergeSync(notificationsList, stored)
+            if (changed) {
+                addLog("[Sync] Notifications auto-synced with local store")
+            }
+        }
+    }
+
+    // Load initial deep link config
+    LaunchedEffect(initialPairingConfig) {
+        if (initialPairingConfig != null && initialPairingConfig.isNotEmpty()) {
+            pairingConfigInput = initialPairingConfig
+            currentTab = TabItem.SETTINGS
+            onClearInitialPairingConfig()
+            Toast.makeText(context, "Pairing config loaded from deep link!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Hook notification listeners
+    DisposableEffect(Unit) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == "org.kyberpipe.client.NOTIFICATION_INTERCEPTED") {
+                    val title = intent.getStringExtra("title") ?: ""
+                    val text = intent.getStringExtra("text") ?: ""
+                    val pkg = intent.getStringExtra("packageName") ?: ""
+                    val ts = intent.getLongExtra("timestamp", System.currentTimeMillis())
+                    
+                    val newRecord = AndroidNotificationRecord(
+                        id = "notif_${ts}_${pkg.hashCode()}",
+                        title = title,
+                        text = text,
+                        appPackage = pkg,
+                        timestamp = ts,
+                        type = "local"
+                    )
+                    notificationsList.add(0, newRecord)
+                    notifStore.saveNotifications(notificationsList)
+                    addLog("[Notification] Intercepted from $pkg: $title")
+                }
+            }
+        }
+        val filter = android.content.IntentFilter("org.kyberpipe.client.NOTIFICATION_INTERCEPTED")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose {
+            context.unregisterReceiver(receiver)
+        }
+    }
 
     // Load keys & setup listeners
     LaunchedEffect(Unit) {
@@ -335,22 +427,27 @@ fun MainScreen(
             delay(1500) // Simulate transport pathway validation
 
             try {
-                // If local links failed, fail over to WireGuard WAN overlay!
-                if (!wifiDirectActive && !lanActive) {
-                    delay(1500) // Failover delay of leaving the house
-                    connectionStatus = "ACTIVE"
-                    connectionMethod = "WireGuard WAN Tunnel"
-                    connectionColor = Color.Green
-                    attemptCount = 0
-                    addLog("[Network] Failover: Switched to WireGuard WAN Tunnel (Direct P2P links inactive)")
-                } else {
-                    val info = evaluateConnectionHierarchy(wifiDirectActive, lanActive, resolvedPublicIp)
-                    connectionStatus = "ACTIVE"
-                    connectionMethod = info.activePathDescription
-                    connectionColor = Color.Green
-                    attemptCount = 0
-                    addLog("[Network] Active: Tunnel established via ${info.activePathDescription} (PQC keys verified)")
+                val order = settings.pathwayOrder.split(",")
+                var chosenMethod = "WireGuard WAN Tunnel"
+                for (path in order) {
+                    if (path == "wifi_direct" && wifiDirectActive) {
+                        chosenMethod = "Wi-Fi Direct P2P"
+                        break
+                    }
+                    if (path == "mdns_lan" && lanActive) {
+                        chosenMethod = "mDNS LAN"
+                        break
+                    }
+                    if (path == "wireguard_wan") {
+                        chosenMethod = "WireGuard WAN Tunnel"
+                        break
+                    }
                 }
+                connectionStatus = "ACTIVE"
+                connectionMethod = chosenMethod
+                connectionColor = Color.Green
+                attemptCount = 0
+                addLog("[Network] Active: Tunnel established via $chosenMethod (PQC keys verified)")
             } catch (e: Exception) {
                 connectionStatus = "DISCONNECTED"
                 connectionMethod = "None"
@@ -370,9 +467,16 @@ fun MainScreen(
     var tempPcName by remember { mutableStateOf("") }
 
     val handlePairingHandshake = {
-        if (pairingConfigInput.isEmpty()) {
-            Toast.makeText(context, "Please paste PC pairing JSON", Toast.LENGTH_SHORT).show()
-        } else {
+        val cleanInput = pairingConfigInput.trim().replace("-", "")
+        if (cleanInput.isEmpty()) {
+            Toast.makeText(context, "Please paste PC pairing JSON or enter code", Toast.LENGTH_SHORT).show()
+        } else if (cleanInput.matches(Regex("\\d{6}"))) {
+            val formattedSas = "${cleanInput.take(3)}-${cleanInput.drop(3)}"
+            sasCodeDisplay = formattedSas
+            tempPcName = "Linux Desktop Workstation"
+            showFirstConnectModal = true
+            addLog("[Pairing] Successfully verified host identity via SAS Code: $formattedSas")
+        } else if (pairingConfigInput.trim().startsWith("{")) {
             try {
                 val json = JSONObject(pairingConfigInput)
                 val hostPkHex = json.getString("host_identity_pk_hex")
@@ -391,6 +495,9 @@ fun MainScreen(
                 Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
                 addLog("[Pairing] Error: Handshake verification failed (${e.message})")
             }
+        } else {
+            Toast.makeText(context, "Invalid pairing code (must be 6 digits) or JSON format", Toast.LENGTH_LONG).show()
+            addLog("[Pairing] Error: Invalid input format")
         }
     }
 
@@ -423,7 +530,7 @@ fun MainScreen(
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = Color(0xFF0B0D17),
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             BottomNavigationBar(
                 selectedTab = currentTab,
@@ -445,20 +552,19 @@ fun MainScreen(
                         ambientLux = ambientLux,
                         isPaired = settings.isPaired,
                         settings = settings,
+                        clipboardItems = clipboardList,
+                        notificationsItems = notificationsList,
                         onRetryConnection = {
                             attemptCount = 0
                             evaluateConnection()
                         },
-                        onPanicTriggered = {
-                            try {
-                                triggerPanicHardwareWipe()
-                                settings.isPaired = false
-                                connectionStatus = "SELF_DESTRUCTED"
-                                connectionColor = Color.Red
-                                Toast.makeText(context, "Keys zeroized!", Toast.LENGTH_LONG).show()
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
+                        onNavigateToFiles = { currentTab = TabItem.FILES },
+                        onNavigateToClipboard = { currentTab = TabItem.CLIPBOARD },
+                        onNavigateToNotifications = { currentTab = TabItem.NOTIFICATIONS },
+                        onNavigateToSettings = { currentTab = TabItem.SETTINGS },
+                        onPairMockDevice = { nodeName ->
+                            tempPcName = nodeName
+                            showFirstConnectModal = true
                         }
                     )
                 }
@@ -503,19 +609,14 @@ fun MainScreen(
                     NotificationsTab(
                         notifications = notificationsList,
                         isConnected = connectionColor == Color.Green,
-                        onSendSms = { recipient, body ->
-                            notificationsList.add(
-                                0,
-                                AndroidNotificationRecord(
-                                    id = "sms_${System.currentTimeMillis()}",
-                                    title = "SMS to $recipient",
-                                    text = body,
-                                    appPackage = "telephony.sms",
-                                    timestamp = System.currentTimeMillis(),
-                                    type = "local"
-                                )
-                            )
-                            Toast.makeText(context, "SMS Dispatched!", Toast.LENGTH_SHORT).show()
+                        onDismiss = { id ->
+                            val idx = notificationsList.indexOfFirst { it.id == id }
+                            if (idx != -1) {
+                                val item = notificationsList[idx]
+                                notificationsList[idx] = item.copy(isDismissed = true, updatedAt = System.currentTimeMillis())
+                                notifStore.saveNotifications(notificationsList)
+                                addLog("[Notification] Dismissed $id. Sync queued.")
+                            }
                         },
                         onConnectRequest = { currentTab = TabItem.SETTINGS }
                     )
@@ -525,7 +626,22 @@ fun MainScreen(
                         settings = settings,
                         keyPair = keyPair,
                         pairingConfigInput = pairingConfigInput,
-                        onPairingConfigChange = { pairingConfigInput = it },
+                        onPairingConfigChange = { newValue ->
+                            val clean = newValue.replace("-", "")
+                            val isDeleting = newValue.length < pairingConfigInput.length
+                            val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
+                                if (isDeleting && clean.length == 3) {
+                                    clean.take(2)
+                                } else if (clean.length >= 3) {
+                                    if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+                                } else {
+                                    clean
+                                }
+                            } else {
+                                newValue
+                            }
+                            pairingConfigInput = formatted
+                        },
                         onTriggerHandshake = handlePairingHandshake,
                         onAvatarPickerClick = onAvatarPickerClick,
                         onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
@@ -533,7 +649,18 @@ fun MainScreen(
                         onCopyStacktrace = onCopyStacktrace,
                         onExportDiagnosticLogs = onExportDiagnosticLogs,
                         onExportCrashLog = onExportCrashLog,
-                        hasCrashLog = hasCrashLog
+                        hasCrashLog = hasCrashLog,
+                        onPanicTriggered = {
+                            try {
+                                triggerPanicHardwareWipe()
+                                settings.isPaired = false
+                                connectionStatus = "SELF_DESTRUCTED"
+                                connectionColor = Color.Red
+                                Toast.makeText(context, "Keys zeroized!", Toast.LENGTH_LONG).show()
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
                     )
                 }
             }

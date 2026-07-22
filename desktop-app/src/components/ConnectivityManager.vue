@@ -1,27 +1,32 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import { 
   Wifi, 
   Network, 
   Globe, 
-  Activity 
+  Activity,
+  GripVertical
 } from '@lucide/vue';
 
 const props = defineProps<{
   wifiDirectActive: boolean;
   lanActive: boolean;
+  wireguardActive: boolean;
   resolvedPublicIp: string;
   ddnsHostname: string;
   enableUpnp: boolean;
   enableDdns: boolean;
+  pathwayOrder: string[];
 }>();
 
 const emit = defineEmits<{
   (e: "update:wifiDirectActive", val: boolean): void;
   (e: "update:lanActive", val: boolean): void;
+  (e: "update:wireguardActive", val: boolean): void;
   (e: "update:ddnsHostname", val: string): void;
   (e: "update:enableUpnp", val: boolean): void;
   (e: "update:enableDdns", val: boolean): void;
+  (e: "update:pathwayOrder", val: string[]): void;
   (e: "runStunHolePunch", stunHost: string): void;
   (e: "saveSettings"): void;
 }>();
@@ -30,8 +35,95 @@ const stunHostInput = ref("stun.l.google.com:19302");
 const ddnsInput = ref(props.ddnsHostname);
 const showDrawer = ref(false);
 
+const dragIndex = ref<number | null>(null);
+const dragOverIndex = ref<number | null>(null);
+const handleDragStart = (event: DragEvent, index: number) => {
+  dragIndex.value = index;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
+};
+const handleDragOver = (event: DragEvent, index: number) => {
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+  dragOverIndex.value = index;
+};
+const handleDrop = (index: number) => {
+  if (dragIndex.value === null || dragIndex.value === index) {
+    dragIndex.value = null;
+    dragOverIndex.value = null;
+    return;
+  }
+  const newOrder = [...props.pathwayOrder];
+  const [removed] = newOrder.splice(dragIndex.value, 1);
+  newOrder.splice(index, 0, removed);
+  emit("update:pathwayOrder", newOrder);
+  emit("saveSettings");
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+};
+const handleDragEnd = () => {
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+};
+
 const handleDdnsChange = () => {
   emit("update:ddnsHostname", ddnsInput.value);
+};
+
+const handleToggle = (key: string, checked: boolean) => {
+  const activeCount = (props.wifiDirectActive ? 1 : 0) + 
+                      (props.lanActive ? 1 : 0) + 
+                      (props.wireguardActive ? 1 : 0);
+  if (!checked && activeCount <= 1) {
+    alert("At least one connection pathway must be enabled!");
+    return;
+  }
+  if (key === 'wifi_direct') {
+    emit('update:wifiDirectActive', checked);
+  } else if (key === 'mdns_lan') {
+    emit('update:lanActive', checked);
+  } else if (key === 'wireguard_wan') {
+    emit('update:wireguardActive', checked);
+  }
+  emit('saveSettings');
+};
+
+const isPathwayActive = (pKey: string) => {
+  if (pKey === 'wifi_direct') return props.wifiDirectActive;
+  if (pKey === 'mdns_lan') return props.lanActive;
+  if (pKey === 'wireguard_wan') return props.wireguardActive;
+  return false;
+};
+
+const activeKey = computed(() => {
+  for (const p of props.pathwayOrder) {
+    if (p === 'wifi_direct' && props.wifiDirectActive) return p;
+    if (p === 'mdns_lan' && props.lanActive) return p;
+    if (p === 'wireguard_wan' && props.wireguardActive) return p;
+  }
+  return '';
+});
+
+const PATHWAY_META: Record<string, { name: string; desc: string; latency: string }> = {
+  wifi_direct: {
+    name: "Wi-Fi Direct P2P Tunnel",
+    desc: "Direct peer-to-peer radio connection. Highest speed, lowest latency (2.4ms).",
+    latency: "2.4ms"
+  },
+  mdns_lan: {
+    name: "Local Network (mDNS LAN)",
+    desc: "Local discovery over shared Wi-Fi Access Point/LAN via UDP multicast beacon (8.5ms).",
+    latency: "8.5ms"
+  },
+  wireguard_wan: {
+    name: "WireGuard WAN Tunnel Overlay",
+    desc: "Seamless WAN backup using public STUN UDP hole-punching for off-grid remote sync (45.2ms).",
+    latency: "45.2ms"
+  }
 };
 
 // Canvas-based real-time RTT telemetry chart
@@ -193,65 +285,51 @@ onUnmounted(() => {
       <!-- Precedence Tiers -->
       <div class="card connectivity-card">
         <div class="card-header">
-          <h3>3-Tier Connectivity Hierarchy</h3>
-          <span class="active-badge">Active Failover</span>
+          <h3>Connectivity hierarchy</h3>
         </div>
-        <p class="card-desc">Toggles simulated local pathways. Best available transport path resolves automatically:</p>
+        <p class="card-desc">Drag priorities to rearrange connection precedence. Highest active pathway will be chosen automatically:</p>
 
         <div class="interfaces-list">
-          <!-- Tier 1 -->
-          <div class="interface-item" :class="{ active: wifiDirectActive }">
+          <div 
+            v-for="(pKey, index) in pathwayOrder" 
+            :key="pKey"
+            class="interface-item"
+            :class="{ 
+              active: activeKey === pKey,
+              inactive: !isPathwayActive(pKey),
+              'drag-over': dragOverIndex === index
+            }"
+            draggable="true"
+            @dragstart="handleDragStart($event, index)"
+            @dragover="handleDragOver($event, index)"
+            @drop="handleDrop(index)"
+            @dragend="handleDragEnd"
+          >
             <div class="interface-header">
               <div class="interface-title">
-                <span class="tier-number">Tier 1</span>
-                <Wifi :size="14" style="color: var(--accent-cyan);" />
-                <strong>Wi-Fi Direct (P2P Radio)</strong>
+                <span class="drag-handle">
+                  <GripVertical :size="14" />
+                </span>
+                <span class="tier-number">Priority {{ index + 1 }}</span>
+                <component 
+                  :is="pKey === 'wifi_direct' ? Wifi : (pKey === 'mdns_lan' ? Network : Globe)" 
+                  :size="14" 
+                  style="color: var(--accent-cyan);" 
+                />
+                <strong>{{ PATHWAY_META[pKey].name }}</strong>
               </div>
+              
               <div class="toggle-switch">
                 <input 
                   type="checkbox" 
-                  id="toggle-wifi-direct" 
-                  :checked="wifiDirectActive" 
-                  @change="emit('update:wifiDirectActive', ($event.target as HTMLInputElement).checked)" 
+                  :id="'toggle-' + pKey" 
+                  :checked="isPathwayActive(pKey)" 
+                  @change="handleToggle(pKey, ($event.target as HTMLInputElement).checked)" 
                 />
-                <label for="toggle-wifi-direct"></label>
+                <label :for="'toggle-' + pKey"></label>
               </div>
             </div>
-            <p class="interface-desc">Direct peer-to-peer radio connection. Highest speed, lowest latency (2.4ms).</p>
-          </div>
-
-          <!-- Tier 2 -->
-          <div class="interface-item" :class="{ active: !wifiDirectActive && lanActive }">
-            <div class="interface-header">
-              <div class="interface-title">
-                <span class="tier-number">Tier 2</span>
-                <Network :size="14" style="color: var(--accent-cyan);" />
-                <strong>Local Network (mDNS LAN)</strong>
-              </div>
-              <div class="toggle-switch">
-                <input 
-                  type="checkbox" 
-                  id="toggle-lan" 
-                  :checked="lanActive" 
-                  @change="emit('update:lanActive', ($event.target as HTMLInputElement).checked)" 
-                />
-                <label for="toggle-lan"></label>
-              </div>
-            </div>
-            <p class="interface-desc">Local discovery over shared Wi-Fi Access Point/LAN via UDP multicast beacon (8.5ms).</p>
-          </div>
-
-          <!-- Tier 3 -->
-          <div class="interface-item" :class="{ active: !wifiDirectActive && !lanActive }">
-            <div class="interface-header">
-              <div class="interface-title">
-                <span class="tier-number">Tier 3</span>
-                <Globe :size="14" style="color: var(--accent-cyan);" />
-                <strong>WireGuard WAN Tunnel Overlay</strong>
-              </div>
-              <span class="always-on">Fallback</span>
-            </div>
-            <p class="interface-desc">Seamless WAN backup using public STUN UDP hole-punching for off-grid remote sync (45.2ms).</p>
+            <p class="interface-desc">{{ PATHWAY_META[pKey].desc }}</p>
           </div>
         </div>
       </div>
@@ -421,6 +499,20 @@ onUnmounted(() => {
   background: rgba(6, 182, 212, 0.05);
   box-shadow: 0 0 15px rgba(6, 182, 212, 0.1);
 }
+.interface-item.inactive {
+  opacity: 0.85;
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.03);
+}
+:global(html.theme-daylight) .interface-item.inactive {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.03);
+}
+.interface-item.drag-over {
+  border-color: var(--accent-indigo);
+  outline: 2px dashed var(--accent-indigo);
+  outline-offset: -2px;
+}
 .interface-header {
   display: flex;
   justify-content: space-between;
@@ -432,6 +524,22 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.9rem;
+}
+.drag-handle {
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  margin-right: 0.2rem;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.2s;
+}
+.drag-handle:hover {
+  color: var(--accent-cyan);
+}
+.drag-handle:active {
+  cursor: grabbing;
 }
 .tier-number {
   background: rgba(255, 255, 255, 0.1);
