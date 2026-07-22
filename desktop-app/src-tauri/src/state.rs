@@ -1,10 +1,10 @@
 use core_crypto::crypto::ClipboardDeduplicator;
-use core_crypto::packets::{NotificationPacket, SensorPacket, SmsPacket};
+use core_crypto::packets::{SensorPacket, SmsPacket};
 use core_crypto::PqKeyPair;
-use std::sync::Mutex;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AppSettings {

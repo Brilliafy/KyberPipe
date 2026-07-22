@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[allow(dead_code)]
@@ -26,7 +26,11 @@ pub fn run_native_messaging_loop() -> io::Result<()> {
         stdin.read_exact(&mut msg_buffer)?;
 
         if let Ok(msg) = serde_json::from_slice::<NativeBrowserMessage>(&msg_buffer) {
-            eprintln!("[Native Browser Bridge] Received web snippet: {} ({})", msg.message_type, msg.content.len());
+            eprintln!(
+                "[Native Browser Bridge] Received web snippet: {} ({})",
+                msg.message_type,
+                msg.content.len()
+            );
 
             let response = NativeBrowserMessage {
                 message_type: "ACK".to_string(),

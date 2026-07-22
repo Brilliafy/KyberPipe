@@ -1,7 +1,7 @@
+mod browser_bridge;
 mod commands;
 mod executor;
 mod portal;
-mod browser_bridge;
 mod state;
 
 #[global_allocator]
@@ -9,8 +9,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use commands::*;
 use state::AppState;
-use std::panic;
 use std::fs;
+use std::panic;
 
 fn setup_panic_hook() {
     panic::set_hook(Box::new(|panic_info| {
@@ -47,7 +47,7 @@ fn anonymize_report(report: &str) -> String {
     let mut scrubbed = String::new();
     for line in report.lines() {
         let mut line_str = line.to_string();
-        
+
         if let Some(home_idx) = line_str.find("/home/") {
             let rest = &line_str[home_idx + 6..];
             let user_end = rest.find('/').unwrap_or(rest.len());
@@ -60,7 +60,7 @@ fn anonymize_report(report: &str) -> String {
             let username = &rest[..user_end];
             line_str = line_str.replace(&format!("Users\\{}", username), "Users\\[USER]");
         }
-        
+
         line_str = scrub_ips(&line_str);
         scrubbed.push_str(&line_str);
         scrubbed.push('\n');

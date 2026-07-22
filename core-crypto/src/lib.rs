@@ -82,8 +82,9 @@ pub fn encapsulate_pq_secret(
     peer_x25519_pk_hex: String,
     peer_mlkem_pk_hex: String,
 ) -> Result<PqKemResponse, KyberError> {
-    let x25519_bytes = hex::decode(&peer_x25519_pk_hex)
-        .map_err(|e| KyberError::EncapsulationFailed(format!("Invalid X25519 public key hex: {e}")))?;
+    let x25519_bytes = hex::decode(&peer_x25519_pk_hex).map_err(|e| {
+        KyberError::EncapsulationFailed(format!("Invalid X25519 public key hex: {e}"))
+    })?;
     if x25519_bytes.len() != 32 {
         return Err(KyberError::InvalidKeyLength {
             expected: 32,
@@ -93,8 +94,9 @@ pub fn encapsulate_pq_secret(
     let mut x25519_arr = [0u8; 32];
     x25519_arr.copy_from_slice(&x25519_bytes);
 
-    let mlkem_bytes = hex::decode(&peer_mlkem_pk_hex)
-        .map_err(|e| KyberError::EncapsulationFailed(format!("Invalid ML-KEM public key hex: {e}")))?;
+    let mlkem_bytes = hex::decode(&peer_mlkem_pk_hex).map_err(|e| {
+        KyberError::EncapsulationFailed(format!("Invalid ML-KEM public key hex: {e}"))
+    })?;
 
     let res = crypto::encapsulate_hybrid(&x25519_arr, &mlkem_bytes)?;
     Ok(PqKemResponse {
@@ -113,8 +115,9 @@ pub fn decapsulate_pq_secret(
     let ct_bytes = hex::decode(&ciphertext_hex)
         .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid ciphertext hex: {e}")))?;
 
-    let x25519_sk_bytes = hex::decode(&my_x25519_sk_hex)
-        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid X25519 secret key hex: {e}")))?;
+    let x25519_sk_bytes = hex::decode(&my_x25519_sk_hex).map_err(|e| {
+        KyberError::DecapsulationFailed(format!("Invalid X25519 secret key hex: {e}"))
+    })?;
     if x25519_sk_bytes.len() != 32 {
         return Err(KyberError::InvalidKeyLength {
             expected: 32,
@@ -124,8 +127,9 @@ pub fn decapsulate_pq_secret(
     let mut x25519_sk_arr = [0u8; 32];
     x25519_sk_arr.copy_from_slice(&x25519_sk_bytes);
 
-    let mlkem_sk_bytes = hex::decode(&my_mlkem_sk_hex)
-        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid ML-KEM secret key hex: {e}")))?;
+    let mlkem_sk_bytes = hex::decode(&my_mlkem_sk_hex).map_err(|e| {
+        KyberError::DecapsulationFailed(format!("Invalid ML-KEM secret key hex: {e}"))
+    })?;
 
     let ss = crypto::decapsulate_hybrid(&ct_bytes, &x25519_sk_arr, &mlkem_sk_bytes)?;
     Ok(hex::encode(ss))
@@ -133,7 +137,10 @@ pub fn decapsulate_pq_secret(
 
 /// UniFFI export: HKDF-SHA256 key derivation
 #[uniffi::export]
-pub fn derive_session_key(shared_secret_hex: String, salt_hex: String) -> Result<String, KyberError> {
+pub fn derive_session_key(
+    shared_secret_hex: String,
+    salt_hex: String,
+) -> Result<String, KyberError> {
     let ss_bytes = hex::decode(&shared_secret_hex)
         .map_err(|e| KyberError::CryptoError(format!("Invalid shared secret hex: {e}")))?;
     let salt_bytes = hex::decode(&salt_hex)
@@ -191,7 +198,9 @@ pub fn decrypt_payload_with_key(
     let nonce_bytes = hex::decode(&nonce_hex)
         .map_err(|e| KyberError::DecryptionFailed(format!("Invalid nonce hex: {e}")))?;
     if nonce_bytes.len() != 12 {
-        return Err(KyberError::DecryptionFailed("Nonce must be 12 bytes".into()));
+        return Err(KyberError::DecryptionFailed(
+            "Nonce must be 12 bytes".into(),
+        ));
     }
     let mut nonce_arr = [0u8; 12];
     nonce_arr.copy_from_slice(&nonce_bytes);
@@ -239,7 +248,11 @@ pub fn create_binary_clipboard_packet(
 }
 
 #[uniffi::export]
-pub fn create_sms_packet(sender: String, body: String, timestamp: u64) -> Result<String, KyberError> {
+pub fn create_sms_packet(
+    sender: String,
+    body: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
     let pkt = SmsPacket {
         sender,
         body,
@@ -249,7 +262,11 @@ pub fn create_sms_packet(sender: String, body: String, timestamp: u64) -> Result
 }
 
 #[uniffi::export]
-pub fn create_outbound_sms_packet(recipient: String, body: String, timestamp: u64) -> Result<String, KyberError> {
+pub fn create_outbound_sms_packet(
+    recipient: String,
+    body: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
     let pkt = OutboundSmsPacket {
         recipient,
         body,
@@ -367,7 +384,7 @@ pub fn perform_stun_hole_punch(stun_host: String) -> Result<String, KyberError> 
         .enable_all()
         .build()
         .map_err(|e| KyberError::NetworkError(format!("Failed to build tokio runtime: {e}")))?;
-    
+
     let addr = rt.block_on(network::query_stun_server(&stun_host))?;
     Ok(addr.to_string())
 }
@@ -430,12 +447,9 @@ mod tests {
         let bob = generate_pq_keypair().unwrap();
 
         let kem_res = encapsulate_pq_secret(bob.x25519_pk_hex, bob.mlkem_pk_hex).unwrap();
-        let decapsulated = decapsulate_pq_secret(
-            kem_res.ciphertext_hex,
-            bob.x25519_sk_hex,
-            bob.mlkem_sk_hex,
-        )
-        .unwrap();
+        let decapsulated =
+            decapsulate_pq_secret(kem_res.ciphertext_hex, bob.x25519_sk_hex, bob.mlkem_sk_hex)
+                .unwrap();
 
         assert_eq!(kem_res.shared_secret_hex, decapsulated);
     }
