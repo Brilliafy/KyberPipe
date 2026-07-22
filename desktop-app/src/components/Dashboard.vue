@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch, onMounted, nextTick } from "vue";
+import QRCode from 'qrcode';
 import { 
   Shield, 
   QrCode, 
@@ -59,6 +60,27 @@ const inputDevicePic = ref("");
 const copyStatusText = ref("");
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const isUltrasonicActive = ref(false);
+const qrCanvasRef = ref<HTMLCanvasElement | null>(null);
+
+const generateQR = async () => {
+  await nextTick();
+  if (!qrCanvasRef.value || !props.pairingConfigJson) return;
+  try {
+    const canvas = qrCanvasRef.value;
+    const parent = canvas.parentElement;
+    const size = parent ? Math.min(parent.clientWidth, 200) : 200;
+    await QRCode.toCanvas(canvas, props.pairingConfigJson, {
+      width: size,
+      margin: 2,
+      color: { dark: '#0f172a', light: '#ffffff' }
+    });
+  } catch (e) {
+    console.error('QR generation failed:', e);
+  }
+};
+
+watch(() => props.pairingConfigJson, generateQR);
+onMounted(generateQR);
 
 const handleCopyLink = async () => {
   try {
@@ -112,12 +134,7 @@ const handleFileChange = (event: Event) => {
             <p class="desc">Scan this QR code with the companion mobile app to establish a secure cryptographic trust chain.</p>
             
             <div class="qr-code-simulator">
-              <div class="qr-corner top-left"></div>
-              <div class="qr-corner top-right"></div>
-              <div class="qr-corner bottom-left"></div>
-              <div class="qr-matrix">
-                <div v-for="i in 144" :key="i" class="qr-dot" :class="{ active: (i * 3 + 7) % 5 === 0 || (i * 7 + 13) % 8 === 0 }"></div>
-              </div>
+              <canvas ref="qrCanvasRef" class="qr-canvas"></canvas>
             </div>
             
             <div class="sas-block">
@@ -357,37 +374,18 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1rem;
 }
 .qr-code-simulator {
-  width: 140px;
-  height: 140px;
-  background: #ffffff;
-  padding: 8px;
-  border-radius: 10px;
-  position: relative;
+  width: 180px;
+  height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin: 1.5rem auto;
 }
-.qr-matrix {
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 2px;
-  width: 100%;
-  height: 100%;
+.qr-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
 }
-.qr-dot {
-  background: #cbd5e1;
-}
-.qr-dot.active {
-  background: #0f172a;
-}
-.qr-corner {
-  position: absolute;
-  width: 32px;
-  height: 32px;
-  border: 3px solid #0f172a;
-  background: transparent;
-}
-.qr-corner.top-left { top: 8px; left: 8px; border-right: none; border-bottom: none; }
-.qr-corner.top-right { top: 8px; right: 8px; border-left: none; border-bottom: none; }
-.qr-corner.bottom-left { bottom: 8px; left: 8px; border-right: none; border-top: none; }
 
 .sas-block {
   display: flex;
