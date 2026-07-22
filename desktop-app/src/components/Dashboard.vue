@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from "vue";
+import { ref, watch } from "vue";
 import QRCode from 'qrcode';
 import { 
   Shield, 
@@ -60,19 +60,13 @@ const inputDevicePic = ref("");
 const copyStatusText = ref("");
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const isUltrasonicActive = ref(false);
-const qrCanvasRef = ref<HTMLCanvasElement | null>(null);
+const qrDataUrl = ref("");
 
 const generateQR = async () => {
-  await nextTick();
-  const canvas = qrCanvasRef.value;
-  if (!canvas || !props.pairingConfigJson) return;
-  const parent = canvas.parentElement;
-  const size = parent ? Math.min(parent.clientWidth || 180, 200) : 200;
-  canvas.width = size;
-  canvas.height = size;
+  if (!props.pairingConfigJson) return;
   try {
-    await QRCode.toCanvas(canvas, props.pairingConfigJson, {
-      width: size,
+    qrDataUrl.value = await QRCode.toDataURL(props.pairingConfigJson, {
+      width: 200,
       margin: 2,
       color: { dark: '#0f172a', light: '#ffffff' }
     });
@@ -135,7 +129,7 @@ const handleFileChange = (event: Event) => {
             <p class="desc">Scan this QR code with the companion mobile app to establish a secure cryptographic trust chain.</p>
             
             <div class="qr-code-simulator">
-              <canvas ref="qrCanvasRef" class="qr-canvas"></canvas>
+              <img v-if="qrDataUrl" :src="qrDataUrl" class="qr-image" alt="Pairing QR code" />
             </div>
             
             <div class="sas-block">
@@ -385,10 +379,10 @@ const handleFileChange = (event: Event) => {
   border-radius: 10px;
   padding: 4px;
 }
-.qr-canvas {
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: 4px;
+.qr-image {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
 }
 
 .sas-block {
