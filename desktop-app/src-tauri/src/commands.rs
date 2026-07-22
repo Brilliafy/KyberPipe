@@ -315,9 +315,14 @@ pub fn dump_flight_recorder_events() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn init_sentry_desktop_telemetry(dsn: String) -> Result<String, String> {
-    core_crypto::telemetry::init_sentry_desktop_diagnostics(&dsn);
-    Ok("Sentry Desktop Error Diagnostics Initialized".to_string())
+pub fn init_sentry_desktop_telemetry(dsn: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    state.add_log(format!("[Telemetry] Local logging active. Remote telemetry disabled. DSN: {}", dsn));
+    Ok("Local Diagnostics Active (Zero-Trust Enforcement)".to_string())
+}
+
+#[tauri::command]
+pub fn get_latest_crash_log() -> Option<String> {
+    std::fs::read_to_string("crash_log.txt").ok()
 }
 
 #[tauri::command]

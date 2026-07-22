@@ -51,6 +51,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         settingsManager = SettingsManager(this)
 
+        // Zero-Trust Local Crash Logger setup
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            saveCrashLog(throwable)
+            android.os.Process.killProcess(android.os.Process.myPid())
+            System.exit(10)
+        }
+
         // Prompt permissions on launch
         requestInitialPermissions()
 
@@ -71,6 +78,57 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    fun getLatestCrashLog(): String? {
+        val file = java.io.File(filesDir, "crash_log.txt")
+        return if (file.exists()) file.readText() else null
+    }
+
+    fun shareTextFile(filename: String, content: String) {
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TITLE, filename)
+                putExtra(Intent.EXTRA_TEXT, content)
+            }
+            startActivity(Intent.createChooser(intent, "Export $filename"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun saveCrashLog(throwable: Throwable) {
+        try {
+            val sw = java.io.StringWriter()
+            val pw = java.io.PrintWriter(sw)
+            throwable.printStackTrace(pw)
+            val fullTrace = sw.toString()
+            
+            // Anonymize device identifiers or sensitive values
+            val anonymized = anonymizeAndroidCrashLog(fullTrace)
+            
+            val file = java.io.File(filesDir, "crash_log.txt")
+            file.writeText(anonymized)
+        } catch (e: Exception) {
+            Log.e("KyberPipe", "Failed to write crash log", e)
+        }
+    }
+
+    private fun anonymizeAndroidCrashLog(rawTrace: String): String {
+        var scrubbed = rawTrace
+        // Scrub phone numbers (10+ digits)
+        scrubbed = scrubbed.replace(Regex("\\+?[0-9]{10,}"), "[MASKED_PHONE_NUMBER]")
+        // Scrub email addresses
+        scrubbed = scrubbed.replace(Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"), "[MASKED_EMAIL]")
+        // Scrub IP addresses
+        scrubbed = scrubbed.replace(Regex("\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b"), "[MASKED_IP]")
+        // Scrub Android device serials/identifying fingerprints if any leak
+        scrubbed = scrubbed.replace(Build.FINGERPRINT, "[MASKED_FINGERPRINT]")
+        scrubbed = scrubbed.replace(Build.MODEL, "[MASKED_MODEL]")
+        scrubbed = scrubbed.replace(Build.DEVICE, "[MASKED_DEVICE]")
+        scrubbed = scrubbed.replace(Build.MANUFACTURER, "[MASKED_MANUFACTURER]")
+        return scrubbed
     }
 
     private fun requestInitialPermissions() {
@@ -164,6 +222,15 @@ fun MainScreen(
     var keyPair by remember { mutableStateOf<PqKeyPair?>(null) }
     var ambientLux by remember { mutableStateOf(250.0f) }
 
+    // Zero-Trust Local Logging state
+    val localLogs = remember { mutableStateListOf("[Engine] Local companion active") }
+    val addLog = { msg: String ->
+        localLogs.add(msg)
+        if (localLogs.size > 100) {
+            localLogs.removeAt(0)
+        }
+    }
+
     // Connectivity State Machine
     var connectionStatus by remember { mutableStateOf("DISCONNECTED") }
     var connectionMethod by remember { mutableStateOf("None") }
@@ -190,8 +257,10 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         try {
             keyPair = generatePqKeypair()
+            addLog("[PQC] Loaded cryptographic provider successfully")
         } catch (e: Exception) {
             e.printStackTrace()
+            addLog("[PQC] Failed to load keypair: ${e.message}")
         }
 
         // Hook real Android Clipboard
@@ -212,10 +281,12 @@ fun MainScreen(
                                 timestamp = System.currentTimeMillis()
                             )
                         )
+                        addLog("[Clipboard] Intercepted new primary clip: ${text.take(20)}...")
                     }
                 }
             }
         }
+        addLog("[Service] Hooked primary clipboard listener")
     }
 
     // Light Sensor Listener
@@ -245,6 +316,7 @@ fun MainScreen(
                 connectionStatus = "DISCONNECTED (No paired device)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
+                addLog("[Network] Idle: Waiting for pairing credentials")
                 return@launch
             }
 
@@ -252,12 +324,14 @@ fun MainScreen(
                 connectionStatus = "DISCONNECTED (Max attempts failed)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
+                addLog("[Network] Error: Connection timed out. All connection paths exhausted.")
                 return@launch
             }
 
             attemptCount++
             connectionStatus = "CONNECTING (Attempt $attemptCount/$maxAttempts)..."
             connectionColor = Color.Yellow
+            addLog("[Network] Probing interfaces (Attempt $attemptCount/$maxAttempts)...")
             delay(1500) // Simulate transport pathway validation
 
             try {
@@ -268,17 +342,20 @@ fun MainScreen(
                     connectionMethod = "WireGuard WAN Tunnel"
                     connectionColor = Color.Green
                     attemptCount = 0
+                    addLog("[Network] Failover: Switched to WireGuard WAN Tunnel (Direct P2P links inactive)")
                 } else {
                     val info = evaluateConnectionHierarchy(wifiDirectActive, lanActive, resolvedPublicIp)
                     connectionStatus = "ACTIVE"
                     connectionMethod = info.activePathDescription
                     connectionColor = Color.Green
                     attemptCount = 0
+                    addLog("[Network] Active: Tunnel established via ${info.activePathDescription} (PQC keys verified)")
                 }
             } catch (e: Exception) {
                 connectionStatus = "DISCONNECTED"
                 connectionMethod = "None"
                 connectionColor = Color.Red
+                addLog("[Network] Failover error: ${e.message}")
             }
         }
     }
@@ -309,11 +386,40 @@ fun MainScreen(
                 // Set paired state
                 tempPcName = "Linux Desktop workstation"
                 showFirstConnectModal = true
+                addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
             } catch (e: Exception) {
                 Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
+                addLog("[Pairing] Error: Handshake verification failed (${e.message})")
             }
         }
     }
+
+    val onCopyStacktrace = {
+        val crashLog = activity.getLatestCrashLog()
+        if (crashLog != null) {
+            val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe Stacktrace", crashLog))
+            Toast.makeText(context, "Copied anonymized stacktrace", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "No crash log found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val onExportDiagnosticLogs = {
+        val logText = localLogs.joinToString("\n")
+        activity.shareTextFile("diagnostic_logs.txt", logText)
+    }
+
+    val onExportCrashLog = {
+        val crashLog = activity.getLatestCrashLog()
+        if (crashLog != null) {
+            activity.shareTextFile("anonymous_crash_log.txt", crashLog)
+        } else {
+            Toast.makeText(context, "No crash log found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val hasCrashLog = activity.getLatestCrashLog() != null
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -422,7 +528,12 @@ fun MainScreen(
                         onPairingConfigChange = { pairingConfigInput = it },
                         onTriggerHandshake = handlePairingHandshake,
                         onAvatarPickerClick = onAvatarPickerClick,
-                        onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) }
+                        onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
+                        localLogs = localLogs,
+                        onCopyStacktrace = onCopyStacktrace,
+                        onExportDiagnosticLogs = onExportDiagnosticLogs,
+                        onExportCrashLog = onExportCrashLog,
+                        hasCrashLog = hasCrashLog
                     )
                 }
             }
