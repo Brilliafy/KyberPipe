@@ -11,7 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { RefreshCw, ShieldAlert, Terminal } from "@lucide/vue";
+import { CheckCircle2, Loader2, XCircle, Terminal } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -122,6 +122,8 @@ const latencyColor = computed(() => {
   if (ms < 500) return '#f97316';
   return '#ef4444';
 });
+
+const hasWifiInterface = ref(true); // Will be determined by system info
 
 // Settings / Storage
 const deviceName = ref("My Linux Workstation");
@@ -644,29 +646,32 @@ onUnmounted(() => {
       <!-- Top Status Header -->
       <header class="top-bar">
         <div class="status-indicator">
-          <div class="status-badge" :class="connectionColor">
-            <span class="status-dot"></span>
-            <span class="status-lbl">
-              <span v-if="connectionColor === 'green'">Connected</span>
-              <span v-else-if="connectionColor === 'yellow'">Connecting…</span>
-              <span v-else>Offline</span>
-              <span class="method-lbl" v-if="connectionColor === 'green'">via {{ connectionMethod }}</span>
-            </span>
-            <button 
-              class="btn-retry" 
-              v-if="connectionColor === 'red'" 
-              @click="handleManualRetry"
-              title="Retry connection"
-            >
-              <RefreshCw :size="12" />
-            </button>
-          </div>
+          <span 
+            class="status-pill"
+            :class="{
+              'status-green': connectionColor === 'green',
+              'status-yellow': connectionColor === 'yellow',
+              'status-red': connectionColor === 'red'
+            }"
+          >
+            <component 
+              :is="connectionColor === 'green' ? CheckCircle2 : (connectionColor === 'yellow' ? Loader2 : XCircle)"
+              class="status-icon"
+              :class="{ 'animate-spin': connectionColor === 'yellow' }"
+            />
+            <span v-if="connectionColor === 'green'">Connected</span>
+            <span v-else-if="connectionColor === 'yellow'">Connecting</span>
+            <span v-else>Offline</span>
+            <span class="method-lbl" v-if="connectionColor === 'green'">via {{ connectionMethod }}</span>
+          </span>
         </div>
 
         <div class="header-right">
           <div class="latency-display">
             <span class="latency-label">Latency</span>
-            <span class="latency-value" :style="{ color: latencyColor }">{{ currentLatency }}ms</span>
+            <span class="latency-value" :style="{ color: latencyColor }">
+              {{ isConnected ? currentLatency + 'ms' : '- ms' }}
+            </span>
           </div>
         </div>
       </header>
@@ -698,6 +703,7 @@ onUnmounted(() => {
         :wifiDirectActive="wifiDirectActive"
         :lanActive="lanActive"
         :wireguardActive="wireguardActive"
+        :hasWifiInterface="hasWifiInterface"
         :resolvedPublicIp="resolvedPublicIp"
         :ddnsHostname="ddnsHostname"
         :enableUpnp="enableUpnp"
@@ -989,75 +995,6 @@ body {
   align-items: center;
   margin-bottom: 2rem;
 }
-.status-badge {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  background: var(--bg-card);
-  padding: 0.5rem 1.25rem;
-  border-radius: 30px;
-  border: 1px solid var(--border-color);
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: var(--text-secondary);
-  transition: background-color 0.3s ease, border-color 0.3s ease;
-}
-.status-badge.green {
-  color: #22c55e;
-  border-color: rgba(34, 197, 94, 0.3);
-}
-.status-badge.yellow {
-  color: #f59e0b;
-  border-color: rgba(245, 158, 11, 0.3);
-}
-.status-badge.red {
-  color: #ef4444;
-  border-color: rgba(239, 68, 68, 0.3);
-}
-.status-dot {
-  width: 8px;
-  height: 8px;
-  background: var(--text-secondary);
-  border-radius: 50%;
-  display: inline-block;
-}
-.green .status-dot {
-  background: #22c55e;
-  box-shadow: 0 0 10px #22c55e;
-}
-.yellow .status-dot {
-  background: #f59e0b;
-  box-shadow: 0 0 10px #f59e0b;
-}
-.red .status-dot {
-  background: #ef4444;
-  box-shadow: 0 0 10px #ef4444;
-}
-.btn-retry {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  font-size: 1rem;
-  transition: transform 0.2s ease;
-}
-.btn-retry:hover {
-  transform: rotate(45deg);
-}
-.btn-panic {
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.btn-panic:hover {
-  background: #ef4444;
-  color: white;
-  box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
-}
 .panel {
   background: var(--bg-card);
   backdrop-filter: blur(12px);
@@ -1148,10 +1085,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  background: var(--bg-card);
-  padding: 0.4rem 0.85rem;
-  border-radius: 20px;
-  border: 1px solid var(--border-color);
+  background: transparent;
+  padding: 0;
   font-size: 0.8rem;
 }
 .latency-label {
@@ -1163,5 +1098,129 @@ body {
   font-family: monospace;
   font-size: 0.9rem;
   transition: color 0.3s ease;
+}
+/* Modern button styles */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1.15rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+}
+.btn-primary {
+  background: #6366f1;
+  color: white;
+}
+.btn-primary:hover {
+  background: #4f46e5;
+}
+.btn-secondary {
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--text-primary);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+.btn-secondary:hover {
+  background: rgba(99, 102, 241, 0.2);
+}
+.btn-secondary-outline {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+.btn-secondary-outline:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--accent-cyan);
+}
+.btn-sm {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.7rem;
+}
+.btn-accent {
+  background: rgba(6, 182, 212, 0.12);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(6, 182, 212, 0.25);
+}
+.btn-accent:hover {
+  background: rgba(6, 182, 212, 0.2);
+}
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.6rem 1.15rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid var(--border-color);
+}
+.action-btn.primary-btn {
+  background: var(--accent-cyan);
+  color: var(--bg-card);
+  border-color: var(--accent-cyan);
+}
+.action-btn.primary-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.action-btn.secondary-btn {
+  background: var(--bg-dark);
+  color: var(--text-primary);
+}
+.action-btn.secondary-btn:hover:not(:disabled) {
+  background: var(--border-color);
+}
+.action-btn.danger-btn {
+  background: rgba(220, 38, 38, 0.15);
+  color: #f87171;
+  border-color: rgba(220, 38, 38, 0.4);
+}
+.action-btn.danger-btn:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.3);
+}
+.action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Modern status pills */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.85rem 0.35rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: 1px solid;
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+  cursor: default;
+}
+.status-icon {
+  width: 18px;
+  height: 18px;
+}
+.status-green {
+  background: rgba(5, 150, 105, 0.15);
+  color: #34d399;
+  border-color: rgba(5, 150, 105, 0.35);
+}
+.status-yellow {
+  background: rgba(217, 119, 6, 0.15);
+  color: #fbbf24;
+  border-color: rgba(217, 119, 6, 0.35);
+}
+.status-red {
+  background: rgba(225, 29, 72, 0.15);
+  color: #fb7185;
+  border-color: rgba(225, 29, 72, 0.35);
 }
 </style>

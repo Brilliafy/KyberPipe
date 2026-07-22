@@ -12,6 +12,7 @@ const props = defineProps<{
   wifiDirectActive: boolean;
   lanActive: boolean;
   wireguardActive: boolean;
+  hasWifiInterface: boolean;
   resolvedPublicIp: string;
   ddnsHostname: string;
   enableUpnp: boolean;
@@ -101,11 +102,16 @@ const isPathwayActive = (pKey: string) => {
 
 const activeKey = computed(() => {
   for (const p of props.pathwayOrder) {
+    if (p === 'wifi_direct' && !props.hasWifiInterface) continue;
     if (p === 'wifi_direct' && props.wifiDirectActive) return p;
     if (p === 'mdns_lan' && props.lanActive) return p;
     if (p === 'wireguard_wan' && props.wireguardActive) return p;
   }
   return '';
+});
+
+const effectivePathwayOrder = computed(() => {
+  return props.pathwayOrder.filter(p => p !== 'wifi_direct' || props.hasWifiInterface);
 });
 
 const PATHWAY_META: Record<string, { name: string; desc: string; latency: string }> = {
@@ -291,15 +297,16 @@ onUnmounted(() => {
 
         <div class="interfaces-list">
           <div 
-            v-for="(pKey, index) in pathwayOrder" 
+            v-for="(pKey, index) in effectivePathwayOrder" 
             :key="pKey"
             class="interface-item"
             :class="{ 
               active: activeKey === pKey,
-              inactive: !isPathwayActive(pKey),
+              inactive: !isPathwayActive(pKey) || (pKey === 'wifi_direct' && !hasWifiInterface),
+              disabled: pKey === 'wifi_direct' && !hasWifiInterface,
               'drag-over': dragOverIndex === index
             }"
-            draggable="true"
+            :draggable="pKey !== 'wifi_direct' || hasWifiInterface"
             @dragstart="handleDragStart($event, index)"
             @dragover="handleDragOver($event, index)"
             @drop="handleDrop(index)"
@@ -307,7 +314,7 @@ onUnmounted(() => {
           >
             <div class="interface-header">
               <div class="interface-title">
-                <span class="drag-handle">
+                <span class="drag-handle" v-if="pKey !== 'wifi_direct' || hasWifiInterface">
                   <GripVertical :size="14" />
                 </span>
                 <span class="tier-number">Priority {{ index + 1 }}</span>
@@ -317,9 +324,10 @@ onUnmounted(() => {
                   style="color: var(--accent-cyan);" 
                 />
                 <strong>{{ PATHWAY_META[pKey].name }}</strong>
+                <span v-if="pKey === 'wifi_direct' && !hasWifiInterface" class="no-wifi-badge">No Wi-Fi</span>
               </div>
               
-              <div class="toggle-switch">
+              <div class="toggle-switch" v-if="pKey !== 'wifi_direct' || hasWifiInterface">
                 <input 
                   type="checkbox" 
                   :id="'toggle-' + pKey" 
@@ -503,6 +511,21 @@ onUnmounted(() => {
   opacity: 0.85;
   background: rgba(255, 255, 255, 0.03);
   border-color: rgba(255, 255, 255, 0.03);
+}
+.interface-item.disabled {
+  opacity: 0.45;
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.02);
+  pointer-events: none;
+}
+.no-wifi-badge {
+  font-size: 0.6rem;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 :global(html.theme-daylight) .interface-item.inactive {
   background: rgba(0, 0, 0, 0.06);
