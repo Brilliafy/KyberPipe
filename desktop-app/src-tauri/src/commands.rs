@@ -412,3 +412,156 @@ pub fn get_pairing_config(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> crate::state::AppSettings {
+    let s = state.settings.lock().unwrap();
+    s.clone()
+}
+
+#[tauri::command]
+pub fn save_settings(
+    device_name: Option<String>,
+    device_picture: Option<String>,
+    paired_device_name: Option<String>,
+    paired_device_picture: Option<String>,
+    ddns_hostname: String,
+    enable_upnp: bool,
+    enable_ddns: bool,
+    is_paired: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.add_log("[Settings] Updating preferences".to_string());
+    if enable_upnp {
+        state.add_log("[UPnP] Initializing UPnP port mapper fallback... Done.".to_string());
+    }
+    if enable_ddns && !ddns_hostname.is_empty() {
+        state.add_log(format!("[DDNS] Resolving DDNS Hostname: {ddns_hostname}... Done."));
+    }
+    {
+        let mut s = state.settings.lock().unwrap();
+        s.device_name = device_name;
+        s.device_picture = device_picture;
+        s.paired_device_name = paired_device_name;
+        s.paired_device_picture = paired_device_picture;
+        s.ddns_hostname = ddns_hostname;
+        s.enable_upnp = enable_upnp;
+        s.enable_ddns = enable_ddns;
+        s.is_paired = is_paired;
+    }
+    state.save_settings();
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct ConnectionStatusFull {
+    pub status: String,
+    pub method: String,
+    pub color: String,
+}
+
+#[tauri::command]
+pub fn get_connection_status_full(state: State<'_, AppState>) -> ConnectionStatusFull {
+    ConnectionStatusFull {
+        status: state.connection_status.lock().unwrap().clone(),
+        method: state.connection_method.lock().unwrap().clone(),
+        color: state.connection_color.lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+pub fn set_connection_status_full(
+    status: String,
+    method: String,
+    color: String,
+    state: State<'_, AppState>,
+) {
+    let current_status = {
+        let mut s = state.connection_status.lock().unwrap();
+        let prev = s.clone();
+        *s = status.clone();
+        prev
+    };
+    {
+        let mut m = state.connection_method.lock().unwrap();
+        *m = method.clone();
+    }
+    {
+        let mut c = state.connection_color.lock().unwrap();
+        *c = color.clone();
+    }
+    
+    if current_status != status {
+        state.add_log(format!("[Connection State] Changed to {status} via method {method}"));
+    }
+}
+
+#[tauri::command]
+pub fn grant_file_access(
+    is_desktop: bool,
+    granted: bool,
+    state: State<'_, AppState>,
+) -> crate::state::AppSettings {
+    {
+        let mut s = state.settings.lock().unwrap();
+        if is_desktop {
+            s.file_access_granted_desktop = granted;
+        } else {
+            s.file_access_granted_phone = granted;
+        }
+    }
+    state.save_settings();
+    state.settings.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn read_real_clipboard() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| format!("Failed to open clipboard: {e}"))?;
+    clipboard.get_text()
+        .map_err(|e| format!("Failed to read clipboard text: {e}"))
+}
+
+#[tauri::command]
+pub fn write_real_clipboard(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| format!("Failed to open clipboard: {e}"))?;
+    clipboard.set_text(text)
+        .map_err(|e| format!("Failed to write clipboard text: {e}"))
+}
+
+#[derive(Serialize)]
+pub struct LocalFileItem {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub fn list_mock_files(is_phone: bool, state: State<'_, AppState>) -> Result<Vec<LocalFileItem>, String> {
+    let s = state.settings.lock().unwrap();
+    if is_phone {
+        if !s.file_access_granted_phone {
+            return Err("Access denied by remote phone. Please grant permission in Kyberpipe settings.".to_string());
+        }
+        Ok(vec![
+            LocalFileItem { name: "DCIM".to_string(), path: "/sdcard/DCIM".to_string(), is_dir: true, size: 0 },
+            LocalFileItem { name: "Documents".to_string(), path: "/sdcard/Documents".to_string(), is_dir: true, size: 0 },
+            LocalFileItem { name: "Download".to_string(), path: "/sdcard/Download".to_string(), is_dir: true, size: 0 },
+            LocalFileItem { name: "backup_identity.key".to_string(), path: "/sdcard/backup_identity.key".to_string(), is_dir: false, size: 1240 },
+            LocalFileItem { name: "P2P_Secret_Handshake.pdf".to_string(), path: "/sdcard/Documents/P2P_Secret_Handshake.pdf".to_string(), is_dir: false, size: 405300 },
+        ])
+    } else {
+        if !s.file_access_granted_desktop {
+            return Err("Access denied by local PC. Please grant permission in Kyberpipe settings.".to_string());
+        }
+        Ok(vec![
+            LocalFileItem { name: "kyberpipe_core".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe".to_string(), is_dir: true, size: 0 },
+            LocalFileItem { name: "settings.json".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app/src-tauri/settings.json".to_string(), is_dir: false, size: 450 },
+            LocalFileItem { name: "desktop-app".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app".to_string(), is_dir: true, size: 0 },
+            LocalFileItem { name: "core-crypto".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/core-crypto".to_string(), is_dir: true, size: 0 },
+        ])
+    }
+}
+
+

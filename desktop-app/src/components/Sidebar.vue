@@ -29,37 +29,49 @@ const emit = defineEmits<{
         :class="{ active: currentTab === 'dashboard' }"
         @click="emit('update:currentTab', 'dashboard')"
       >
-        Overview
+        <span>📊</span> Overview
+      </button>
+      <button
+        :class="{ active: currentTab === 'connectivity' }"
+        @click="emit('update:currentTab', 'connectivity')"
+      >
+        <span>🌐</span> Connection Manager
+      </button>
+      <button
+        :class="{ active: currentTab === 'files' }"
+        @click="emit('update:currentTab', 'files')"
+      >
+        <span>📁</span> File Manager
       </button>
       <button
         :class="{ active: currentTab === 'clipboard' }"
         @click="emit('update:currentTab', 'clipboard')"
       >
-        Clipboard Manager
+        <span>📋</span> Clipboard Manager
       </button>
       <button
         :class="{ active: currentTab === 'notifications' }"
         @click="emit('update:currentTab', 'notifications')"
       >
-        Notifications
+        <span>🔔</span> Notifications
       </button>
       <button
         :class="{ active: currentTab === 'light' }"
         @click="emit('update:currentTab', 'light')"
       >
-        Automation Event Handlers
+        <span>⚡</span> Automation
       </button>
       <button
         :class="{ active: currentTab === 'logs' }"
         @click="emit('update:currentTab', 'logs')"
       >
-        System Logs
+        <span>📟</span> System Logs
       </button>
       <button
         :class="{ active: currentTab === 'settings' }"
         @click="emit('update:currentTab', 'settings')"
       >
-        Settings
+        <span>⚙️</span> Settings
       </button>
     </nav>
 

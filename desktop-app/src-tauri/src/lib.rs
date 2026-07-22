@@ -47,6 +47,14 @@ pub fn run() {
             perform_stun_hole_punch,
             evaluate_connection_status,
             get_pairing_config,
+            get_settings,
+            save_settings,
+            get_connection_status_full,
+            set_connection_status_full,
+            grant_file_access,
+            read_real_clipboard,
+            write_real_clipboard,
+            list_mock_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 // Import Refactored Sub-Components
@@ -9,12 +9,14 @@ import ClipboardManager from "./components/ClipboardManager.vue";
 import NotificationCenter from "./components/NotificationCenter.vue";
 import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import ConnectivityManager from "./components/ConnectivityManager.vue";
+import FileManager from "./components/FileManager.vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
   platform: string;
   app_version: string;
-  pqc_algorithm: String;
+  pqc_algorithm: string;
 }
 
 interface KeyPair {
@@ -43,34 +45,139 @@ interface NotificationPacket {
   timestamp: number;
 }
 
-const currentTab = ref<"dashboard" | "light" | "clipboard" | "notifications" | "logs" | "settings">("dashboard");
+interface ClipboardRecord {
+  id: string;
+  text: string;
+  source: "pc" | "phone";
+  timestamp: number;
+}
+
+interface UnifiedNotification {
+  id: string;
+  source: string;
+  title: string;
+  body: string;
+  appPackage: string;
+  timestamp: string;
+  type: "local" | "remote";
+}
+
+const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "notifications" | "light" | "logs" | "settings">("dashboard");
 
 const systemInfo = ref<SystemInfo | null>(null);
 const keyPair = ref<KeyPair | null>(null);
 const logs = ref<string[]>([]);
-const connectionStatus = ref("Ready (Listening on UDP :9876)");
+
+// Connectivity State Machine
+const connectionStatus = ref("DISCONNECTED");
+const connectionMethod = ref("None");
+const connectionColor = ref("red"); // "green", "yellow", "red"
+const isConnected = computed(() => connectionColor.value === "green");
+
 const wifiDirectActive = ref(true);
 const lanActive = ref(false);
 const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
 
+// Settings / Storage
+const deviceName = ref("My Linux Workstation");
+const devicePicture = ref("");
+const pairedDeviceName = ref("");
+const pairedDevicePicture = ref("");
+const ddnsHostname = ref("");
+const enableUpnp = ref(false);
+const enableDdns = ref(false);
+const isPaired = ref(false);
+const fileAccessGrantedDesktop = ref(false);
+const fileAccessGrantedPhone = ref(false);
+
 // Ambient Light Sandbox State
 const currentLux = ref(250.0);
 const scriptResult = ref<ScriptResult | null>(null);
 
-// Clipboard State
+// Clipboard State (Real)
 const lastSyncStatus = ref("");
-const clipboardItems = ref<string[]>([
-  "Secure synchronization token block",
-  "Identity public key fingerprint verification hash",
-  "Kyberpipe active connection metadata"
-]);
+const clipboardItems = ref<ClipboardRecord[]>([]);
+
+// Notifications & SMS State (Real)
+const smsList = ref<SmsPacket[]>([]);
+const notifList = ref<NotificationPacket[]>([]);
+const optimisticStatus = ref<string | null>(null);
+
+const sasCode = ref("849-201");
+const neuralAnomalyEnabled = ref(false);
+const flightRecorderEnabled = ref(false);
+
+// Methods
+
+const loadSettings = async () => {
+  try {
+    const settings = await invoke<any>("get_settings");
+    deviceName.value = settings.device_name || "My Linux Workstation";
+    devicePicture.value = settings.device_picture || "";
+    pairedDeviceName.value = settings.paired_device_name || "";
+    pairedDevicePicture.value = settings.paired_device_picture || "";
+    ddnsHostname.value = settings.ddns_hostname || "";
+    enableUpnp.value = settings.enable_upnp || false;
+    enableDdns.value = settings.enable_ddns || false;
+    isPaired.value = settings.is_paired || false;
+    fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
+    fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
+  } catch (e) {
+    console.error("Load settings error:", e);
+  }
+};
+
+const saveSettings = async () => {
+  try {
+    await invoke("save_settings", {
+      deviceName: deviceName.value,
+      devicePicture: devicePicture.value,
+      pairedDeviceName: pairedDeviceName.value,
+      pairedDevicePicture: pairedDevicePicture.value,
+      ddnsHostname: ddnsHostname.value,
+      enableUpnp: enableUpnp.value,
+      enableDdns: enableDdns.value,
+      isPaired: isPaired.value
+    });
+  } catch (e) {
+    console.error("Save settings error:", e);
+  }
+};
+
+const pollClipboard = async () => {
+  try {
+    const text = await invoke<string>("read_real_clipboard");
+    if (text && text.trim() !== "") {
+      const exists = clipboardItems.value.some(item => item.text === text);
+      if (!exists) {
+        const newRecord: ClipboardRecord = {
+          id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+          text: text,
+          source: "pc",
+          timestamp: Date.now()
+        };
+        clipboardItems.value.unshift(newRecord);
+        await invoke("sync_clipboard", { text });
+      }
+    }
+  } catch (e) {
+    // Ignore clipboard read errors (e.g. empty or binary content)
+  }
+};
 
 const handleAddClipboard = async (text: string) => {
-  clipboardItems.value.unshift(text);
+  const newRecord: ClipboardRecord = {
+    id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+    text: text,
+    source: "pc",
+    timestamp: Date.now()
+  };
+  clipboardItems.value.unshift(newRecord);
   try {
+    await invoke("write_real_clipboard", { text });
     await invoke("sync_clipboard", { text });
-    lastSyncStatus.value = "Synced item to local and remote hosts";
+    lastSyncStatus.value = "Synced item locally & pushed remote";
     await refreshLogs();
   } catch (e) {
     lastSyncStatus.value = "Sync warning: " + e;
@@ -79,43 +186,45 @@ const handleAddClipboard = async (text: string) => {
 
 const handleCopyClipboard = async (text: string) => {
   try {
-    await navigator.clipboard.writeText(text);
-    lastSyncStatus.value = "Copied item to system clipboard";
+    await invoke("write_real_clipboard", { text });
+    lastSyncStatus.value = "Copied to desktop clipboard";
   } catch (e) {
     lastSyncStatus.value = "Copy failed: " + e;
   }
 };
 
-const handleRemoveClipboard = (index: number) => {
-  clipboardItems.value.splice(index, 1);
+const handleRemoveClipboard = (id: string) => {
+  clipboardItems.value = clipboardItems.value.filter(item => item.id !== id);
   lastSyncStatus.value = "Item removed";
 };
 
-const handleSaveEditClipboard = async (payload: { index: number; text: string }) => {
-  clipboardItems.value[payload.index] = payload.text;
-  try {
-    await invoke("sync_clipboard", { text: payload.text });
-    lastSyncStatus.value = "Updated and synced item";
-    await refreshLogs();
-  } catch (e) {
-    lastSyncStatus.value = "Update warning: " + e;
+const handleSaveEditClipboard = async (payload: { id: string; text: string }) => {
+  const idx = clipboardItems.value.findIndex(item => item.id === payload.id);
+  if (idx !== -1) {
+    clipboardItems.value[idx].text = payload.text;
+    try {
+      await invoke("write_real_clipboard", { text: payload.text });
+      await invoke("sync_clipboard", { text: payload.text });
+      lastSyncStatus.value = "Updated and synced item";
+      await refreshLogs();
+    } catch (e) {
+      lastSyncStatus.value = "Update warning: " + e;
+    }
   }
 };
 
-// Ambient-Adaptive Theme Computed Property
+// Theme classes
 const currentThemeClass = computed(() => {
   const lux = currentLux.value;
-  if (lux > 500) return 'theme-daylight';
-  if (lux < 5) return 'theme-oled-black';
-  return 'theme-cyber-dark';
+  if (lux > 500) return "theme-daylight";
+  if (lux < 5) return "theme-oled-black";
+  return "theme-cyber-dark";
 });
 
-// Optimistic UI Action Dispatcher with Auto-Rollback
-const optimisticStatus = ref<string | null>(null);
+// Outgoing SMS dispatch
 const sendOptimisticSms = async (payload: { sender: string; body: string }) => {
   const previousState = [...smsList.value];
   optimisticStatus.value = "Outgoing message dispatched";
-  
   try {
     smsList.value = await invoke<SmsPacket[]>("push_sms_packet", {
       sender: payload.sender,
@@ -125,135 +234,13 @@ const sendOptimisticSms = async (payload: { sender: string; body: string }) => {
     await refreshLogs();
     setTimeout(() => { optimisticStatus.value = null; }, 2000);
   } catch (e) {
-    smsList.value = previousState; // Auto-rollback
+    smsList.value = previousState;
     optimisticStatus.value = "Transmission failed (Rolled Back)";
   }
 };
 
-const smsList = ref<SmsPacket[]>([]);
-const notifList = ref<NotificationPacket[]>([]);
-
-const sasCode = ref("849-201");
-const neuralAnomalyEnabled = ref(false); // Off by default
-const flightRecorderEnabled = ref(false); // Disabled by default
-
-const handleToggleFlightRecorder = async (val: boolean) => {
-  flightRecorderEnabled.value = val;
-  try {
-    await invoke<string>("toggle_flight_recorder", { enabled: val });
-    await refreshLogs();
-  } catch (e: any) {
-    console.error("Flight recorder error: ", e);
-  }
-};
-
-const handleToggleNeuralAnomaly = async (val: boolean) => {
-  neuralAnomalyEnabled.value = val;
-  try {
-    await invoke<string>("toggle_neural_anomaly_engine", { enabled: val });
-    await refreshLogs();
-  } catch (e: any) {
-    console.error("Anomaly error: ", e);
-  }
-};
-
-const triggerSelfDestruct = async () => {
-  if (confirm("CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
-    try {
-      await invoke<string>("trigger_panic_self_destruct");
-      await refreshLogs();
-    } catch (e: any) {
-      console.error("Self destruct error: ", e);
-    }
-  }
-};
-
-async function loadSystemInfo() {
-  try {
-    systemInfo.value = await invoke<SystemInfo>("get_system_info");
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-async function handleGenerateKeyPair() {
-  try {
-    keyPair.value = await invoke<KeyPair>("generate_keypair");
-    await refreshLogs();
-    await loadPairingConfig();
-  } catch (e) {
-    console.error("Key generation error: ", e);
-  }
-}
-
-const runStunHolePunch = async (host: string) => {
-  try {
-    resolvedPublicIp.value = "Querying STUN...";
-    const res = await invoke<string>("perform_stun_hole_punch", { stunHost: host });
-    resolvedPublicIp.value = res;
-    await refreshLogs();
-    await updateConnectionStatus();
-  } catch (e: any) {
-    resolvedPublicIp.value = "Failed: " + e;
-    await refreshLogs();
-  }
-};
-
-const updateConnectionStatus = async () => {
-  try {
-    const info = await invoke<{
-      active_tier: number;
-      active_path_description: string;
-      latency_ms: number;
-      public_endpoint: string;
-    }>("evaluate_connection_status", {
-      wifiDirectActive: wifiDirectActive.value,
-      lanActive: lanActive.value,
-      publicEndpoint: resolvedPublicIp.value,
-    });
-    connectionStatus.value = `Active: ${info.active_path_description} (${info.latency_ms}ms)`;
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const loadPairingConfig = async () => {
-  if (!keyPair.value) return;
-  try {
-    const config = await invoke<{
-      host_identity_pk_hex: string;
-      local_ip: string;
-      wifi_direct_mac: string;
-      wireguard_pk_hex: string;
-      stun_endpoint: string;
-      pairing_nonce_hex: string;
-    }>("get_pairing_config", {
-      hostPkHex: keyPair.value.mlkem_pk_hex,
-      wireguardPkHex: keyPair.value.x25519_pk_hex,
-    });
-    pairingConfigJson.value = JSON.stringify(config, null, 2);
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-
-async function handleRunScript(code: string) {
-  try {
-    scriptResult.value = await invoke<ScriptResult>("execute_boa_script", {
-      scriptCode: code,
-      lux: Number(currentLux.value),
-    });
-    await refreshLogs();
-  } catch (e) {
-    console.error("Execution failed: ", e);
-  }
-}
-
-async function handlePushMockNotification(payload: { title: string; text: string; app: string }) {
+// Push mock remote notification
+const handlePushMockNotification = async (payload: { title: string; text: string; app: string }) => {
   try {
     notifList.value = await invoke<NotificationPacket[]>("push_notification_packet", {
       title: payload.title,
@@ -269,16 +256,7 @@ async function handlePushMockNotification(payload: { title: string; text: string
   } catch (e) {
     console.error(e);
   }
-}
-
-interface UnifiedNotification {
-  id: string;
-  source: string;
-  title: string;
-  body: string;
-  appPackage: string;
-  timestamp: string;
-}
+};
 
 const displayNotifications = computed<UnifiedNotification[]>(() => {
   const list: UnifiedNotification[] = [];
@@ -290,6 +268,7 @@ const displayNotifications = computed<UnifiedNotification[]>(() => {
       body: s.body,
       appPackage: "telephony.sms",
       timestamp: new Date(s.timestamp).toLocaleTimeString(),
+      type: "remote",
     });
   }
   for (const n of notifList.value) {
@@ -300,23 +279,215 @@ const displayNotifications = computed<UnifiedNotification[]>(() => {
       body: n.text,
       appPackage: n.app_package,
       timestamp: new Date(n.timestamp).toLocaleTimeString(),
+      type: "remote",
     });
   }
   return list.sort((a, b) => b.id.localeCompare(a.id));
 });
 
-async function refreshLogs() {
+const refreshLogs = async () => {
   try {
     logs.value = await invoke<string[]>("get_app_logs");
   } catch (e) {
     console.error(e);
   }
+};
+
+const runStunHolePunch = async (host: string) => {
+  try {
+    resolvedPublicIp.value = "Querying STUN...";
+    const res = await invoke<string>("perform_stun_hole_punch", { stunHost: host });
+    resolvedPublicIp.value = res;
+    await refreshLogs();
+    await triggerConnectionAttempt();
+  } catch (e: any) {
+    resolvedPublicIp.value = "Failed: " + e;
+    await refreshLogs();
+  }
+};
+
+const attemptCount = ref(0);
+const maxAttempts = 5;
+
+const triggerConnectionAttempt = async () => {
+  if (!isPaired.value) {
+    await invoke("set_connection_status_full", {
+      status: "DISCONNECTED (No paired device)",
+      method: "None",
+      color: "red"
+    });
+    await checkConnectionState();
+    return;
+  }
+
+  if (attemptCount.value >= maxAttempts) {
+    await invoke("set_connection_status_full", {
+      status: "DISCONNECTED (Max attempts failed)",
+      method: "None",
+      color: "red"
+    });
+    await checkConnectionState();
+    return;
+  }
+
+  attemptCount.value++;
+  await invoke("set_connection_status_full", {
+    status: `CONNECTING (Attempt ${attemptCount.value}/${maxAttempts})`,
+    method: "None",
+    color: "yellow"
+  });
+  await checkConnectionState();
+  await refreshLogs();
+
+  try {
+    const info = await invoke<{
+      active_tier: number;
+      active_path_description: string;
+      latency_ms: number;
+    }>("evaluate_connection_status", {
+      wifiDirectActive: wifiDirectActive.value,
+      lanActive: lanActive.value,
+      publicEndpoint: resolvedPublicIp.value,
+    });
+    
+    await invoke("set_connection_status_full", {
+      status: "ACTIVE",
+      method: info.active_path_description,
+      color: "green"
+    });
+    attemptCount.value = 0;
+  } catch (e) {
+    await invoke("set_connection_status_full", {
+      status: "DISCONNECTED (Attempt failed)",
+      method: "None",
+      color: "red"
+    });
+  }
+  await checkConnectionState();
+  await refreshLogs();
+};
+
+const checkConnectionState = async () => {
+  try {
+    const res = await invoke<any>("get_connection_status_full");
+    connectionStatus.value = res.status;
+    connectionMethod.value = res.method;
+    connectionColor.value = res.color;
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const handleManualRetry = () => {
+  attemptCount.value = 0;
+  triggerConnectionAttempt();
+};
+
+const loadPairingConfig = async () => {
+  if (!keyPair.value) return;
+  try {
+    const config = await invoke<any>("get_pairing_config", {
+      hostPkHex: keyPair.value.mlkem_pk_hex,
+      wireguardPkHex: keyPair.value.x25519_pk_hex,
+    });
+    pairingConfigJson.value = JSON.stringify(config, null, 2);
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+async function handleGenerateKeyPair() {
+  try {
+    keyPair.value = await invoke<KeyPair>("generate_keypair");
+    await refreshLogs();
+    await loadPairingConfig();
+  } catch (e) {
+    console.error("Key generation error: ", e);
+  }
 }
 
+async function handleRunScript(code: string) {
+  try {
+    scriptResult.value = await invoke<ScriptResult>("execute_boa_script", {
+      scriptCode: code,
+      lux: Number(currentLux.value),
+    });
+    await refreshLogs();
+  } catch (e) {
+    console.error("Execution failed: ", e);
+  }
+}
+
+const handleToggleFlightRecorder = async (val: boolean) => {
+  flightRecorderEnabled.value = val;
+  try {
+    await invoke("toggle_flight_recorder", { enabled: val });
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const handleToggleNeuralAnomaly = async (val: boolean) => {
+  neuralAnomalyEnabled.value = val;
+  try {
+    await invoke("toggle_neural_anomaly_engine", { enabled: val });
+    await refreshLogs();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const triggerSelfDestruct = async () => {
+  if (confirm("CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
+    try {
+      await invoke("trigger_panic_self_destruct");
+      await refreshLogs();
+      await checkConnectionState();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+};
+
+const handleCompletePairing = async (name: string, pic: string) => {
+  pairedDeviceName.value = name;
+  pairedDevicePicture.value = pic;
+  isPaired.value = true;
+  await saveSettings();
+  handleManualRetry();
+};
+
+let clipPoller: any = null;
+let connPoller: any = null;
+
 onMounted(async () => {
-  await loadSystemInfo();
+  await loadSettings();
   await handleGenerateKeyPair();
-  await updateConnectionStatus();
+  await checkConnectionState();
+
+  // Load system info
+  try {
+    systemInfo.value = await invoke<SystemInfo>("get_system_info");
+  } catch (e) {
+    console.error(e);
+  }
+
+  // Real clipboard poller (1.5s interval)
+  clipPoller = setInterval(pollClipboard, 1500);
+
+  // Connection auto-retry poller (10s interval)
+  connPoller = setInterval(() => {
+    if (isPaired.value && !isConnected.value) {
+      triggerConnectionAttempt();
+    }
+  }, 10000);
+});
+
+onUnmounted(() => {
+  if (clipPoller) clearInterval(clipPoller);
+  if (connPoller) clearInterval(connPoller);
 });
 </script>
 
@@ -329,9 +500,22 @@ onMounted(async () => {
       <!-- Top Status Header -->
       <header class="top-bar">
         <div class="status-indicator">
-          <div class="status-badge" :class="{ connected: connectionStatus.includes('Ready') || connectionStatus.includes('Active') }">
+          <!-- Connection Status Ribbon -->
+          <div class="status-badge" :class="connectionColor">
             <span class="status-dot"></span>
-            {{ connectionStatus }}
+            <span class="status-lbl">
+              {{ connectionStatus }} 
+              <span class="method-lbl" v-if="connectionColor === 'green'">via {{ connectionMethod }}</span>
+            </span>
+            <!-- Manual connection retry button -->
+            <button 
+              class="btn-retry" 
+              v-if="connectionColor === 'red'" 
+              @click="handleManualRetry"
+              title="Retry connection"
+            >
+              🔄
+            </button>
           </div>
         </div>
 
@@ -346,34 +530,69 @@ onMounted(async () => {
       <!-- Sub-Components Render Engine -->
       <Dashboard 
         v-if="currentTab === 'dashboard'" 
+        :isPaired="isPaired"
         :sasCode="sasCode" 
+        :pairingConfigJson="pairingConfigJson"
+        :clipboardItems="clipboardItems"
+        :displayNotifications="displayNotifications"
+        :currentLux="currentLux"
+        :fileAccessGrantedDesktop="fileAccessGrantedDesktop"
+        :fileAccessGrantedPhone="fileAccessGrantedPhone"
+        :deviceName="deviceName"
+        :devicePicture="devicePicture"
+        :pairedDeviceName="pairedDeviceName"
+        :pairedDevicePicture="pairedDevicePicture"
+        :isConnected="isConnected"
+        @completePairing="handleCompletePairing"
+        @regenerateKeys="handleGenerateKeyPair" 
+        @navigate="currentTab = $event as any" 
+      />
+
+      <ConnectivityManager
+        v-else-if="currentTab === 'connectivity'"
         :wifiDirectActive="wifiDirectActive"
         :lanActive="lanActive"
         :resolvedPublicIp="resolvedPublicIp"
-        :pairingConfigJson="pairingConfigJson"
-        @update:wifiDirectActive="wifiDirectActive = $event; updateConnectionStatus()"
-        @update:lanActive="lanActive = $event; updateConnectionStatus()"
+        :ddnsHostname="ddnsHostname"
+        :enableUpnp="enableUpnp"
+        :enableDdns="enableDdns"
+        @update:wifiDirectActive="wifiDirectActive = $event; triggerConnectionAttempt()"
+        @update:lanActive="lanActive = $event; triggerConnectionAttempt()"
+        @update:ddnsHostname="ddnsHostname = $event"
+        @update:enableUpnp="enableUpnp = $event"
+        @update:enableDdns="enableDdns = $event"
         @runStunHolePunch="runStunHolePunch"
-        @regenerateKeys="handleGenerateKeyPair" 
-        @navigate="currentTab = $event as any" 
+        @saveSettings="saveSettings"
+      />
+
+      <FileManager
+        v-else-if="currentTab === 'files'"
+        :fileAccessGrantedDesktop="fileAccessGrantedDesktop"
+        :fileAccessGrantedPhone="fileAccessGrantedPhone"
+        :isConnected="isConnected"
+        @updateSettings="loadSettings"
       />
 
       <ClipboardManager 
         v-else-if="currentTab === 'clipboard'" 
         :clipboardItems="clipboardItems" 
         :lastSyncStatus="lastSyncStatus"
+        :isConnected="isConnected"
         @add="handleAddClipboard"
         @copy="handleCopyClipboard"
         @remove="handleRemoveClipboard"
         @saveEdit="handleSaveEditClipboard"
+        @connectDevice="currentTab = 'dashboard'"
       />
 
       <NotificationCenter 
         v-else-if="currentTab === 'notifications'" 
         :displayNotifications="displayNotifications" 
         :optimisticStatus="optimisticStatus"
+        :isConnected="isConnected"
         @sendSms="sendOptimisticSms"
         @sendNotif="handlePushMockNotification"
+        @connectDevice="currentTab = 'dashboard'"
       />
 
       <AutomationManager 
@@ -397,9 +616,26 @@ onMounted(async () => {
         :flightRecorderEnabled="flightRecorderEnabled"
         :neuralAnomalyEnabled="neuralAnomalyEnabled"
         :keyPair="keyPair"
+        :deviceName="deviceName"
+        :devicePicture="devicePicture"
+        :pairedDeviceName="pairedDeviceName"
+        :pairedDevicePicture="pairedDevicePicture"
+        :ddnsHostname="ddnsHostname"
+        :enableUpnp="enableUpnp"
+        :enableDdns="enableDdns"
+        :fileAccessGrantedDesktop="fileAccessGrantedDesktop"
+        :fileAccessGrantedPhone="fileAccessGrantedPhone"
         @update:flightRecorderEnabled="handleToggleFlightRecorder"
         @update:neuralAnomalyEnabled="handleToggleNeuralAnomaly"
+        @update:deviceName="deviceName = $event"
+        @update:devicePicture="devicePicture = $event"
+        @update:ddnsHostname="ddnsHostname = $event"
+        @update:enableUpnp="enableUpnp = $event"
+        @update:enableDdns="enableDdns = $event"
+        @update:fileAccessGrantedDesktop="fileAccessGrantedDesktop = $event"
+        @update:fileAccessGrantedPhone="fileAccessGrantedPhone = $event"
         @regenerateKeys="handleGenerateKeyPair"
+        @saveSettings="saveSettings"
       />
     </main>
   </div>
@@ -416,7 +652,7 @@ onMounted(async () => {
   --accent-indigo: #6366f1;
 }
 
-/* Ambient-Adaptive Theme Overrides */
+/* Theme overrides */
 .app-layout.theme-daylight {
   --bg-dark: #f8fafc;
   --bg-card: #ffffff;
@@ -425,7 +661,6 @@ onMounted(async () => {
   --text-secondary: #475569;
   --accent-cyan: #0284c7;
 }
-
 .app-layout.theme-oled-black {
   --bg-dark: #000000;
   --bg-card: #050505;
@@ -441,13 +676,11 @@ onMounted(async () => {
   padding: 0;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
-
 body {
   background-color: var(--bg-dark);
   color: var(--text-primary);
   overflow-x: hidden;
 }
-
 .app-layout {
   display: flex;
   height: 100vh;
@@ -455,7 +688,6 @@ body {
   background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.1) 0%, transparent 40%),
               radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
 }
-
 .sidebar {
   width: 260px;
   background: rgba(15, 20, 36, 0.85);
@@ -465,14 +697,12 @@ body {
   flex-direction: column;
   padding: 1.5rem 1rem;
 }
-
 .brand {
   display: flex;
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 2rem;
 }
-
 .logo-badge {
   font-size: 1.1rem;
   font-weight: 900;
@@ -486,27 +716,23 @@ body {
   box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
   color: white;
 }
-
 .brand-text h2 {
   font-size: 1.1rem;
   font-weight: 800;
   letter-spacing: 1px;
 }
-
 .subtext {
   font-size: 0.65rem;
   color: var(--accent-cyan);
   font-weight: 700;
   letter-spacing: 1px;
 }
-
 .nav-menu {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   flex: 1;
 }
-
 .nav-menu button {
   display: flex;
   align-items: center;
@@ -522,31 +748,26 @@ body {
   transition: all 0.2s ease;
   text-align: left;
 }
-
 .nav-menu button:hover {
   background: rgba(99, 102, 241, 0.1);
   color: var(--text-primary);
 }
-
 .nav-menu button.active {
   background: linear-gradient(90deg, rgba(99, 102, 241, 0.25), rgba(6, 182, 212, 0.15));
   color: #ffffff;
   border-left: 3px solid var(--accent-cyan);
 }
-
 .sidebar-footer {
   padding-top: 1rem;
   border-top: 1px solid var(--border-color);
   font-size: 0.8rem;
 }
-
 .version {
   margin-top: 0.5rem;
   text-align: center;
   color: var(--text-secondary);
   font-size: 0.75rem;
 }
-
 .main-content {
   flex: 1;
   display: flex;
@@ -554,32 +775,36 @@ body {
   overflow-y: auto;
   padding: 2rem;
 }
-
 .top-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 2rem;
 }
-
 .status-badge {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.65rem;
   background: rgba(15, 23, 42, 0.6);
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 1.25rem;
   border-radius: 30px;
   border: 1px solid var(--border-color);
   font-size: 0.85rem;
   font-weight: 700;
   color: var(--text-secondary);
 }
-
-.status-badge.connected {
+.status-badge.green {
   color: #22c55e;
   border-color: rgba(34, 197, 94, 0.3);
 }
-
+.status-badge.yellow {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.status-badge.red {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
 .status-dot {
   width: 8px;
   height: 8px;
@@ -587,12 +812,28 @@ body {
   border-radius: 50%;
   display: inline-block;
 }
-
-.connected .status-dot {
+.green .status-dot {
   background: #22c55e;
   box-shadow: 0 0 10px #22c55e;
 }
-
+.yellow .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 10px #f59e0b;
+}
+.red .status-dot {
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+}
+.btn-retry {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: transform 0.2s ease;
+}
+.btn-retry:hover {
+  transform: rotate(45deg);
+}
 .btn-panic {
   background: rgba(239, 68, 68, 0.1);
   color: #ef4444;
@@ -603,13 +844,11 @@ body {
   cursor: pointer;
   transition: all 0.2s ease;
 }
-
 .btn-panic:hover {
   background: #ef4444;
   color: white;
   box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
 }
-
 .panel {
   background: var(--bg-card);
   backdrop-filter: blur(12px);
@@ -620,204 +859,12 @@ body {
   display: flex;
   flex-direction: column;
 }
-
 .section-title {
   font-size: 1.5rem;
   font-weight: 800;
   margin-bottom: 1.5rem;
   letter-spacing: -0.5px;
 }
-
-.sas-card {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(6, 182, 212, 0.1));
-  border: 1px solid var(--border-color);
-  padding: 1.5rem;
-  border-radius: 12px;
-  margin-bottom: 2rem;
-}
-
-.sas-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.5rem;
-}
-
-.sas-badge {
-  background: rgba(6, 182, 212, 0.2);
-  color: var(--accent-cyan);
-  padding: 0.25rem 0.75rem;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.sas-desc {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-  margin-bottom: 1rem;
-}
-
-.sas-code-display {
-  font-size: 2.2rem;
-  font-weight: 900;
-  letter-spacing: 4px;
-  color: white;
-  font-family: monospace;
-}
-
-.cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1.5rem;
-}
-
-.card {
-  background: rgba(15, 23, 42, 0.4);
-  border: 1px solid var(--border-color);
-  padding: 1.25rem;
-  border-radius: 12px;
-  transition: all 0.3s ease;
-}
-
-.card:hover {
-  border-color: var(--accent-cyan);
-  transform: translateY(-2px);
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-}
-
-.card-value {
-  font-size: 1.4rem;
-  font-weight: 800;
-  color: white;
-  margin-bottom: 0.25rem;
-}
-
-.card-desc {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.quick-actions-box {
-  background: rgba(15, 23, 42, 0.3);
-  border: 1px solid var(--border-color);
-  padding: 1.5rem;
-  border-radius: 12px;
-}
-
-.button-group {
-  display: flex;
-  gap: 1rem;
-  margin-top: 1rem;
-  flex-wrap: wrap;
-}
-
-.btn {
-  padding: 0.6rem 1.2rem;
-  border-radius: 8px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  font-size: 0.9rem;
-  border: 1px solid transparent;
-}
-
-.btn-primary {
-  background: var(--accent-indigo);
-  color: white;
-}
-
-.btn-primary:hover {
-  background: #4f46e5;
-  box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
-}
-
-.btn-secondary {
-  background: rgba(148, 163, 184, 0.1);
-  color: var(--text-primary);
-  border-color: rgba(148, 163, 184, 0.2);
-}
-
-.btn-secondary:hover {
-  background: rgba(148, 163, 184, 0.2);
-}
-
-.btn-accent {
-  background: var(--accent-cyan);
-  color: #0f172a;
-}
-
-.btn-accent:hover {
-  background: #0891b2;
-  box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
-}
-
-.btn-sm {
-  padding: 0.4rem 0.8rem;
-  font-size: 0.8rem;
-}
-
-.editor-section {
-  background: rgba(15, 23, 42, 0.4);
-  border: 1px solid var(--border-color);
-  padding: 1.5rem;
-  border-radius: 12px;
-  margin-bottom: 1.5rem;
-}
-
-.input-row {
-  display: flex;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
-}
-
-.input-row input {
-  flex: 1;
-  background: #0f172a;
-  color: white;
-  border: 1px solid var(--border-color);
-  padding: 0.6rem 1rem;
-  border-radius: 8px;
-  font-size: 0.9rem;
-}
-
-.code-editor {
-  width: 100%;
-  background: #090d16;
-  color: #a7f3d0;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1rem;
-  font-family: monospace;
-  font-size: 0.9rem;
-  resize: vertical;
-  margin-bottom: 0.75rem;
-}
-
-.result-box {
-  background: rgba(6, 182, 212, 0.05);
-  border: 1px solid rgba(6, 182, 212, 0.2);
-  padding: 1.5rem;
-  border-radius: 12px;
-}
-
-.console-output {
-  background: #020617;
-  color: #38bdf8;
-  padding: 1rem;
-  border-radius: 8px;
-  font-family: monospace;
-  font-size: 0.85rem;
-  overflow-x: auto;
-  margin-top: 0.5rem;
-}
-
 .terminal-box {
   background: #05070f;
   border: 1px solid var(--border-color);
@@ -829,30 +876,14 @@ body {
   height: 400px;
   overflow-y: auto;
 }
-
 .log-line {
   margin-bottom: 0.25rem;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   padding-bottom: 0.25rem;
 }
-
-.key-card {
-  margin-bottom: 1.5rem;
-}
-
-.key-field {
-  margin-bottom: 1rem;
-}
-
-.code-box {
-  width: 100%;
-  background: #090d16;
-  color: #e2e8f0;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 0.75rem;
-  font-family: monospace;
-  font-size: 0.85rem;
-  resize: none;
+.method-lbl {
+  font-size: 0.75rem;
+  opacity: 0.8;
+  margin-left: 0.25rem;
 }
 </style>
