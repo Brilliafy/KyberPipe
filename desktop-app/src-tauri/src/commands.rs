@@ -124,7 +124,7 @@ pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, 
     sync_clipboard_text(&text)?;
     state.add_log(format!(
         "[Clipboard] Synced: \"{}\"",
-        &text.chars().take(30).collect::<String>()
+        text.chars().take(30).collect::<String>()
     ));
     Ok(true)
 }
