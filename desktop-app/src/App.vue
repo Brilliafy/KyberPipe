@@ -68,6 +68,49 @@ const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "n
 const systemInfo = ref<SystemInfo | null>(null);
 const keyPair = ref<KeyPair | null>(null);
 const logs = ref<string[]>([]);
+const crashLog = ref<string | null>(null);
+
+const checkCrashLog = async () => {
+  try {
+    crashLog.value = await invoke<string | null>("get_latest_crash_log");
+  } catch (e) {
+    console.error("Failed to check crash log:", e);
+  }
+};
+
+const copyStacktrace = async () => {
+  if (crashLog.value) {
+    try {
+      await navigator.clipboard.writeText(crashLog.value);
+      alert("Anonymized stacktrace copied to clipboard!");
+    } catch (err) {
+      console.error("Failed to copy stacktrace:", err);
+    }
+  }
+};
+
+const exportDiagnosticLogs = () => {
+  const text = logs.value.join("\n");
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "diagnostic_logs.txt";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const exportCrashLog = () => {
+  if (crashLog.value) {
+    const blob = new Blob([crashLog.value], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "anonymous_crash_log.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+};
 
 // Connectivity State Machine
 const connectionStatus = ref("DISCONNECTED");
@@ -120,6 +163,13 @@ const currentThemeClass = computed(() => {
 watch(currentThemeClass, (newClass) => {
   document.documentElement.className = newClass;
 }, { immediate: true });
+
+watch(currentTab, (newTab) => {
+  if (newTab === "logs") {
+    checkCrashLog();
+    refreshLogs();
+  }
+});
 
 // Methods
 
@@ -633,6 +683,17 @@ onUnmounted(() => {
             {{ log }}
           </div>
         </div>
+        <div class="logs-actions">
+          <button class="action-btn secondary-btn" :disabled="!crashLog" @click="copyStacktrace">
+            Copy Stacktrace
+          </button>
+          <button class="action-btn primary-btn" @click="exportDiagnosticLogs">
+            Export Diagnostic Logs
+          </button>
+          <button class="action-btn danger-btn" :disabled="!crashLog" @click="exportCrashLog">
+            Export Anonymous Crash Log
+          </button>
+        </div>
       </section>
 
       <SettingsPanel 
@@ -915,5 +976,49 @@ body {
   font-size: 0.75rem;
   opacity: 0.8;
   margin-left: 0.25rem;
+}
+.logs-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.logs-actions button {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid var(--border-color);
+}
+.logs-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--bg-dark);
+  color: var(--text-secondary);
+}
+.logs-actions .primary-btn {
+  background: var(--accent-cyan);
+  color: var(--bg-card);
+  border-color: var(--accent-cyan);
+}
+.logs-actions .primary-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.logs-actions .secondary-btn {
+  background: var(--bg-dark);
+  color: var(--text-primary);
+}
+.logs-actions .secondary-btn:hover:not(:disabled) {
+  background: var(--border-color);
+}
+.logs-actions .danger-btn {
+  background: rgba(220, 38, 38, 0.15);
+  color: #f87171;
+  border-color: rgba(220, 38, 38, 0.4);
+}
+.logs-actions .danger-btn:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.3);
 }
 </style>

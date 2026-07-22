@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KyberPipe — Post-Quantum Synchronization Documentation</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            cyan: '#06B6D4',
+                            indigo: '#6366F1',
+                            darkBg: '#090b11',
+                            darkCard: '#131722',
+                            darkBorder: '#222836',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        .glass-panel {
+            background: rgba(19, 23, 34, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .glow-cyan {
+            box-shadow: 0 0 40px rgba(6, 182, 212, 0.15);
+        }
+        .glow-indigo {
+            box-shadow: 0 0 40px rgba(99, 102, 241, 0.15);
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #090b11;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #222836;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #313a4e;
+        }
+    </style>
+</head>
+<body class="bg-brand-darkBg text-slate-100 font-sans antialiased selection:bg-cyan-500 selection:text-black">
+    <!-- Header -->
+    <header class="sticky top-0 z-40 w-full border-b border-brand-darkBorder glass-panel">
+        <div class="max-w-8xl mx-auto flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center gap-3">
+                <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-brand-cyan to-brand-indigo flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                    <i data-lucide="shield-check" class="h-5 w-5 text-white"></i>
+                </div>
+                <span class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-brand-cyan to-brand-indigo bg-clip-text text-transparent">KyberPipe</span>
+                <span class="rounded bg-brand-indigo/10 px-2 py-0.5 text-xs font-semibold text-brand-indigo border border-brand-indigo/20">v0.1.0</span>
+            </div>
+            
+            <div class="flex items-center gap-4">
+                <a href="https://github.com/Brilliafy/KyberPipe" target="_blank" class="flex items-center gap-2 text-sm text-slate-400 hover:text-slate-100 transition-colors">
+                    <i data-lucide="github" class="h-5 w-5"></i>
+                    <span class="hidden sm:inline">GitHub</span>
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <div class="max-w-8xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex">
+            <!-- Left Sidebar Navigation -->
+            <aside class="hidden lg:block w-64 shrink-0 border-r border-brand-darkBorder h-[calc(100vh-4rem)] sticky top-16 overflow-y-auto pr-6 py-8">
+                <nav class="space-y-8">
+                    <div>
+                        <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Getting Started</h3>
+                        <ul class="space-y-2 text-sm">
+                            <li><a href="#intro" class="block py-1 text-brand-cyan font-medium transition-colors hover:text-brand-cyan">Introduction</a></li>
+                            <li><a href="#quickstart" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Quick Start</a></li>
+                            <li><a href="#architecture" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">System Architecture</a></li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Core Modules</h3>
+                        <ul class="space-y-2 text-sm">
+                            <li><a href="#crypto" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">PQC Crypto Core</a></li>
+                            <li><a href="#connectivity" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">3-Tier Connectivity</a></li>
+                            <li><a href="#automation" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Sandboxed Automation</a></li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Diagnostics & Security</h3>
+                        <ul class="space-y-2 text-sm">
+                            <li><a href="#diagnostics" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Zero-Trust Diagnostics</a></li>
+                            <li><a href="#anonymization" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Log Scrubbing / Anon</a></li>
+                        </ul>
+                    </div>
+                </nav>
+            </aside>
+
+            <!-- Main Content Area -->
+            <main class="flex-1 min-w-0 py-8 lg:px-8 overflow-y-auto">
+                <div class="space-y-16">
+                    <!-- Hero Section -->
+                    <section id="intro" class="relative">
+                        <div class="absolute -top-10 left-10 w-72 h-72 bg-brand-cyan/10 rounded-full blur-3xl glow-cyan"></div>
+                        <div class="absolute top-20 right-10 w-72 h-72 bg-brand-indigo/10 rounded-full blur-3xl glow-indigo"></div>
+                        
+                        <div class="relative">
+                            <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight text-white mb-4 leading-none">
+                                Post-Quantum <span class="bg-gradient-to-r from-brand-cyan to-brand-indigo bg-clip-text text-transparent">Zero-Trust</span> Portal
+                            </h1>
+                            <p class="text-lg text-slate-400 max-w-3xl mb-8">
+                                KyberPipe is a decentralized companion engine built for high-speed local data relays, zero-trust anonymous diagnostics logging, and hardware-secured authentication pathways.
+                            </p>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder hover:border-brand-cyan/40 transition-all duration-300">
+                                    <div class="h-10 w-10 rounded-lg bg-cyan-500/10 flex items-center justify-center text-brand-cyan mb-4">
+                                        <i data-lucide="key-round"></i>
+                                    </div>
+                                    <h4 class="text-base font-bold text-white mb-2">ML-KEM Hybrid Exchange</h4>
+                                    <p class="text-xs text-slate-400 leading-relaxed">
+                                        Active hybrid post-quantum cryptography coupling NIST ML-KEM-768 with classical X25519 tunnels.
+                                    </p>
+                                </div>
+                                <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder hover:border-brand-indigo/40 transition-all duration-300">
+                                    <div class="h-10 w-10 rounded-lg bg-indigo-500/10 flex items-center justify-center text-brand-indigo mb-4">
+                                        <i data-lucide="network"></i>
+                                    </div>
+                                    <h4 class="text-base font-bold text-white mb-2">3-Tier Connectivity</h4>
+                                    <p class="text-xs text-slate-400 leading-relaxed">
+                                        Automatic seamless fallback between Wi-Fi Direct, Local LAN, and secure WireGuard WAN gateways.
+                                    </p>
+                                </div>
+                                <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder hover:border-cyan-500/30 transition-all duration-300">
+                                    <div class="h-10 w-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-4">
+                                        <i data-lucide="shield-alert"></i>
+                                    </div>
+                                    <h4 class="text-base font-bold text-white mb-2">Zero-Trust Logging</h4>
+                                    <p class="text-xs text-slate-400 leading-relaxed">
+                                        No Firebase, no Sentry. Local-first, scrubbed diagnostic systems keeping everything in your custody.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Quick Start Section -->
+                    <section id="quickstart" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">Quick Start Guide</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            Follow these simple steps to build the KyberPipe daemon and launch the UI components on your development system.
+                        </p>
+                        
+                        <!-- Tabs -->
+                        <div class="bg-brand-darkCard border border-brand-darkBorder rounded-2xl overflow-hidden">
+                            <div class="flex border-b border-brand-darkBorder bg-brand-darkBg/60 px-4">
+                                <button class="py-3 px-4 text-sm font-bold border-b-2 border-brand-cyan text-brand-cyan">Linux Desktop</button>
+                                <button class="py-3 px-4 text-sm font-bold text-slate-400 hover:text-slate-200">Android Companion</button>
+                            </div>
+                            <div class="p-6 space-y-4">
+                                <div class="space-y-2">
+                                    <span class="text-xs text-slate-500 font-bold block">1. Clone & Setup Workspace Dependencies</span>
+                                    <div class="relative">
+                                        <pre class="bg-brand-darkBg p-4 rounded-xl text-xs font-mono text-cyan-400 overflow-x-auto">git clone https://github.com/Brilliafy/KyberPipe.git
+cd KyberPipe/desktop-app
+pnpm install</pre>
+                                    </div>
+                                </div>
+                                <div class="space-y-2">
+                                    <span class="text-xs text-slate-500 font-bold block">2. Execute Tauri Developer Node</span>
+                                    <div class="relative">
+                                        <pre class="bg-brand-darkBg p-4 rounded-xl text-xs font-mono text-cyan-400 overflow-x-auto">pnpm tauri dev</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Crypto Core Section -->
+                    <section id="crypto" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">Post-Quantum Cryptographic Model</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            KyberPipe secures transactions using a double-locked cryptographic wrapper. If the quantum-resistant algorithm is ever compromised, the classical key acts as a secure container layer.
+                        </p>
+                        <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder flex flex-col md:flex-row gap-6 items-center">
+                            <div class="flex-1 space-y-4">
+                                <h4 class="text-lg font-bold text-slate-200">Hybrid Key Exchange Formula</h4>
+                                <div class="bg-brand-darkBg/50 p-4 rounded-xl font-mono text-xs text-indigo-400">
+                                    Shared Secret = KDF(ML-KEM-SS || ECDH-SS)
+                                </div>
+                                <ul class="space-y-2 text-xs text-slate-400">
+                                    <li class="flex items-center gap-2"><i data-lucide="circle-check-big" class="h-4 w-4 text-brand-cyan"></i> NIST ML-KEM-768 for quantum-safety</li>
+                                    <li class="flex items-center gap-2"><i data-lucide="circle-check-big" class="h-4 w-4 text-brand-cyan"></i> X25519 ECDH fallback implementation</li>
+                                    <li class="flex items-center gap-2"><i data-lucide="circle-check-big" class="h-4 w-4 text-brand-cyan"></i> Zero-overhead memory wiping using Zeroize</li>
+                                </ul>
+                            </div>
+                            <div class="w-full md:w-80 shrink-0 p-4 rounded-xl bg-brand-darkBg border border-brand-darkBorder">
+                                <span class="text-xs text-slate-400 block mb-2 font-bold">SAS Authentication code</span>
+                                <div class="text-3xl font-mono font-extrabold text-white tracking-widest text-center py-6 bg-brand-darkCard rounded-lg border border-brand-darkBorder">
+                                    849-201
+                                </div>
+                                <span class="text-[10px] text-slate-500 text-center block mt-2">SAS code generated on device to prevent MITM.</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Connectivity Section -->
+                    <section id="connectivity" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">3-Tier Fallback Connectivity</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            Connections migrate dynamically based on interface speed, power consumption, and network routes.
+                        </p>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="p-5 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                <div class="text-brand-cyan text-xs font-extrabold mb-1">TIER 1 (Primary)</div>
+                                <h4 class="text-base font-bold text-white mb-2">Wi-Fi Direct</h4>
+                                <p class="text-xs text-slate-400 leading-relaxed">
+                                    Direct peer-to-peer connection without intermediary routers. Lowest latency, highest speeds.
+                                </p>
+                            </div>
+                            <div class="p-5 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                <div class="text-amber-400 text-xs font-extrabold mb-1">TIER 2 (Local)</div>
+                                <h4 class="text-base font-bold text-white mb-2">mDNS Local LAN</h4>
+                                <p class="text-xs text-slate-400 leading-relaxed">
+                                    Relays through local home or office routers discovered automatically using zero-config multicast DNS.
+                                </p>
+                            </div>
+                            <div class="p-5 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                <div class="text-brand-indigo text-xs font-extrabold mb-1">TIER 3 (WAN)</div>
+                                <h4 class="text-base font-bold text-white mb-2">WireGuard Tunnel</h4>
+                                <p class="text-xs text-slate-400 leading-relaxed">
+                                    End-to-end encrypted WAN overlay tunnel when device is out-of-range or on cellular connections.
+                                </p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Zero-Trust Diagnostics Section -->
+                    <section id="diagnostics" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">Zero-Trust Diagnostics Policy</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            Under the zero-trust paradigm, sending internal application error stacktraces to Firebase, Sentry, or third-party log providers creates a critical security surface. KyberPipe replaces external diagnostic trackers with a localized engine.
+                        </p>
+                        
+                        <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder space-y-6">
+                            <div class="flex items-start gap-4">
+                                <div class="h-10 w-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0">
+                                    <i data-lucide="eye-off"></i>
+                                </div>
+                                <div>
+                                    <h4 class="text-base font-bold text-white mb-1">Zero Transmitted Traces</h4>
+                                    <p class="text-xs text-slate-400">
+                                        No Firebase SDKs, no Sentry connections, and no Google Play Console telemetry hooks are compiled into the binary.
+                                    </p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex items-start gap-4">
+                                <div class="h-10 w-10 rounded-lg bg-cyan-500/10 flex items-center justify-center text-brand-cyan shrink-0">
+                                    <i data-lucide="file-text"></i>
+                                </div>
+                                <div>
+                                    <h4 class="text-base font-bold text-white mb-1">Scrubbed Anonymous Crash Log</h4>
+                                    <p class="text-xs text-slate-400">
+                                        Panics are intercepted inside Rust and Kotlin runtimes. Logs are saved locally after scrubbing IP addresses, emails, phone numbers, and username filepaths.
+                                    </p>
+                                </div>
+                            </div>
+                            
+                            <div class="bg-brand-darkBg p-4 rounded-xl text-xs font-mono text-slate-400 border border-brand-darkBorder space-y-2">
+                                <span class="text-slate-500 block font-bold">// local scrubbing function example output</span>
+                                <div><span class="text-emerald-400">Panic message</span>: "Unexpected null pointer dereference"</div>
+                                <div><span class="text-emerald-400">Location</span>: "src/portal.rs:182:10"</div>
+                                <div><span class="text-emerald-400">Trace</span>: "at core::panicking::panic_fmt ... /home/<span class="text-brand-cyan">[USER]</span>/kyberpipe/core-crypto/src/..."</div>
+                                <div><span class="text-emerald-400">Connection Endpoint</span>: "<span class="text-brand-cyan">[MASKED_IP]</span>"</div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <footer class="border-t border-brand-darkBorder bg-brand-darkBg/30 py-8 text-center text-xs text-slate-500">
+        <p>&copy; 2026 KyberPipe Project. Licensed under AGPL-3.0.</p>
+    </footer>
+
+    <!-- Initialize Lucide Icons -->
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>

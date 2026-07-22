@@ -35,7 +35,12 @@ fun SettingsTab(
     onPairingConfigChange: (String) -> Unit,
     onTriggerHandshake: () -> Unit,
     onAvatarPickerClick: () -> Unit,
-    onSaveSettings: () -> Unit
+    onSaveSettings: () -> Unit,
+    localLogs: List<String> = emptyList(),
+    onCopyStacktrace: () -> Unit = {},
+    onExportDiagnosticLogs: () -> Unit = {},
+    onExportCrashLog: () -> Unit = {},
+    hasCrashLog: Boolean = false
 ) {
     var devName by remember { mutableStateOf(settings.deviceName) }
     var ddnsHost by remember { mutableStateOf(settings.ddnsHostname) }
@@ -328,6 +333,91 @@ fun SettingsTab(
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFC084FC)
                     )
+                }
+            }
+        }
+
+        // Zero-Trust Local Diagnostics & Logs Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Zero-Trust Local Diagnostics & Logs",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF06B6D4)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Diagnostic Logs:",
+                    fontSize = 11.sp,
+                    color = Color(0xFF94A3B8)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                // A small scrollable text box showing logs
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .background(Color(0xFF0B0D17), shape = RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    val scrollState = rememberScrollState()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(scrollState)
+                    ) {
+                        localLogs.forEach { log ->
+                            Text(
+                                text = log,
+                                fontSize = 10.sp,
+                                color = Color(0xFF38BDF8),
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onCopyStacktrace,
+                        enabled = hasCrashLog,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1E293B)
+                        ),
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("Copy Stacktrace", fontSize = 10.sp, color = if (hasCrashLog) Color.White else Color.Gray)
+                    }
+                    Button(
+                        onClick = onExportDiagnosticLogs,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF06B6D4)
+                        ),
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("Export Logs", fontSize = 10.sp, color = Color.White)
+                    }
+                    Button(
+                        onClick = onExportCrashLog,
+                        enabled = hasCrashLog,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (hasCrashLog) Color(0xFFDC2626) else Color(0xFF1E293B)
+                        ),
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("Export Anon Crash", fontSize = 10.sp, color = if (hasCrashLog) Color.White else Color.Gray)
+                    }
                 }
             }
         }
