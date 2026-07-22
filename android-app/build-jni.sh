@@ -4,7 +4,7 @@ set -e
 # Define paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-NDK_VERSION="28.2.13676358"
+NDK_VERSION="29.0.14206865"
 NDK_PATH="$HOME/Android/Sdk/ndk/$NDK_VERSION"
 
 echo "=== Building Rust core-crypto JNI library for Android (arm64-v8a) ==="

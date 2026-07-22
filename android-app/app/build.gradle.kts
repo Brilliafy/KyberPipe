@@ -73,7 +73,7 @@ dependencies {
     // Biometric Step-Up Authorization
     implementation("androidx.biometric:biometric:1.1.0")
     // JNA binding runtime for UniFFI
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:5.16.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // CameraX

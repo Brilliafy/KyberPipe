@@ -25,7 +25,8 @@
         android:label="KyberPipe"
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:pageSizeCompatMode="compat">
 
         <activity
             android:name=".MainActivity"
