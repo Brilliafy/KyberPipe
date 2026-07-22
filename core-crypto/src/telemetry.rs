@@ -28,6 +28,12 @@ pub struct FlightDataRecorder {
     max_events: usize,
 }
 
+impl Default for FlightDataRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlightDataRecorder {
     pub fn new() -> Self {
         Self {
