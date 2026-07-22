@@ -1094,15 +1094,13 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                         }
                     }
 
-                    if !text.is_empty() {
-                        if !state_clone.dedup.is_suppressed(&text) {
-                            state_clone.dedup.record_text(&text);
-                            let _ = crate::portal::sync_clipboard_text(&text);
-                            state_clone.add_log(format!(
-                                "[Clipboard] Received from companion: \"{}\"",
-                                text.chars().take(30).collect::<String>()
-                            ));
-                        }
+                    if !text.is_empty() && !state_clone.dedup.is_suppressed(&text) {
+                        state_clone.dedup.record_text(&text);
+                        let _ = crate::portal::sync_clipboard_text(&text);
+                        state_clone.add_log(format!(
+                            "[Clipboard] Received from companion: \"{}\"",
+                            text.chars().take(30).collect::<String>()
+                        ));
                     }
 
                     ("200 OK", r#"{"status":"synced"}"#.to_string())

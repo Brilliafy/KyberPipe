@@ -45,14 +45,11 @@ pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
         Ok(())
     } else {
         info!("Native Linux detected: Syncing clipboard via arboard/fallbacks");
-        match arboard::Clipboard::new() {
-            Ok(mut board) => {
-                if board.set_text(text.to_string()).is_ok() {
-                    let _ = crate::commands::write_clipboard_fallback(text);
-                    return Ok(());
-                }
+        if let Ok(mut board) = arboard::Clipboard::new() {
+            if board.set_text(text.to_string()).is_ok() {
+                let _ = crate::commands::write_clipboard_fallback(text);
+                return Ok(());
             }
-            Err(_) => {}
         }
         crate::commands::write_clipboard_fallback(text)
     }
