@@ -107,7 +107,7 @@ const handleFileChange = (event: Event) => {
     <!-- Profile Management Section -->
     <div class="card profile-card" style="margin-bottom: 1.5rem;">
       <h3><User style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Local Node Profile</h3>
-      <p class="card-desc">Identify this Linux host visually inside Kyberpipe. Affects local discovery name only.</p>
+      <p class="card-desc">Identify this Linux host visually inside KyberPipe. Affects local discovery name only.</p>
       
       <div class="profile-editor">
         <div class="avatar-circle" @click="triggerFilePicker">
@@ -242,7 +242,7 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1.5rem;
 }
 .card {
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   padding: 1.25rem;
   border-radius: 12px;
@@ -304,7 +304,7 @@ const handleFileChange = (event: Event) => {
   color: var(--text-secondary);
 }
 .input-text, .input-select {
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem 0.75rem;
@@ -329,8 +329,8 @@ const handleFileChange = (event: Event) => {
 }
 .code-box {
   width: 100%;
-  background: #090d16;
-  color: #e2e8f0;
+  background: var(--bg-dark);
+  color: var(--text-primary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 0.75rem;

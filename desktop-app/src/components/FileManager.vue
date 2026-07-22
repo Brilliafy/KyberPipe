@@ -202,7 +202,7 @@ const formatSize = (bytes: number) => {
   background: rgba(255, 255, 255, 0.02);
 }
 .browser-container {
-  background: rgba(15, 23, 42, 0.3);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   min-height: 350px;
@@ -233,7 +233,7 @@ const formatSize = (bytes: number) => {
   margin-bottom: 0.5rem;
 }
 .current-path-bar {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bg-dark);
   padding: 0.75rem 1.25rem;
   border-bottom: 1px solid var(--border-color);
   font-size: 0.85rem;

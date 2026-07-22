@@ -514,7 +514,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 .input-text {
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem;
@@ -535,15 +535,15 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   font-size: 0.85rem;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bg-dark);
   padding: 0.75rem;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
 }
 .code-badge {
   font-family: monospace;
   background: rgba(99, 102, 241, 0.15);
-  color: #c084fc;
+  color: var(--accent-indigo);
   padding: 0.15rem 0.4rem;
   border-radius: 4px;
   font-size: 0.85rem;
@@ -591,7 +591,7 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .diagnostic-card {
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   padding: 1rem;
@@ -599,11 +599,12 @@ onUnmounted(() => {
 .diagnostic-card h4 {
   font-size: 0.95rem;
   font-weight: 700;
-  color: white;
+  color: var(--text-primary);
   margin-bottom: 0.25rem;
 }
 .chart-wrapper {
-  background: #05070f;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 0.5rem;
   margin-top: 0.5rem;
@@ -618,6 +619,6 @@ onUnmounted(() => {
   justify-content: space-between;
   font-size: 0.85rem;
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-color);
 }
 </style>

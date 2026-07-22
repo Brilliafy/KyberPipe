@@ -13,6 +13,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudOff
 
 data class AndroidNotificationRecord(
     val id: String,
@@ -84,12 +86,19 @@ fun NotificationsTab(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text("🔌 Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
-                    fontSize = 12.sp,
-                    color = Color(0xFF94A3B8),
+                Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8),
                     modifier = Modifier.padding(horizontal = 24.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))

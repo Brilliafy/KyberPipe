@@ -108,7 +108,7 @@ const handleFileChange = (event: Event) => {
     <!-- NOT PAIRED: Connection prompt is ALL the screen -->
     <div class="welcome-pairing-screen" v-if="!isPaired">
       <div class="welcome-box">
-        <h2 class="welcome-title"><Shield style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="28" class="text-cyan" /> Welcome to Kyberpipe</h2>
+        <h2 class="welcome-title"><Shield style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="28" class="text-cyan" /> Welcome to KyberPipe</h2>
         <p class="welcome-subtitle">Post-Quantum P2P Sync Node. Pair your companion device to begin.</p>
         
         <div class="pairing-panel-layout">
@@ -332,7 +332,7 @@ const handleFileChange = (event: Event) => {
   }
 }
 .pair-card {
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   padding: 1.5rem;
@@ -341,7 +341,7 @@ const handleFileChange = (event: Event) => {
   font-size: 1.1rem;
   font-weight: 700;
   margin-bottom: 0.5rem;
-  color: white;
+  color: var(--text-primary);
   display: flex;
   align-items: center;
 }
@@ -400,13 +400,13 @@ const handleFileChange = (event: Event) => {
   letter-spacing: 2px;
 }
 .json-box {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 0.75rem;
   font-family: monospace;
   font-size: 0.75rem;
-  color: #a5b4fc;
+  color: var(--text-primary);
   height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -492,7 +492,7 @@ const handleFileChange = (event: Event) => {
 .widget-header h4 {
   font-size: 1.05rem;
   font-weight: 800;
-  color: white;
+  color: var(--text-primary);
   display: flex;
   align-items: center;
 }
@@ -512,7 +512,7 @@ const handleFileChange = (event: Event) => {
   display: flex;
   gap: 0.5rem;
   align-items: center;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bg-dark);
   padding: 0.5rem;
   border-radius: 6px;
 }
@@ -524,15 +524,15 @@ const handleFileChange = (event: Event) => {
 }
 .source-lbl.pc, .source-lbl.local {
   background: rgba(99, 102, 241, 0.2);
-  color: #a5b4fc;
+  color: var(--accent-indigo);
 }
 .source-lbl.phone, .source-lbl.remote {
   background: rgba(6, 182, 212, 0.2);
-  color: #a5f3fc;
+  color: var(--accent-cyan);
 }
 .mini-text {
   font-size: 0.8rem;
-  color: #cbd5e1;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -653,7 +653,7 @@ const handleFileChange = (event: Event) => {
   color: var(--text-secondary);
 }
 .input-text {
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem 0.75rem;

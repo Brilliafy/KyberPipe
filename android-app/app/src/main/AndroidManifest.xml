@@ -19,7 +19,7 @@
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:label="Kyberpipe PQC"
+        android:label="KyberPipe"
         android:roundIcon="@android:drawable/sym_def_app_icon"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
@@ -40,12 +40,12 @@
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Kyberpipe P2P post-quantum network synchronization engine" />
+                android:value="KyberPipe P2P post-quantum network synchronization engine" />
         </service>
 
         <service
             android:name=".receiver.NotificationHook"
-            android:label="Kyberpipe Notification Interceptor"
+            android:label="KyberPipe Notification Interceptor"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="true">
             <intent-filter>
@@ -57,7 +57,7 @@
         <service
             android:name=".service.KyberTileService"
             android:icon="@android:drawable/ic_menu_compass"
-            android:label="Kyberpipe PQC Core"
+            android:label="KyberPipe PQC Core"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
             <intent-filter>

@@ -4,22 +4,40 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Assignment
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-enum class TabItem(val title: String, val icon: String) {
-    HOME("Home", "🏠"),
-    FILES("Files", "📁"),
-    CLIPBOARD("Clip", "📋"),
-    NOTIFICATIONS("Alerts", "🔔"),
-    SETTINGS("Config", "⚙️")
+enum class TabItem(val title: String) {
+    HOME("Home"),
+    FILES("Files"),
+    CLIPBOARD("Clip"),
+    NOTIFICATIONS("Alerts"),
+    SETTINGS("Config");
+
+    fun getIcon(): ImageVector {
+        return when (this) {
+            HOME -> Icons.Default.Home
+            FILES -> Icons.Default.Folder
+            CLIPBOARD -> Icons.Default.Assignment
+            NOTIFICATIONS -> Icons.Default.Notifications
+            SETTINGS -> Icons.Default.Settings
+        }
+    }
 }
 
 @Composable
@@ -48,10 +66,11 @@ fun BottomNavigationBar(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text(
-                    text = tab.icon,
-                    fontSize = 20.sp,
-                    color = if (isSelected) Color(0xFF06B6D4) else Color(0xFF94A3B8)
+                Icon(
+                    imageVector = tab.getIcon(),
+                    contentDescription = tab.title,
+                    tint = if (isSelected) Color(0xFF06B6D4) else Color(0xFF94A3B8),
+                    modifier = Modifier.size(22.dp)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(

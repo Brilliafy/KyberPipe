@@ -239,7 +239,7 @@ const handleSendNotif = () => {
   justify-content: center;
   text-align: center;
   padding: 3rem 2rem;
-  background: rgba(15, 23, 42, 0.2);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   border-radius: 12px;
 }
@@ -275,15 +275,15 @@ const handleSendNotif = () => {
   text-align: center;
   padding: 3rem;
   color: var(--text-secondary);
-  background: rgba(15, 23, 42, 0.1);
+  background: var(--bg-dark);
   border-radius: 12px;
 }
 .msg-card {
   padding: 1.25rem;
   border-radius: 12px;
-  background: rgba(30, 41, 59, 0.4);
+  background: var(--bg-card);
   margin-bottom: 0.75rem;
-  border: 1px solid rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--border-color);
 }
 .entry-meta {
   display: flex;
@@ -301,11 +301,11 @@ const handleSendNotif = () => {
 }
 .source-badge.local {
   background: rgba(99, 102, 241, 0.2);
-  color: #a5b4fc;
+  color: var(--accent-indigo);
 }
 .source-badge.remote {
   background: rgba(6, 182, 212, 0.2);
-  color: #a5f3fc;
+  color: var(--accent-cyan);
 }
 .timestamp {
   font-size: 0.75rem;
@@ -314,18 +314,18 @@ const handleSendNotif = () => {
 .notif-title {
   font-size: 1rem;
   font-weight: 700;
-  color: white;
+  color: var(--text-primary);
   margin-bottom: 0.25rem;
 }
 .notif-body {
   font-size: 0.85rem;
-  color: #cbd5e1;
+  color: var(--text-primary);
   line-height: 1.4;
   margin-bottom: 0.5rem;
 }
 .app-package-label {
   font-family: monospace;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
 }
 .notifications-actions-col {
@@ -334,7 +334,7 @@ const handleSendNotif = () => {
   gap: 1.5rem;
 }
 .actions-card {
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   padding: 1.5rem;
   border-radius: 12px;
@@ -359,7 +359,7 @@ const handleSendNotif = () => {
   color: var(--text-secondary);
 }
 .input-text, .input-select, .input-textarea {
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem;

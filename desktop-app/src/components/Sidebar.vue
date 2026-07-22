@@ -30,7 +30,7 @@ const emit = defineEmits<{
     <div class="brand">
       <div class="logo-badge">KP</div>
       <div class="brand-text">
-        <h2>KYBERPIPE</h2>
+        <h2>KyberPipe</h2>
         <span class="subtext">POST-QUANTUM ENGINE</span>
       </div>
     </div>
