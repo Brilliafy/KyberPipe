@@ -19,6 +19,7 @@ pub struct AppSettings {
     pub file_access_granted_desktop: bool,
     pub file_access_granted_phone: bool,
     pub theme_mode: Option<String>,
+    pub pathway_order: Option<Vec<String>>,
 }
 
 pub struct AppState {

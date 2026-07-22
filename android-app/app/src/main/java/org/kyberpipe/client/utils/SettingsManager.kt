@@ -53,4 +53,8 @@ class SettingsManager(context: Context) {
     var amoledMode: Boolean
         get() = prefs.getBoolean("amoled_mode", false)
         set(value) = prefs.edit().putBoolean("amoled_mode", value).apply()
+
+    var pathwayOrder: String
+        get() = prefs.getString("pathway_order", "wifi_direct,mdns_lan,wireguard_wan") ?: "wifi_direct,mdns_lan,wireguard_wan"
+        set(value) = prefs.edit().putString("pathway_order", value).apply()
 }

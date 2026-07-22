@@ -11,7 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { RefreshCw, ShieldAlert, Terminal } from "@lucide/vue";
+import { RefreshCw, ShieldAlert, Terminal, Bolt } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -134,6 +134,7 @@ const enableDdns = ref(false);
 const isPaired = ref(false);
 const fileAccessGrantedDesktop = ref(false);
 const fileAccessGrantedPhone = ref(false);
+const pathwayOrder = ref<string[]>(["wifi_direct", "mdns_lan", "wireguard_wan"]);
 
 // Ambient Light Sandbox State
 const currentLux = ref(250.0);
@@ -187,6 +188,7 @@ const loadSettings = async () => {
     fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
     fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
     themeMode.value = settings.theme_mode || "auto";
+    pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
   } catch (e) {
     console.error("Load settings error:", e);
   }
@@ -203,7 +205,8 @@ const saveSettings = async () => {
       enableUpnp: enableUpnp.value,
       enableDdns: enableDdns.value,
       isPaired: isPaired.value,
-      themeMode: themeMode.value
+      themeMode: themeMode.value,
+      pathwayOrder: pathwayOrder.value
     });
   } catch (e) {
     console.error("Save settings error:", e);
@@ -466,13 +469,26 @@ async function handleGenerateKeyPair() {
   }
 }
 
-async function handleRunScript(code: string) {
+async function handleRunScript(code: string, isSandboxed: boolean, feedSourceCommand: string, onCompletionCode?: string) {
   try {
-    scriptResult.value = await invoke<ScriptResult>("execute_boa_script", {
+    const res = await invoke<ScriptResult>("execute_boa_script", {
       scriptCode: code,
+      isSandboxed: isSandboxed,
       lux: Number(currentLux.value),
+      feedSourceCommand: feedSourceCommand
     });
+    scriptResult.value = res;
     await refreshLogs();
+
+    if (res.success && onCompletionCode && onCompletionCode.trim()) {
+      await invoke("execute_boa_script", {
+        scriptCode: onCompletionCode,
+        isSandboxed: false,
+        lux: Number(currentLux.value),
+        feedSourceCommand: ""
+      });
+      await refreshLogs();
+    }
   } catch (e) {
     console.error("Execution failed: ", e);
   }
@@ -589,9 +605,14 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="header-right">
-          <button class="btn btn-secondary btn-sm" style="margin-right: 0.5rem;" @click="currentTab = 'settings'">
-            Settings
+        <div class="header-right" style="display: flex; align-items: center; gap: 0.5rem;">
+          <button 
+            class="btn btn-secondary btn-sm" 
+            style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; margin-right: 0.5rem;" 
+            @click="currentTab = 'settings'" 
+            title="Settings"
+          >
+            <Bolt :size="16" />
           </button>
           <button class="btn-panic" @click="triggerSelfDestruct">
             <ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="14" /> Self-Destruct Wipe
@@ -622,6 +643,7 @@ onUnmounted(() => {
 
       <ConnectivityManager
         v-else-if="currentTab === 'connectivity'"
+        v-model:pathwayOrder="pathwayOrder"
         :wifiDirectActive="wifiDirectActive"
         :lanActive="lanActive"
         :resolvedPublicIp="resolvedPublicIp"

@@ -45,6 +45,8 @@ fun NotificationsTab(
         }
     }
 
+    val colors = MaterialTheme.colorScheme
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -58,8 +60,8 @@ fun NotificationsTab(
                 "remote" -> 2
                 else -> 0
             },
-            containerColor = Color(0xFF161B2E),
-            contentColor = Color(0xFF06B6D4)
+            containerColor = colors.surface,
+            contentColor = colors.primary
         ) {
             Tab(
                 selected = activeSubTab == "all",
@@ -87,24 +89,24 @@ fun NotificationsTab(
                 verticalArrangement = Arrangement.Center
             ) {
                 Icon(
-                        imageVector = Icons.Default.CloudOff,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                    imageVector = Icons.Default.CloudOff,
+                    contentDescription = null,
+                    tint = colors.onBackground.copy(alpha = 0.4f),
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = colors.onBackground)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
+                    fontSize = 12.sp,
+                    color = colors.onBackground.copy(alpha = 0.6f),
                     modifier = Modifier.padding(horizontal = 24.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = onConnectRequest,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4))
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                 ) {
                     Text("Connect a Device")
                 }
@@ -112,7 +114,7 @@ fun NotificationsTab(
         } else {
             // Outbound SMS card helper
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -121,7 +123,7 @@ fun NotificationsTab(
                         text = "Send Outbound SMS via PC Link",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF06B6D4)
+                        color = colors.primary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     OutlinedTextField(
@@ -129,10 +131,10 @@ fun NotificationsTab(
                         onValueChange = { smsRecipient = it },
                         label = { Text("Recipient Number", fontSize = 11.sp) },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
+                            focusedTextColor = colors.onSurface,
+                            unfocusedTextColor = colors.onSurface,
+                            focusedBorderColor = colors.primary,
+                            unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 1
@@ -143,10 +145,10 @@ fun NotificationsTab(
                         onValueChange = { smsBody = it },
                         label = { Text("SMS Message Body", fontSize = 11.sp) },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
+                            focusedTextColor = colors.onSurface,
+                            unfocusedTextColor = colors.onSurface,
+                            focusedBorderColor = colors.primary,
+                            unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 2
@@ -159,7 +161,7 @@ fun NotificationsTab(
                                 smsBody = ""
                             }
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
                         modifier = Modifier.align(Alignment.End),
                         enabled = isConnected
                     ) {
@@ -182,12 +184,12 @@ fun NotificationsTab(
                             .padding(32.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("No notifications matched this view.", color = Color(0xFF64748B), fontSize = 13.sp)
+                        Text("No notifications matched this view.", color = colors.onBackground.copy(alpha = 0.4f), fontSize = 13.sp)
                     }
                 } else {
                     filteredList.forEach { record ->
                         Card(
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -200,25 +202,25 @@ fun NotificationsTab(
                                         text = record.title,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                        color = colors.onSurface
                                     )
                                     Text(
                                         text = record.appPackage.substringAfterLast("."),
                                         fontSize = 11.sp,
-                                        color = Color(0xFF06B6D4)
+                                        color = colors.primary
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = record.text,
                                     fontSize = 13.sp,
-                                    color = Color(0xFFE2E8F0)
+                                    color = colors.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(record.timestamp)),
                                     fontSize = 10.sp,
-                                    color = Color(0xFF64748B),
+                                    color = colors.onSurface.copy(alpha = 0.4f),
                                     modifier = Modifier.align(Alignment.End)
                                 )
                             }

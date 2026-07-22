@@ -10,7 +10,9 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -35,7 +37,7 @@ enum class TabItem(val title: String) {
             FILES -> Icons.Default.Folder
             CLIPBOARD -> Icons.Default.Assignment
             NOTIFICATIONS -> Icons.Default.Notifications
-            SETTINGS -> Icons.Default.Settings
+            SETTINGS -> Icons.Default.Bolt
         }
     }
 }
@@ -45,11 +47,12 @@ fun BottomNavigationBar(
     selectedTab: TabItem,
     onTabSelected: (TabItem) -> Unit
 ) {
+    val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(65.dp)
-            .background(Color(0xFF161B2E))
+            .background(colors.surface)
             .padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.SpaceAround,
         verticalAlignment = Alignment.CenterVertically
@@ -69,16 +72,18 @@ fun BottomNavigationBar(
                 Icon(
                     imageVector = tab.getIcon(),
                     contentDescription = tab.title,
-                    tint = if (isSelected) Color(0xFF06B6D4) else Color(0xFF94A3B8),
+                    tint = if (isSelected) colors.primary else colors.onSurface.copy(alpha = 0.6f),
                     modifier = Modifier.size(22.dp)
                 )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = tab.title,
-                    fontSize = 10.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                    color = if (isSelected) Color(0xFF06B6D4) else Color(0xFF94A3B8)
-                )
+                if (tab != TabItem.SETTINGS) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = tab.title,
+                        fontSize = 10.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isSelected) colors.primary else colors.onSurface.copy(alpha = 0.6f)
+                    )
+                }
             }
         }
     }

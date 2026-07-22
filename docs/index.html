@@ -259,6 +259,104 @@ pnpm install</pre>
                         </div>
                     </section>
 
+                    </section>
+
+                    <!-- Sandboxed Automation Section -->
+                    <section id="automation" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">Sandboxed Automation & Host Hooks Engine</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            KyberPipe features a powerful execution engine designed to bind environmental triggers (such as ambient light lux and custom host sensor inputs) to security and notification events. The engine supports two runtime environments: isolated in-memory JavaScript virtual machines and native host command hooks.
+                        </p>
+
+                        <div class="space-y-6 text-sm text-slate-300">
+                            <div>
+                                <h3 class="text-lg font-bold text-white mb-2">1. Dual Isolation Architecture</h3>
+                                <p class="text-xs text-slate-400 mb-2">
+                                    By default, event handlers execute in an isolated, in-memory **Boa JS Engine** VM. This sandbox has no access to the host's filesystem, processes, network stack, or system calls. To prevent runaway routines, execution is subject to a strict 100,000 loop iteration limit. For advanced workflows, users can toggle **Unsandboxed Execution** to execute native shell/Python scripts directly on the host.
+                                </p>
+                            </div>
+
+                            <div>
+                                <h3 class="text-lg font-bold text-white mb-2">2. Dynamic Local Input Feeds</h3>
+                                <p class="text-xs text-slate-400 mb-2">
+                                    To ingest custom data beyond ambient lux levels, event handlers can configure an <em>Input Feed Source Command</em>. Prior to execution, the host executes this CLI command (e.g. querying battery status via sysfs) and injects the resulting standard output as the global string variable <code>feedData</code> (also readable via <code>getFeedData()</code>) inside the JS context.
+                                </p>
+                            </div>
+
+                            <div>
+                                <h3 class="text-lg font-bold text-white mb-2">3. On-Completion Trigger Blocks</h3>
+                                <p class="text-xs text-slate-400 mb-2">
+                                    Handlers can register an optional post-execution shell command. If the primary handler completes successfully and evaluates to a non-empty string, this completion script is spawned on the host natively to coordinate notifications, backup processes, or system configuration adjustments.
+                                </p>
+                            </div>
+
+                            <!-- 3 Examples -->
+                            <div class="mt-8">
+                                <h3 class="text-lg font-bold text-white mb-4">Functional Integration Examples</h3>
+                                <div class="grid grid-cols-1 gap-6">
+                                    <!-- Example 1 -->
+                                    <div class="p-6 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                        <div class="flex justify-between items-center mb-2">
+                                            <h4 class="text-base font-bold text-brand-cyan">Example 1: Safe Sandboxed Light Guard</h4>
+                                            <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-brand-cyan border border-brand-cyan/20">Sandboxed</span>
+                                        </div>
+                                        <p class="text-xs text-slate-400 mb-3">Reads ambient light sensor data and returns trigger state to secure the screen.</p>
+                                        <pre class="bg-brand-darkBg p-4 rounded-lg font-mono text-xs text-indigo-300 overflow-x-auto">
+// Javascript Sandbox Handler
+const light = getAmbientLight();
+log("Safeguarding night vision: " + light + " lux.");
+light < 20.0 ? "DARK_MODE_TRIGGER" : "NORMAL_LIGHT";</pre>
+                                        <div class="mt-3 text-xs text-slate-400">
+                                            <strong class="text-slate-200">On-Completion Action:</strong>
+                                            <code class="bg-brand-darkBg px-2 py-1 rounded block mt-1 font-mono text-slate-300">notify-send "KyberPipe" "Environment is dark! Securing display brightness."</code>
+                                        </div>
+                                    </div>
+
+                                    <!-- Example 2 -->
+                                    <div class="p-6 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                        <div class="flex justify-between items-center mb-2">
+                                            <h4 class="text-base font-bold text-brand-cyan">Example 2: Battery Drain Prevention Handler</h4>
+                                            <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-brand-cyan border border-brand-cyan/20">Sandboxed + Feed Input</span>
+                                        </div>
+                                        <p class="text-xs text-slate-400 mb-3">Queries battery state command, parses it inside the sandbox, and raises system warnings on low levels.</p>
+                                        <div class="mb-3 text-xs text-slate-400">
+                                            <strong class="text-slate-200">Feed Command:</strong>
+                                            <code class="bg-brand-darkBg px-2 py-1 rounded block mt-1 font-mono text-slate-300">cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo 18</code>
+                                        </div>
+                                        <pre class="bg-brand-darkBg p-4 rounded-lg font-mono text-xs text-indigo-300 overflow-x-auto">
+// Javascript Sandbox Handler
+const battery = parseInt(getFeedData());
+log("Battery level retrieved: " + battery + "%");
+battery < 20 ? "BATTERY_CRITICAL" : "OK";</pre>
+                                        <div class="mt-3 text-xs text-slate-400">
+                                            <strong class="text-slate-200">On-Completion Action:</strong>
+                                            <code class="bg-brand-darkBg px-2 py-1 rounded block mt-1 font-mono text-slate-300">notify-send -u critical "KyberPipe Warning" "Sync throttled to save power."</code>
+                                        </div>
+                                    </div>
+
+                                    <!-- Example 3 -->
+                                    <div class="p-6 rounded-xl bg-brand-darkCard border border-brand-darkBorder">
+                                        <div class="flex justify-between items-center mb-2">
+                                            <h4 class="text-base font-bold text-brand-cyan">Example 3: System Status Diagnostics Dispatch</h4>
+                                            <span class="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">Unsandboxed</span>
+                                        </div>
+                                        <p class="text-xs text-slate-400 mb-3">Executes an arbitrary shell/process script directly on host to check CPU thermal zones.</p>
+                                        <pre class="bg-brand-darkBg p-4 rounded-lg font-mono text-xs text-indigo-300 overflow-x-auto">
+# Native Bash script
+TEMP=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 45000)
+CPU_TEMP=$((TEMP / 1000))
+echo "CPU temperature is ${CPU_TEMP}°C"
+[ $CPU_TEMP -gt 75 ] && echo "OVERHEAT" || echo "NORMAL"</pre>
+                                        <div class="mt-3 text-xs text-slate-400">
+                                            <strong class="text-slate-200">On-Completion Action:</strong>
+                                            <code class="bg-brand-darkBg px-2 py-1 rounded block mt-1 font-mono text-slate-300">notify-send "Thermal Check Complete" "CPU state normal."</code>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- Zero-Trust Diagnostics Section -->
                     <section id="diagnostics" class="border-t border-brand-darkBorder pt-12">
                         <h2 class="text-2xl font-extrabold text-white mb-4">Zero-Trust Diagnostics Policy</h2>

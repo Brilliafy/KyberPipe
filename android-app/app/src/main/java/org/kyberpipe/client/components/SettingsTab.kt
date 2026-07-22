@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Warning
 import org.kyberpipe.client.utils.SettingsManager
 import uniffi.core_crypto.PqKeyPair
 import java.io.ByteArrayOutputStream
@@ -40,7 +41,8 @@ fun SettingsTab(
     onCopyStacktrace: () -> Unit = {},
     onExportDiagnosticLogs: () -> Unit = {},
     onExportCrashLog: () -> Unit = {},
-    hasCrashLog: Boolean = false
+    hasCrashLog: Boolean = false,
+    onPanicTriggered: () -> Unit = {}
 ) {
     var devName by remember { mutableStateOf(settings.deviceName) }
     var ddnsHost by remember { mutableStateOf(settings.ddnsHostname) }
@@ -48,6 +50,8 @@ fun SettingsTab(
     var ddnsEnabled by remember { mutableStateOf(settings.enableDdns) }
     var themeState by remember { mutableStateOf(settings.themeMode) }
     var amoledState by remember { mutableStateOf(settings.amoledMode) }
+
+    val colors = MaterialTheme.colorScheme
 
     Column(
         modifier = Modifier
@@ -58,7 +62,7 @@ fun SettingsTab(
     ) {
         // Local Device Profile Nickname & Avatar Picker card
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -67,18 +71,17 @@ fun SettingsTab(
                     text = "Local Companion Profile",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF06B6D4)
+                    color = colors.primary
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // Modern circle with camera on click
                     Box(
                         modifier = Modifier
                             .size(70.dp)
-                            .background(Color(0xFF334155), shape = RoundedCornerShape(35.dp))
+                            .background(colors.onSurface.copy(alpha = 0.1f), shape = RoundedCornerShape(35.dp))
                             .clickable { onAvatarPickerClick() },
                         contentAlignment = Alignment.Center
                     ) {
@@ -96,7 +99,7 @@ fun SettingsTab(
                             Icon(
                                 imageVector = Icons.Default.CameraAlt,
                                 contentDescription = "Select Avatar",
-                                tint = Color.White,
+                                tint = colors.onSurface,
                                 modifier = Modifier.size(24.dp)
                             )
                         }
@@ -112,10 +115,10 @@ fun SettingsTab(
                             },
                             label = { Text("Device Name", fontSize = 11.sp) },
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF06B6D4),
-                                unfocusedBorderColor = Color(0xFF334155)
+                                focusedTextColor = colors.onSurface,
+                                unfocusedTextColor = colors.onSurface,
+                                focusedBorderColor = colors.primary,
+                                unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                             ),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -126,7 +129,7 @@ fun SettingsTab(
 
         // Theme Visual Properties Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -135,11 +138,11 @@ fun SettingsTab(
                     text = "Theme Visual Properties",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF06B6D4)
+                    color = colors.primary
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 
-                Text("Select Application Theme Mode:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                Text("Select Application Theme Mode:", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -155,12 +158,12 @@ fun SettingsTab(
                                 onSaveSettings()
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (selected) Color(0xFF06B6D4) else Color(0xFF1E293B)
+                                containerColor = if (selected) colors.primary else colors.surfaceVariant
                             ),
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             modifier = Modifier.weight(1f).height(32.dp)
                         ) {
-                            Text(label, fontSize = 11.sp, color = Color.White)
+                            Text(label, fontSize = 11.sp, color = if (selected) colors.onPrimary else colors.onSurfaceVariant)
                         }
                     }
                 }
@@ -176,12 +179,12 @@ fun SettingsTab(
                             text = "True AMOLED/OLED Mode",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = colors.onSurface
                         )
                         Text(
                             text = "Enforce pure black backgrounds to optimize power",
                             fontSize = 11.sp,
-                            color = Color(0xFF94A3B8)
+                            color = colors.onSurface.copy(alpha = 0.6f)
                         )
                     }
                     Switch(
@@ -196,9 +199,99 @@ fun SettingsTab(
             }
         }
 
+        // Connectivity Hierarchy Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Connectivity hierarchy",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.primary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Rearrange pathway priorities. Connection fallback adapts dynamically.",
+                    fontSize = 11.sp,
+                    color = colors.onSurface.copy(alpha = 0.6f)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                var orderList by remember(settings.pathwayOrder) {
+                    mutableStateOf(settings.pathwayOrder.split(","))
+                }
+
+                val pathwayNames = mapOf(
+                    "wifi_direct" to "Wi-Fi Direct P2P Radio",
+                    "mdns_lan" to "Local Network (mDNS LAN)",
+                    "wireguard_wan" to "WireGuard WAN Tunnel Overlay"
+                )
+
+                orderList.forEachIndexed { index, pathKey ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${index + 1}. ${pathwayNames[pathKey] ?: pathKey}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.onSurface
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Button(
+                                onClick = {
+                                    if (index > 0) {
+                                        val mutable = orderList.toMutableList()
+                                        val temp = mutable[index]
+                                        mutable[index] = mutable[index - 1]
+                                        mutable[index - 1] = temp
+                                        orderList = mutable
+                                        settings.pathwayOrder = mutable.joinToString(",")
+                                        onSaveSettings()
+                                    }
+                                },
+                                enabled = index > 0,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("▲", fontSize = 10.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    if (index < orderList.size - 1) {
+                                        val mutable = orderList.toMutableList()
+                                        val temp = mutable[index]
+                                        mutable[index] = mutable[index + 1]
+                                        mutable[index + 1] = temp
+                                        orderList = mutable
+                                        settings.pathwayOrder = mutable.joinToString(",")
+                                        onSaveSettings()
+                                    }
+                                },
+                                enabled = index < orderList.size - 1,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("▼", fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Connection Handshake config pasting card
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -207,18 +300,18 @@ fun SettingsTab(
                     text = "Establish Pairing Link",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF06B6D4)
+                    color = colors.primary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = pairingConfigInput,
                     onValueChange = onPairingConfigChange,
-                    label = { Text("Paste PC Pairing Config JSON", fontSize = 11.sp) },
+                    label = { Text("Paste PC Pairing Config JSON or Enter Code", fontSize = 11.sp) },
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF06B6D4),
-                        unfocusedBorderColor = Color(0xFF334155)
+                        focusedTextColor = colors.onSurface,
+                        unfocusedTextColor = colors.onSurface,
+                        focusedBorderColor = colors.primary,
+                        unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                     ),
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 4
@@ -226,7 +319,7 @@ fun SettingsTab(
                 Spacer(modifier = Modifier.height(12.dp))
                 Button(
                     onClick = onTriggerHandshake,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Complete PQC Handshake & Connect")
@@ -236,7 +329,7 @@ fun SettingsTab(
 
         // Fallbacks toggles: UPnP & DDNS
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -245,7 +338,7 @@ fun SettingsTab(
                     text = "WAN Fallback Protocols",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF06B6D4)
+                    color = colors.primary
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 
@@ -254,7 +347,7 @@ fun SettingsTab(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Enable UPnP IGDP Mapping", fontSize = 13.sp, color = Color.White)
+                    Text("Enable UPnP IGDP Mapping", fontSize = 13.sp, color = colors.onSurface)
                     Switch(
                         checked = upnpEnabled,
                         onCheckedChange = {
@@ -270,7 +363,7 @@ fun SettingsTab(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Enable Dynamic DNS Lookup", fontSize = 13.sp, color = Color.White)
+                    Text("Enable Dynamic DNS Lookup", fontSize = 13.sp, color = colors.onSurface)
                     Switch(
                         checked = ddnsEnabled,
                         onCheckedChange = {
@@ -292,10 +385,10 @@ fun SettingsTab(
                         },
                         label = { Text("DDNS Hostname address", fontSize = 11.sp) },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
+                            focusedTextColor = colors.onSurface,
+                            unfocusedTextColor = colors.onSurface,
+                            focusedBorderColor = colors.primary,
+                            unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -306,7 +399,7 @@ fun SettingsTab(
         // Cryptographic keys vault display card
         keyPair?.let { pair ->
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -315,10 +408,10 @@ fun SettingsTab(
                         text = "Companion Key Vault",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF06B6D4)
+                        color = colors.primary
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text("NIST ML-KEM-768 PK (Hex):", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                    Text("NIST ML-KEM-768 PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
                         text = pair.mlkemPkHex.take(48) + "...",
                         fontSize = 12.sp,
@@ -326,7 +419,7 @@ fun SettingsTab(
                         color = Color(0xFFC084FC)
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text("X25519 Ephemeral PK (Hex):", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                    Text("X25519 Ephemeral PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
                         text = pair.x25519PkHex.take(48) + "...",
                         fontSize = 12.sp,
@@ -339,7 +432,7 @@ fun SettingsTab(
 
         // Zero-Trust Local Diagnostics & Logs Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            colors = CardDefaults.cardColors(containerColor = colors.surface),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -348,21 +441,20 @@ fun SettingsTab(
                     text = "Zero-Trust Local Diagnostics & Logs",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF06B6D4)
+                    color = colors.primary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Diagnostic Logs:",
                     fontSize = 11.sp,
-                    color = Color(0xFF94A3B8)
+                    color = colors.onSurface.copy(alpha = 0.6f)
                 )
                 Spacer(modifier = Modifier.height(4.dp))
-                // A small scrollable text box showing logs
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(120.dp)
-                        .background(Color(0xFF0B0D17), shape = RoundedCornerShape(8.dp))
+                        .background(colors.background, shape = RoundedCornerShape(8.dp))
                         .padding(8.dp)
                 ) {
                     val scrollState = rememberScrollState()
@@ -390,34 +482,73 @@ fun SettingsTab(
                         onClick = onCopyStacktrace,
                         enabled = hasCrashLog,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF1E293B)
+                            containerColor = colors.surfaceVariant
                         ),
                         modifier = Modifier.weight(1f).height(36.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Text("Copy Stacktrace", fontSize = 10.sp, color = if (hasCrashLog) Color.White else Color.Gray)
+                        Text("Copy Stacktrace", fontSize = 10.sp, color = if (hasCrashLog) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = 0.4f))
                     }
                     Button(
                         onClick = onExportDiagnosticLogs,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF06B6D4)
+                            containerColor = colors.primary
                         ),
                         modifier = Modifier.weight(1f).height(36.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Text("Export Logs", fontSize = 10.sp, color = Color.White)
+                        Text("Export Logs", fontSize = 10.sp, color = colors.onPrimary)
                     }
                     Button(
                         onClick = onExportCrashLog,
                         enabled = hasCrashLog,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (hasCrashLog) Color(0xFFDC2626) else Color(0xFF1E293B)
+                            containerColor = if (hasCrashLog) colors.error else colors.surfaceVariant
                         ),
                         modifier = Modifier.weight(1f).height(36.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Text("Export Anon Crash", fontSize = 10.sp, color = if (hasCrashLog) Color.White else Color.Gray)
+                        Text("Export Anon Crash", fontSize = 10.sp, color = if (hasCrashLog) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.4f))
                     }
+                }
+            }
+        }
+
+        // Emergency Panic Self-Destruct Card (Moved here from Home tab)
+        Card(
+            colors = CardDefaults.cardColors(containerColor = colors.error.copy(alpha = 0.1f)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = colors.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Emergency Panic Destruction",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.error
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Instantly zeroizes active ratchet memory and purges TEE/StrongBox master keys.",
+                    fontSize = 12.sp,
+                    color = colors.onErrorContainer
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onPanicTriggered,
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.error),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("PURGE MASTER KEYS & ZEROIZE RAM", color = colors.onError, fontWeight = FontWeight.Bold)
                 }
             }
         }
