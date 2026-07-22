@@ -45,4 +45,12 @@ class SettingsManager(context: Context) {
     var fileAccessGrantedDesktop: Boolean
         get() = prefs.getBoolean("file_access_granted_desktop", false)
         set(value) = prefs.edit().putBoolean("file_access_granted_desktop", value).apply()
+
+    var themeMode: String
+        get() = prefs.getString("theme_mode", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("theme_mode", value).apply()
+
+    var amoledMode: Boolean
+        get() = prefs.getBoolean("amoled_mode", false)
+        set(value) = prefs.edit().putBoolean("amoled_mode", value).apply()
 }

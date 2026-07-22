@@ -55,12 +55,19 @@ class MainActivity : ComponentActivity() {
         requestInitialPermissions()
 
         setContent {
-            KyberpipeTheme {
+            var themeMode by remember { mutableStateOf(settingsManager.themeMode) }
+            var amoledMode by remember { mutableStateOf(settingsManager.amoledMode) }
+
+            KyberpipeTheme(themeMode = themeMode, amoledMode = amoledMode) {
                 MainScreen(
                     settings = settingsManager,
                     onAvatarPickerClick = { pickImageLauncher.launch("image/*") },
                     onStartService = { startPipeForegroundService() },
-                    onStopService = { stopPipeForegroundService() }
+                    onStopService = { stopPipeForegroundService() },
+                    onThemeChanged = { mode, amoled ->
+                        themeMode = mode
+                        amoledMode = amoled
+                    }
                 )
             }
         }
@@ -109,16 +116,39 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun KyberpipeTheme(content: @Composable () -> Unit) {
-    val darkColors = darkColorScheme(
-        primary = Color(0xFF06B6D4),
-        secondary = Color(0xFF6366F1),
-        background = Color(0xFF0B0D17),
-        surface = Color(0xFF161B2E),
-        onPrimary = Color.White,
-        onBackground = Color(0xFFF1F5F9)
-    )
-    MaterialTheme(colorScheme = darkColors, content = content)
+fun KyberpipeTheme(
+    themeMode: String,
+    amoledMode: Boolean,
+    content: @Composable () -> Unit
+) {
+    val isSystemDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val isDark = when (themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> isSystemDark
+    }
+
+    val colors = if (isDark) {
+        darkColorScheme(
+            primary = Color(0xFF06B6D4),
+            secondary = Color(0xFF6366F1),
+            background = if (amoledMode) Color(0xFF000000) else Color(0xFF0B0D17),
+            surface = if (amoledMode) Color(0xFF050505) else Color(0xFF161B2E),
+            onPrimary = Color.White,
+            onBackground = Color(0xFFF1F5F9)
+        )
+    } else {
+        lightColorScheme(
+            primary = Color(0xFF06B6D4),
+            secondary = Color(0xFF6366F1),
+            background = Color(0xFFF1F5F9),
+            surface = Color.White,
+            onPrimary = Color.White,
+            onBackground = Color(0xFF0F172A)
+        )
+    }
+
+    MaterialTheme(colorScheme = colors, content = content)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,7 +157,8 @@ fun MainScreen(
     settings: SettingsManager,
     onAvatarPickerClick: () -> Unit,
     onStartService: () -> Unit,
-    onStopService: () -> Unit
+    onStopService: () -> Unit,
+    onThemeChanged: (String, Boolean) -> Unit
 ) {
     var currentTab by remember { mutableStateOf(TabItem.HOME) }
     var keyPair by remember { mutableStateOf<PqKeyPair?>(null) }
@@ -391,7 +422,7 @@ fun MainScreen(
                         onPairingConfigChange = { pairingConfigInput = it },
                         onTriggerHandshake = handlePairingHandshake,
                         onAvatarPickerClick = onAvatarPickerClick,
-                        onSaveSettings = { /* Already handled by getters/setters in settings */ }
+                        onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) }
                     )
                 }
             }

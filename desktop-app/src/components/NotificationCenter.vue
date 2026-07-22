@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { 
+  Bell, 
+  Layers, 
+  Monitor, 
+  Smartphone, 
+  Send, 
+  Zap, 
+  AlertCircle 
+} from '@lucide/vue';
 
 interface UnifiedNotification {
   id: string;
@@ -64,7 +73,7 @@ const handleSendNotif = () => {
 
 <template>
   <section class="panel">
-    <h2 class="section-title">🔔 Notification & SMS Center</h2>
+    <h2 class="section-title"><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Notification & SMS Center</h2>
     <p class="section-subtitle">Real-time notification mirroring and remote SMS dispatching through secure ratchets.</p>
 
     <!-- Sub tabs -->
@@ -74,21 +83,21 @@ const handleSendNotif = () => {
         :class="{ active: activeSubTab === 'all' }" 
         @click="activeSubTab = 'all'"
       >
-        ♾️ Combined Stream
+        <Layers style="margin-right: 0.25rem;" :size="14" /> Combined Stream
       </button>
       <button 
         class="tab-btn" 
         :class="{ active: activeSubTab === 'local' }" 
         @click="activeSubTab = 'local'"
       >
-        💻 This PC
+        <Monitor style="margin-right: 0.25rem;" :size="14" /> This PC
       </button>
       <button 
         class="tab-btn" 
         :class="{ active: activeSubTab === 'remote' }" 
         @click="activeSubTab = 'remote'"
       >
-        📱 Android Companion
+        <Smartphone style="margin-right: 0.25rem;" :size="14" /> Android Companion
       </button>
     </div>
 
@@ -97,7 +106,7 @@ const handleSendNotif = () => {
       class="not-connected-box" 
       v-if="activeSubTab === 'remote' && !isConnected"
     >
-      <div class="empty-icon">🔌</div>
+      <AlertCircle class="empty-icon" :size="48" style="color: var(--accent-indigo);" />
       <h3>Companion Phone Offline</h3>
       <p>Connect your Android companion device to view and interact with real-time remote notifications.</p>
       <button class="btn btn-primary" @click="emit('connectDevice')">
@@ -110,7 +119,7 @@ const handleSendNotif = () => {
       <div class="notifications-list-col">
         <h3>System Notification Logs</h3>
         <div class="empty-list" v-if="filteredNotifications.length === 0">
-          <p>No notifications matched this filter.</p>
+          <p>No notifications matched this view.</p>
         </div>
         <div class="msg-card-list" v-else>
           <div 
@@ -120,7 +129,8 @@ const handleSendNotif = () => {
           >
             <div class="entry-meta">
               <span class="source-badge" :class="notif.type">
-                {{ notif.type === 'local' ? '💻 Local' : '📱 Remote' }}
+                <component :is="notif.type === 'local' ? Monitor : Smartphone" :size="12" style="margin-right: 0.25rem; vertical-align: middle;" />
+                {{ notif.type === 'local' ? 'Local' : 'Remote' }}
               </span>
               <span class="timestamp">{{ notif.timestamp }}</span>
             </div>
@@ -149,7 +159,7 @@ const handleSendNotif = () => {
           </div>
 
           <button class="btn btn-primary" @click="handleSendSms" :disabled="!isConnected">
-            Dispatch SMS
+            <Send style="margin-right: 0.25rem;" :size="14" /> Dispatch SMS
           </button>
           <p v-if="optimisticStatus" class="optimistic-msg">{{ optimisticStatus }}</p>
         </div>
@@ -180,7 +190,7 @@ const handleSendNotif = () => {
           </div>
 
           <button class="btn btn-accent" @click="handleSendNotif">
-            Mirror Notification
+            <Zap style="margin-right: 0.25rem;" :size="14" /> Mirror Notification
           </button>
         </div>
       </div>
@@ -211,6 +221,8 @@ const handleSendNotif = () => {
   border-radius: 8px;
   font-size: 0.95rem;
   transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
 }
 .tab-btn.active {
   background: rgba(99, 102, 241, 0.15);
@@ -232,7 +244,6 @@ const handleSendNotif = () => {
   border-radius: 12px;
 }
 .empty-icon {
-  font-size: 3rem;
   margin-bottom: 1rem;
 }
 .not-connected-box h3 {
@@ -285,6 +296,8 @@ const handleSendNotif = () => {
   font-weight: bold;
   padding: 0.15rem 0.5rem;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
 }
 .source-badge.local {
   background: rgba(99, 102, 241, 0.2);

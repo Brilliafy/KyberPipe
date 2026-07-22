@@ -39,6 +39,8 @@ fun SettingsTab(
     var ddnsHost by remember { mutableStateOf(settings.ddnsHostname) }
     var upnpEnabled by remember { mutableStateOf(settings.enableUpnp) }
     var ddnsEnabled by remember { mutableStateOf(settings.enableDdns) }
+    var themeState by remember { mutableStateOf(settings.themeMode) }
+    var amoledState by remember { mutableStateOf(settings.amoledMode) }
 
     Column(
         modifier = Modifier
@@ -106,6 +108,78 @@ fun SettingsTab(
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
+                }
+            }
+        }
+
+        // Theme Visual Properties Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Theme Visual Properties",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF06B6D4)
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                
+                Text("Select Application Theme Mode:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val themeModes = listOf("light" to "Light", "dark" to "Dark", "auto" to "System Auto")
+                    themeModes.forEach { (mode, label) ->
+                        val selected = themeState == mode
+                        Button(
+                            onClick = {
+                                themeState = mode
+                                settings.themeMode = mode
+                                onSaveSettings()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selected) Color(0xFF06B6D4) else Color(0xFF1E293B)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        ) {
+                            Text(label, fontSize = 11.sp, color = Color.White)
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "True AMOLED/OLED Mode",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Enforce pure black backgrounds to optimize power",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Switch(
+                        checked = amoledState,
+                        onCheckedChange = {
+                            amoledState = it
+                            settings.amoledMode = it
+                            onSaveSettings()
+                        }
+                    )
                 }
             }
         }

@@ -18,6 +18,7 @@ pub struct AppSettings {
     pub is_paired: bool,
     pub file_access_granted_desktop: bool,
     pub file_access_granted_phone: bool,
+    pub theme_mode: Option<String>,
 }
 
 pub struct AppState {
