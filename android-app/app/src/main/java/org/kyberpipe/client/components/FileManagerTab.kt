@@ -1,6 +1,11 @@
 package org.kyberpipe.client.components
 
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -23,6 +28,11 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import java.io.File
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -46,12 +56,22 @@ fun FileManagerTab(
     var activeSubTab by remember { mutableStateOf("local") }
     var useScopedStorage by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val localGranted = remember(refreshKey) { PermissionHelper.hasStoragePermissions(context) }
-    val hasScopedDir = remember { context.getExternalFilesDir(null)?.exists() == true }
 
-                    val filesListKey = "$activeSubTab-$localGranted-$useScopedStorage-$isConnected-${settings.fileAccessGrantedDesktop}-$refreshKey"
-                    val filesList = remember(filesListKey) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshKey++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val filesListKey = "$activeSubTab-$localGranted-$useScopedStorage-$isConnected-${settings.fileAccessGrantedDesktop}-$refreshKey"
+    val filesList = remember(filesListKey) {
         val list = mutableListOf<AndroidFileItem>()
         if (activeSubTab == "local") {
             if (localGranted && !useScopedStorage) {
@@ -72,14 +92,9 @@ fun FileManagerTab(
                     list.addAll(getSimulatedLocalFiles())
                 }
             } else {
-                // Scoped sandbox storage fallback
                 try {
                     val scopedDir = context.getExternalFilesDir(null)
                     if (scopedDir != null) {
-                        val dummy = File(scopedDir, "KyberPipe_Shared_Scoped_File.txt")
-                        if (!dummy.exists()) {
-                            dummy.writeText("This is a shared document stored inside the KyberPipe permission-free scoped sandbox.")
-                        }
                         val files = scopedDir.listFiles()
                         files?.forEach { file ->
                             list.add(
@@ -112,7 +127,6 @@ fun FileManagerTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Tab Row selectors
         TabRow(
             selectedTabIndex = if (activeSubTab == "local") 0 else 1,
             containerColor = colors.surface,
@@ -149,7 +163,7 @@ fun FileManagerTab(
                     Text("File System Access Blocked", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Access permissions to your local Android storage are required to explore all files. Otherwise, you can use the permission-free app sandbox directory.",
+                        text = "Grant full file access to browse all files, or use storage scopes for a specific folder only.",
                         fontSize = 12.sp,
                         color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
@@ -161,28 +175,34 @@ fun FileManagerTab(
                     ) {
                         Button(
                             onClick = {
-                                onPermissionRequest()
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    context.startActivity(intent)
+                                } else {
+                                    onPermissionRequest()
+                                }
                                 MainScope().launch {
-                                    delay(500)
+                                    delay(1000)
                                     refreshKey++
                                 }
                             },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                         ) {
-                            Text("Grant Storage Access", maxLines = 1)
+                            Text("Grant Full File Access", maxLines = 1)
                         }
                         Button(
                             onClick = { useScopedStorage = true },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)
                         ) {
-                            Text("Use Sandbox Directory", maxLines = 1)
+                            Text("Use Storage Scopes", maxLines = 1)
                         }
                     }
                 }
             } else {
-                // Grant Access card
                 Card(
                     colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                     shape = RoundedCornerShape(12.dp),
@@ -197,43 +217,50 @@ fun FileManagerTab(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (useScopedStorage) "Exposing Scoped Sandbox Directory" else "Expose Files to Desktop Node",
+                                text = if (useScopedStorage) "Using Storage Scopes" else "Full Storage Access",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = colors.onSurface
                             )
                             Text(
-                                text = if (useScopedStorage) "Browsing: App Scoped storage sandbox" else "Allows PC to browse your Android folder",
+                                text = if (useScopedStorage) "Showing app sandbox folder" else "All files accessible",
                                 fontSize = 11.sp,
                                 color = colors.onSurface.copy(alpha = 0.6f)
                             )
                         }
-                        Switch(
-                            checked = settings.fileAccessGrantedPhone,
-                            onCheckedChange = {
-                                settings.fileAccessGrantedPhone = it
-                                onGrantLocalAccessToggle(it)
-                            }
-                        )
+                        if (localGranted && useScopedStorage) {
+                            Switch(
+                                checked = false,
+                                onCheckedChange = { useScopedStorage = false }
+                            )
+                        }
                     }
                 }
 
-                if (useScopedStorage && localGranted) {
-                    // Show a helper to switch back to full storage
+                if (useScopedStorage) {
                     Button(
-                        onClick = { useScopedStorage = false },
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                data = Uri.parse("package:${context.packageName}")
+                            }
+                            context.startActivity(intent)
+                            MainScope().launch {
+                                delay(1000)
+                                refreshKey++
+                            }
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = colors.secondary),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Switch to Full Storage Directory")
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Add Folder to Storage Scopes")
                     }
                 }
 
-                // Local Files List
                 FilesListView(filesList, onFileAction)
             }
         } else {
-            // REMOTE PC TAB
             if (!isConnected) {
                 Column(
                     modifier = Modifier
@@ -276,14 +303,13 @@ fun FileManagerTab(
                     Text("Access Pending PC Authorization", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Please go to KyberPipe settings on your Linux Desktop and turn on 'Allow Phone to browse this PC's files'.",
+                        text = "Please go to KyberPipe settings on your Linux Desktop and allow phone to browse files.",
                         fontSize = 12.sp,
                         color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
                     )
                 }
             } else {
-                // PC Files List
                 FilesListView(filesList, onFileAction)
             }
         }
