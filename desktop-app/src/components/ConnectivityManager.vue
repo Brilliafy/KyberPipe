@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import { 
   Wifi, 
   Network, 
@@ -10,6 +10,7 @@ import {
 const props = defineProps<{
   wifiDirectActive: boolean;
   lanActive: boolean;
+  wireguardActive: boolean;
   resolvedPublicIp: string;
   ddnsHostname: string;
   enableUpnp: boolean;
@@ -20,6 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:wifiDirectActive", val: boolean): void;
   (e: "update:lanActive", val: boolean): void;
+  (e: "update:wireguardActive", val: boolean): void;
   (e: "update:ddnsHostname", val: string): void;
   (e: "update:enableUpnp", val: boolean): void;
   (e: "update:enableDdns", val: boolean): void;
@@ -40,19 +42,55 @@ const dragIndex = ref<number | null>(null);
 const handleDragStart = (index: number) => {
   dragIndex.value = index;
 };
-const handleDragOver = (event: DragEvent, index: number) => {
+const handleDragOver = (event: DragEvent) => {
   event.preventDefault();
+};
+const handleDrop = (index: number) => {
   if (dragIndex.value === null || dragIndex.value === index) return;
   const newOrder = [...props.pathwayOrder];
   const [removed] = newOrder.splice(dragIndex.value, 1);
   newOrder.splice(index, 0, removed);
-  dragIndex.value = index;
   emit("update:pathwayOrder", newOrder);
   emit("saveSettings");
+  dragIndex.value = null;
 };
 const handleDragEnd = () => {
   dragIndex.value = null;
 };
+
+const handleToggle = (key: string, checked: boolean) => {
+  const activeCount = (props.wifiDirectActive ? 1 : 0) + 
+                      (props.lanActive ? 1 : 0) + 
+                      (props.wireguardActive ? 1 : 0);
+  if (!checked && activeCount <= 1) {
+    alert("At least one connection pathway must be enabled!");
+    return;
+  }
+  if (key === 'wifi_direct') {
+    emit('update:wifiDirectActive', checked);
+  } else if (key === 'mdns_lan') {
+    emit('update:lanActive', checked);
+  } else if (key === 'wireguard_wan') {
+    emit('update:wireguardActive', checked);
+  }
+  emit('saveSettings');
+};
+
+const isPathwayActive = (pKey: string) => {
+  if (pKey === 'wifi_direct') return props.wifiDirectActive;
+  if (pKey === 'mdns_lan') return props.lanActive;
+  if (pKey === 'wireguard_wan') return props.wireguardActive;
+  return false;
+};
+
+const activeKey = computed(() => {
+  for (const p of props.pathwayOrder) {
+    if (p === 'wifi_direct' && props.wifiDirectActive) return p;
+    if (p === 'mdns_lan' && props.lanActive) return p;
+    if (p === 'wireguard_wan' && props.wireguardActive) return p;
+  }
+  return '';
+});
 
 const PATHWAY_META: Record<string, { name: string; desc: string; latency: string }> = {
   wifi_direct: {
@@ -232,7 +270,6 @@ onUnmounted(() => {
       <div class="card connectivity-card">
         <div class="card-header">
           <h3>Connectivity hierarchy</h3>
-          <span class="active-badge">Active Failover</span>
         </div>
         <p class="card-desc">Drag priorities to rearrange connection precedence. Highest active pathway will be chosen automatically:</p>
 
@@ -242,13 +279,13 @@ onUnmounted(() => {
             :key="pKey"
             class="interface-item"
             :class="{ 
-              active: (pKey === 'wifi_direct' && wifiDirectActive) || 
-                      (pKey === 'mdns_lan' && !wifiDirectActive && lanActive) ||
-                      (pKey === 'wireguard_wan' && !wifiDirectActive && !lanActive)
+              active: activeKey === pKey,
+              inactive: !isPathwayActive(pKey)
             }"
             draggable="true"
             @dragstart="handleDragStart(index)"
-            @dragover="handleDragOver($event, index)"
+            @dragover="handleDragOver($event)"
+            @drop="handleDrop(index)"
             @dragend="handleDragEnd"
           >
             <div class="interface-header">
@@ -272,25 +309,15 @@ onUnmounted(() => {
                 <strong>{{ PATHWAY_META[pKey].name }}</strong>
               </div>
               
-              <div v-if="pKey === 'wifi_direct'" class="toggle-switch">
+              <div class="toggle-switch">
                 <input 
                   type="checkbox" 
-                  id="toggle-wifi-direct" 
-                  :checked="wifiDirectActive" 
-                  @change="emit('update:wifiDirectActive', ($event.target as HTMLInputElement).checked); emit('saveSettings')" 
+                  :id="'toggle-' + pKey" 
+                  :checked="isPathwayActive(pKey)" 
+                  @change="handleToggle(pKey, ($event.target as HTMLInputElement).checked)" 
                 />
-                <label for="toggle-wifi-direct"></label>
+                <label :for="'toggle-' + pKey"></label>
               </div>
-              <div v-else-if="pKey === 'mdns_lan'" class="toggle-switch">
-                <input 
-                  type="checkbox" 
-                  id="toggle-lan" 
-                  :checked="lanActive" 
-                  @change="emit('update:lanActive', ($event.target as HTMLInputElement).checked); emit('saveSettings')" 
-                />
-                <label for="toggle-lan"></label>
-              </div>
-              <span v-else class="always-on">Fallback</span>
             </div>
             <p class="interface-desc">{{ PATHWAY_META[pKey].desc }}</p>
           </div>
@@ -461,6 +488,15 @@ onUnmounted(() => {
   border-color: var(--accent-cyan);
   background: rgba(6, 182, 212, 0.05);
   box-shadow: 0 0 15px rgba(6, 182, 212, 0.1);
+}
+.interface-item.inactive {
+  opacity: 0.65;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.02);
+}
+:global(html.theme-daylight) .interface-item.inactive {
+  background: rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.05);
 }
 .interface-header {
   display: flex;

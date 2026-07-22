@@ -109,6 +109,20 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
+.logo-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  overflow: visible;
+}
+.logo-svg {
+  width: 36px;
+  height: 36px;
+  display: block;
+}
 .nav-icon {
   margin-right: 0.5rem;
   color: var(--text-secondary);

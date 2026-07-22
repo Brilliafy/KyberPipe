@@ -113,7 +113,7 @@
                         <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Diagnostics & Security</h3>
                         <ul class="space-y-2 text-sm">
                             <li><a href="#diagnostics" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Zero-Trust Diagnostics</a></li>
-                            <li><a href="#anonymization" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Log Scrubbing / Anon</a></li>
+                            <li><a href="#troubleshooting" class="block py-1 text-slate-400 hover:text-slate-200 transition-colors">Troubleshooting</a></li>
                         </ul>
                     </div>
                 </nav>
@@ -395,6 +395,23 @@ echo "CPU temperature is ${CPU_TEMP}°C"
                                 <div><span class="text-emerald-400">Location</span>: "src/portal.rs:182:10"</div>
                                 <div><span class="text-emerald-400">Trace</span>: "at core::panicking::panic_fmt ... /home/<span class="text-brand-cyan">[USER]</span>/kyberpipe/core-crypto/src/..."</div>
                                 <div><span class="text-emerald-400">Connection Endpoint</span>: "<span class="text-brand-cyan">[MASKED_IP]</span>"</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Troubleshooting Section -->
+                    <section id="troubleshooting" class="border-t border-brand-darkBorder pt-12">
+                        <h2 class="text-2xl font-extrabold text-white mb-4">Troubleshooting & Sandbox Overrides</h2>
+                        <p class="text-sm text-slate-400 mb-6">
+                            When running KyberPipe under containerized environments (such as Flatpak sandbox limits), permissions for device communication, audio streaming, and notifications might be restricted by the host. Use the sandbox permission helper overrides below to grant access.
+                        </p>
+                        <div class="p-6 rounded-2xl bg-brand-darkCard border border-brand-darkBorder space-y-4">
+                            <h4 class="text-base font-bold text-slate-200">Flatpak Sandbox Permission Helper</h4>
+                            <p class="text-xs text-slate-400">
+                                Run the following override command in your host terminal to grant the necessary wayland socket, pulseaudio socket, and desktop notification portal permissions:
+                            </p>
+                            <div class="bg-brand-darkBg p-4 rounded-xl text-xs font-mono text-cyan-400 border border-brand-darkBorder break-all">
+                                flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe
                             </div>
                         </div>
                     </section>

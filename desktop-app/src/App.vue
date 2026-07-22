@@ -120,6 +120,7 @@ const isConnected = computed(() => connectionColor.value === "green");
 
 const wifiDirectActive = ref(true);
 const lanActive = ref(false);
+const wireguardActive = ref(true);
 const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
 
@@ -189,6 +190,7 @@ const loadSettings = async () => {
     fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
     themeMode.value = settings.theme_mode || "auto";
     pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
+    wireguardActive.value = settings.wireguard_active !== undefined ? settings.wireguard_active : true;
   } catch (e) {
     console.error("Load settings error:", e);
   }
@@ -206,10 +208,37 @@ const saveSettings = async () => {
       enableDdns: enableDdns.value,
       isPaired: isPaired.value,
       themeMode: themeMode.value,
-      pathwayOrder: pathwayOrder.value
+      pathwayOrder: pathwayOrder.value,
+      wireguardActive: wireguardActive.value
     });
   } catch (e) {
     console.error("Save settings error:", e);
+  }
+};
+
+const showFlatpakModal = ref(false);
+const flatpakCopyStatus = ref("");
+
+const verifyFlatpakPermissions = async () => {
+  try {
+    const sysInfo = await invoke<SystemInfo>("get_system_info");
+    systemInfo.value = sysInfo;
+    if (sysInfo.is_flatpak) {
+      const granted = await invoke<boolean>("check_flatpak_permissions");
+      showFlatpakModal.value = !granted;
+    }
+  } catch (e) {
+    console.error("Flatpak verify error:", e);
+  }
+};
+
+const copyFlatpakCommand = async () => {
+  try {
+    await navigator.clipboard.writeText("flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe");
+    flatpakCopyStatus.value = "Override command copied!";
+    setTimeout(() => { flatpakCopyStatus.value = ""; }, 2500);
+  } catch (e) {
+    console.error(e);
   }
 };
 
@@ -402,19 +431,29 @@ const triggerConnectionAttempt = async () => {
   await refreshLogs();
 
   try {
-    const info = await invoke<{
-      active_tier: number;
-      active_path_description: string;
-      latency_ms: number;
-    }>("evaluate_connection_status", {
-      wifiDirectActive: wifiDirectActive.value,
-      lanActive: lanActive.value,
-      publicEndpoint: resolvedPublicIp.value,
-    });
-    
+    let chosenMethod = "None";
+    for (const path of pathwayOrder.value) {
+      if (path === "wifi_direct" && wifiDirectActive.value) {
+        chosenMethod = "Wi-Fi Direct P2P";
+        break;
+      }
+      if (path === "mdns_lan" && lanActive.value) {
+        chosenMethod = "mDNS LAN";
+        break;
+      }
+      if (path === "wireguard_wan" && wireguardActive.value) {
+        chosenMethod = "WireGuard WAN Tunnel";
+        break;
+      }
+    }
+
+    if (chosenMethod === "None") {
+      throw new Error("No pathways enabled");
+    }
+
     await invoke("set_connection_status_full", {
       status: "ACTIVE",
-      method: info.active_path_description,
+      method: chosenMethod,
       color: "green"
     });
     attemptCount.value = 0;
@@ -542,6 +581,7 @@ onMounted(async () => {
   await loadSettings();
   await handleGenerateKeyPair();
   await checkConnectionState();
+  await verifyFlatpakPermissions();
 
   // Load system info
   try {
@@ -646,12 +686,14 @@ onUnmounted(() => {
         v-model:pathwayOrder="pathwayOrder"
         :wifiDirectActive="wifiDirectActive"
         :lanActive="lanActive"
+        :wireguardActive="wireguardActive"
         :resolvedPublicIp="resolvedPublicIp"
         :ddnsHostname="ddnsHostname"
         :enableUpnp="enableUpnp"
         :enableDdns="enableDdns"
         @update:wifiDirectActive="wifiDirectActive = $event; triggerConnectionAttempt()"
         @update:lanActive="lanActive = $event; triggerConnectionAttempt()"
+        @update:wireguardActive="wireguardActive = $event; triggerConnectionAttempt()"
         @update:ddnsHostname="ddnsHostname = $event"
         @update:enableUpnp="enableUpnp = $event"
         @update:enableDdns="enableDdns = $event"
@@ -746,6 +788,28 @@ onUnmounted(() => {
         @regenerateKeys="handleGenerateKeyPair"
         @saveSettings="saveSettings"
       />
+      <!-- Flatpak Permission Overlay Modal -->
+      <div class="flatpak-modal-overlay" v-if="showFlatpakModal">
+        <div class="flatpak-modal-card">
+          <h3 style="font-size: 1.25rem; font-weight: 800; color: #f87171; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+            <ShieldAlert :size="24" /> Sandbox Permissions Required
+          </h3>
+          <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 1.5rem; line-height: 1.5;">
+            KyberPipe is running inside a Flatpak container sandbox. To connect to companion devices, stream audio, and resolve local interfaces, you must grant host network, window, and pulseaudio portal permissions.
+          </p>
+          <div style="background: #0f172a; padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; font-family: monospace; font-size: 0.75rem; overflow-x: auto; margin-bottom: 1.25rem; text-align: left; white-space: pre-wrap; word-break: break-all; color: #38bdf8;">
+            flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe
+          </div>
+          <div style="display: flex; gap: 0.75rem; justify-content: center;">
+            <button class="btn btn-secondary" @click="copyFlatpakCommand" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+              {{ flatpakCopyStatus || 'Copy Command' }}
+            </button>
+            <button class="btn btn-primary" @click="verifyFlatpakPermissions" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+              Verify & Proceed
+            </button>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
@@ -759,6 +823,26 @@ onUnmounted(() => {
   --text-secondary: #94a3b8;
   --accent-cyan: #06b6d4;
   --accent-indigo: #6366f1;
+}
+
+.flatpak-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999999;
+}
+
+.flatpak-modal-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  padding: 2rem;
+  border-radius: 12px;
+  max-width: 500px;
+  text-align: center;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.5);
 }
 
 /* Theme overrides */

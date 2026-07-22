@@ -196,6 +196,47 @@ fun SettingsTab(
                         }
                     )
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = colors.onSurface.copy(alpha = 0.05f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Auto-Purge History",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.onSurface
+                )
+                Text(
+                    text = "Purge notifications and logs older than designated days to conserve device storage.",
+                    fontSize = 11.sp,
+                    color = colors.onSurface.copy(alpha = 0.6f)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val purgeDaysOptions = listOf(3, 7, 14, 30)
+                    var selectedPurgeDays by remember { mutableStateOf(settings.purgeDays) }
+                    purgeDaysOptions.forEach { days ->
+                        val selected = selectedPurgeDays == days
+                        Button(
+                            onClick = {
+                                selectedPurgeDays = days
+                                settings.purgeDays = days
+                                onSaveSettings()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selected) colors.primary else colors.surfaceVariant
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            modifier = Modifier.weight(1f).height(32.dp)
+                        ) {
+                            Text("$days Days", fontSize = 11.sp, color = if (selected) colors.onPrimary else colors.onSurfaceVariant)
+                        }
+                    }
+                }
             }
         }
 

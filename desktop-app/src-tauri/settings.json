@@ -9,5 +9,10 @@
   "is_paired": false,
   "file_access_granted_desktop": true,
   "file_access_granted_phone": false,
-  "theme_mode": "auto"
+  "theme_mode": "auto",
+  "pathway_order": [
+    "wifi_direct",
+    "mdns_lan",
+    "wireguard_wan"
+  ]
 }

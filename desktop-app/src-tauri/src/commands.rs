@@ -462,6 +462,7 @@ pub fn save_settings(
     is_paired: bool,
     theme_mode: Option<String>,
     pathway_order: Option<Vec<String>>,
+    wireguard_active: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.add_log("[Settings] Updating preferences".to_string());
@@ -483,6 +484,7 @@ pub fn save_settings(
         s.is_paired = is_paired;
         s.theme_mode = theme_mode;
         s.pathway_order = pathway_order;
+        s.wireguard_active = wireguard_active;
     }
     state.save_settings();
     Ok(())
@@ -675,6 +677,52 @@ pub fn list_mock_files(is_phone: bool, state: State<'_, AppState>) -> Result<Vec
             LocalFileItem { name: "core-crypto".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/core-crypto".to_string(), is_dir: true, size: 0 },
         ])
     }
+}
+
+#[tauri::command]
+pub fn open_local_file(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn check_flatpak_permissions() -> Result<bool, String> {
+    if !is_flatpak() {
+        return Ok(true);
+    }
+    // Check if pulse socket exists in standard flatpak paths
+    let pulse_exists = std::path::Path::new("/run/flatpak/sandbox-pulse").exists() || 
+                     std::path::Path::new("/run/user").read_dir().map(|mut rd| {
+                         rd.any(|entry| {
+                             if let Ok(e) = entry {
+                                 let p = e.path().join("pulse/native");
+                                 p.exists()
+                             } else {
+                                 false
+                             }
+                         })
+                     }).unwrap_or(false);
+    Ok(pulse_exists)
 }
 
 

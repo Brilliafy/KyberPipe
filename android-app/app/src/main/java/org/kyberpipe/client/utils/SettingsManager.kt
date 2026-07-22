@@ -51,10 +51,32 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putString("theme_mode", value).apply()
 
     var amoledMode: Boolean
-        get() = prefs.getBoolean("amoled_mode", false)
+        get() {
+            if (!prefs.contains("amoled_mode")) {
+                val manufacturer = android.os.Build.MANUFACTURER.lowercase()
+                val isOled = manufacturer.contains("samsung") || 
+                             manufacturer.contains("google") || 
+                             manufacturer.contains("oneplus") || 
+                             manufacturer.contains("xiaomi") || 
+                             manufacturer.contains("oppo") || 
+                             manufacturer.contains("vivo") || 
+                             manufacturer.contains("sony") || 
+                             manufacturer.contains("huawei") || 
+                             manufacturer.contains("motorola") ||
+                             manufacturer.contains("nothing") ||
+                             manufacturer.contains("asus")
+                prefs.edit().putBoolean("amoled_mode", isOled).apply()
+                return isOled
+            }
+            return prefs.getBoolean("amoled_mode", false)
+        }
         set(value) = prefs.edit().putBoolean("amoled_mode", value).apply()
 
     var pathwayOrder: String
         get() = prefs.getString("pathway_order", "wifi_direct,mdns_lan,wireguard_wan") ?: "wifi_direct,mdns_lan,wireguard_wan"
         set(value) = prefs.edit().putString("pathway_order", value).apply()
+
+    var purgeDays: Int
+        get() = prefs.getInt("purge_days", 7)
+        set(value) = prefs.edit().putInt("purge_days", value).apply()
 }

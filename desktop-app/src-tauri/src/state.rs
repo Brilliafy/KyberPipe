@@ -20,6 +20,7 @@ pub struct AppSettings {
     pub file_access_granted_phone: bool,
     pub theme_mode: Option<String>,
     pub pathway_order: Option<Vec<String>>,
+    pub wireguard_active: bool,
 }
 
 pub struct AppState {
@@ -40,13 +41,18 @@ impl Default for AppState {
     fn default() -> Self {
         let settings_path = "settings.json".to_string();
         let mut settings = AppSettings::default();
+        let mut exists = false;
         if let Ok(mut file) = File::open(&settings_path) {
             let mut contents = String::new();
             if file.read_to_string(&mut contents).is_ok() {
                 if let Ok(loaded) = serde_json::from_str::<AppSettings>(&contents) {
                     settings = loaded;
+                    exists = true;
                 }
             }
+        }
+        if !exists {
+            settings.wireguard_active = true;
         }
 
         Self {

@@ -271,13 +271,23 @@ fun MainScreen(
     var pairingConfigInput by remember { mutableStateOf("") }
     var sasCodeDisplay by remember { mutableStateOf("849-201") }
 
-    // Clipboard and Notification feeds (Real data synced)
-    val clipboardList = remember { mutableStateListOf<AndroidClipboardRecord>() }
-    val notificationsList = remember { mutableStateListOf<AndroidNotificationRecord>() }
-
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val activity = context as MainActivity
+
+    val notifStore = remember { org.kyberpipe.client.utils.NotificationStore(context) }
+
+    // Clipboard and Notification feeds (Real data synced)
+    val clipboardList = remember { mutableStateListOf<AndroidClipboardRecord>() }
+    val notificationsList = remember { 
+        mutableStateListOf<AndroidNotificationRecord>().apply {
+            addAll(notifStore.loadNotifications())
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        notifStore.purgeOldRecords(settings.purgeDays, notificationsList)
+    }
 
     // Load initial deep link config
     LaunchedEffect(initialPairingConfig) {
@@ -299,17 +309,16 @@ fun MainScreen(
                     val pkg = intent.getStringExtra("packageName") ?: ""
                     val ts = intent.getLongExtra("timestamp", System.currentTimeMillis())
                     
-                    notificationsList.add(
-                        0,
-                        AndroidNotificationRecord(
-                            id = "notif_${ts}_${pkg.hashCode()}",
-                            title = title,
-                            text = text,
-                            appPackage = pkg,
-                            timestamp = ts,
-                            type = "remote"
-                        )
+                    val newRecord = AndroidNotificationRecord(
+                        id = "notif_${ts}_${pkg.hashCode()}",
+                        title = title,
+                        text = text,
+                        appPackage = pkg,
+                        timestamp = ts,
+                        type = "local"
                     )
+                    notificationsList.add(0, newRecord)
+                    notifStore.saveNotifications(notificationsList)
                     addLog("[Notification] Intercepted from $pkg: $title")
                 }
             }
@@ -457,7 +466,7 @@ fun MainScreen(
             tempPcName = "Linux Desktop Workstation"
             showFirstConnectModal = true
             addLog("[Pairing] Successfully verified host identity via SAS Code: $formattedSas")
-        } else {
+        } else if (pairingConfigInput.trim().startsWith("{")) {
             try {
                 val json = JSONObject(pairingConfigInput)
                 val hostPkHex = json.getString("host_identity_pk_hex")
@@ -476,6 +485,9 @@ fun MainScreen(
                 Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
                 addLog("[Pairing] Error: Handshake verification failed (${e.message})")
             }
+        } else {
+            Toast.makeText(context, "Invalid pairing code (must be 6 digits) or JSON format", Toast.LENGTH_LONG).show()
+            addLog("[Pairing] Error: Invalid input format")
         }
     }
 
@@ -587,19 +599,14 @@ fun MainScreen(
                     NotificationsTab(
                         notifications = notificationsList,
                         isConnected = connectionColor == Color.Green,
-                        onSendSms = { recipient, body ->
-                            notificationsList.add(
-                                0,
-                                AndroidNotificationRecord(
-                                    id = "sms_${System.currentTimeMillis()}",
-                                    title = "SMS to $recipient",
-                                    text = body,
-                                    appPackage = "telephony.sms",
-                                    timestamp = System.currentTimeMillis(),
-                                    type = "local"
-                                )
-                            )
-                            Toast.makeText(context, "SMS Dispatched!", Toast.LENGTH_SHORT).show()
+                        onDismiss = { id ->
+                            val idx = notificationsList.indexOfFirst { it.id == id }
+                            if (idx != -1) {
+                                val item = notificationsList[idx]
+                                notificationsList[idx] = item.copy(isDismissed = true, updatedAt = System.currentTimeMillis())
+                                notifStore.saveNotifications(notificationsList)
+                                addLog("[Notification] Dismissed $id. Sync queued.")
+                            }
                         },
                         onConnectRequest = { currentTab = TabItem.SETTINGS }
                     )
@@ -611,8 +618,15 @@ fun MainScreen(
                         pairingConfigInput = pairingConfigInput,
                         onPairingConfigChange = { newValue ->
                             val clean = newValue.replace("-", "")
+                            val isDeleting = newValue.length < pairingConfigInput.length
                             val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
-                                if (clean.length > 3) "${clean.take(3)}-${clean.drop(3)}" else clean
+                                if (isDeleting && clean.length == 3) {
+                                    clean.take(2)
+                                } else if (clean.length >= 3) {
+                                    if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+                                } else {
+                                    clean
+                                }
                             } else {
                                 newValue
                             }
