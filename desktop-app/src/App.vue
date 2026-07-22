@@ -949,6 +949,7 @@ onUnmounted(() => {
   --text-secondary: #94a3b8;
   --accent-cyan: #06b6d4;
   --accent-indigo: #6366f1;
+  color-scheme: dark;
 }
 
 .flatpak-modal-overlay {
@@ -980,6 +981,7 @@ html.theme-daylight {
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --accent-cyan: #0284c7;
+  color-scheme: light;
 }
 html.theme-oled-black {
   --bg-dark: #000000;
