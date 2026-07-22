@@ -1,6 +1,6 @@
+use crate::error::KyberError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::error::KyberError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SensorPacket {
@@ -92,13 +92,11 @@ pub enum KyberMessage {
 
 impl KyberMessage {
     pub fn to_json(&self) -> Result<String, KyberError> {
-        serde_json::to_string(self)
-            .map_err(|e| KyberError::SerializationError(e.to_string()))
+        serde_json::to_string(self).map_err(|e| KyberError::SerializationError(e.to_string()))
     }
 
     pub fn from_json(json_str: &str) -> Result<Self, KyberError> {
-        serde_json::from_str(json_str)
-            .map_err(|e| KyberError::SerializationError(e.to_string()))
+        serde_json::from_str(json_str).map_err(|e| KyberError::SerializationError(e.to_string()))
     }
 }
 
