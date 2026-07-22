@@ -1,3 +1,4 @@
+use crate::error::KyberError;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
@@ -11,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use crate::error::KyberError;
 
 pub const CHUNKS_SIZE: usize = 64 * 1024; // 64 KB per block chunk
 
@@ -96,7 +96,11 @@ impl DoubleRatchetState {
     }
 
     /// Advance receiving symmetric chain key and decrypt ciphertext payload
-    pub fn ratchet_decrypt(&mut self, nonce: &[u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, KyberError> {
+    pub fn ratchet_decrypt(
+        &mut self,
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, KyberError> {
         let hk = Hkdf::<Sha256>::new(Some(&self.receiving_chain_key), b"step");
         let mut msg_key = [0u8; 32];
         hk.expand(b"kyberpipe-msg-key", &mut msg_key)
@@ -109,9 +113,13 @@ impl DoubleRatchetState {
     }
 
     /// Perform a Post-Quantum Ephemeral DH/KEM Ratchet re-key step
-    pub fn dh_ratchet_rekey(&mut self, peer_x25519_pk: [u8; 32], peer_mlkem_pk: &[u8]) -> Result<HybridKemResult, KyberError> {
+    pub fn dh_ratchet_rekey(
+        &mut self,
+        peer_x25519_pk: [u8; 32],
+        peer_mlkem_pk: &[u8],
+    ) -> Result<HybridKemResult, KyberError> {
         let kem_res = encapsulate_hybrid(&peer_x25519_pk, peer_mlkem_pk)?;
-        
+
         let hk = Hkdf::<Sha256>::new(Some(&self.root_key), &kem_res.combined_shared_secret);
         hk.expand(b"kyberpipe-next-root-key", &mut self.root_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
@@ -273,7 +281,9 @@ pub fn hash_clipboard_text(text: &str) -> String {
 pub fn pad_payload(data: &[u8]) -> Result<Vec<u8>, KyberError> {
     let orig_len = data.len();
     if orig_len > 64 * 1024 - 4 {
-        return Err(KyberError::EncryptionFailed("Payload exceeds 64KB max padded block size".into()));
+        return Err(KyberError::EncryptionFailed(
+            "Payload exceeds 64KB max padded block size".into(),
+        ));
     }
 
     let target_size = if orig_len + 4 <= 256 {
@@ -296,14 +306,18 @@ pub fn pad_payload(data: &[u8]) -> Result<Vec<u8>, KyberError> {
 /// Unpad standardized block back to original payload bytes
 pub fn unpad_payload(padded: &[u8]) -> Result<Vec<u8>, KyberError> {
     if padded.len() < 4 {
-        return Err(KyberError::DecryptionFailed("Padded block too short".into()));
+        return Err(KyberError::DecryptionFailed(
+            "Padded block too short".into(),
+        ));
     }
     let mut len_bytes = [0u8; 4];
     len_bytes.copy_from_slice(&padded[0..4]);
     let orig_len = u32::from_be_bytes(len_bytes) as usize;
 
     if orig_len + 4 > padded.len() {
-        return Err(KyberError::DecryptionFailed("Invalid padded length header".into()));
+        return Err(KyberError::DecryptionFailed(
+            "Invalid padded length header".into(),
+        ));
     }
 
     Ok(padded[4..4 + orig_len].to_vec())
@@ -351,7 +365,9 @@ impl<T: Clone> LwwRegisterCRDT<T> {
 /// Split a master secret into n shares requiring k shares to reconstruct (GF(2^8) Shamir Secret Sharing)
 pub fn split_secret_shamir(secret: &[u8], k: usize, n: usize) -> Result<Vec<Vec<u8>>, KyberError> {
     if k == 0 || n == 0 || k > n {
-        return Err(KyberError::CryptoError("Invalid k-of-n threshold parameters".into()));
+        return Err(KyberError::CryptoError(
+            "Invalid k-of-n threshold parameters".into(),
+        ));
     }
     let mut shares = vec![Vec::with_capacity(secret.len() + 2); n];
     for (idx, share) in shares.iter_mut().enumerate() {
@@ -382,7 +398,9 @@ pub fn split_secret_shamir(secret: &[u8], k: usize, n: usize) -> Result<Vec<Vec<
 /// Reconstruct master secret from k shares using Lagrange Interpolation
 pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>, KyberError> {
     if shares.len() < k || shares.is_empty() {
-        return Err(KyberError::CryptoError("Insufficient shares to reconstruct secret".into()));
+        return Err(KyberError::CryptoError(
+            "Insufficient shares to reconstruct secret".into(),
+        ));
     }
     let secret_len = shares[0].len() - 2;
     let mut secret = Vec::with_capacity(secret_len);
@@ -398,7 +416,12 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
                 if i != j {
                     let x_j = shares[j][0] as u16;
                     num = (num * x_j) % 255;
-                    den = (den * (if x_j >= x_i { x_j - x_i } else { 255 - (x_i - x_j) })) % 255;
+                    den =
+                        (den * (if x_j >= x_i {
+                            x_j - x_i
+                        } else {
+                            255 - (x_i - x_j)
+                        })) % 255;
                 }
             }
             let l_i = if den == 0 { 1 } else { (num / den) as u8 };
@@ -444,9 +467,14 @@ pub fn evaluate_bft_mesh_consensus(peer_votes: Vec<bool>) -> bool {
 }
 
 /// Threshold Post-Quantum Multi-Party Computation KEM decapsulation share combination
-pub fn mpc_mlkem_decapsulate_shares(shares: Vec<Vec<u8>>, threshold: usize) -> Result<Vec<u8>, KyberError> {
+pub fn mpc_mlkem_decapsulate_shares(
+    shares: Vec<Vec<u8>>,
+    threshold: usize,
+) -> Result<Vec<u8>, KyberError> {
     if shares.len() < threshold {
-        return Err(KyberError::CryptoError("Insufficient MPC decapsulation shares".into()));
+        return Err(KyberError::CryptoError(
+            "Insufficient MPC decapsulation shares".into(),
+        ));
     }
     let mut combined = vec![0u8; 32];
     for share in shares.iter().take(threshold) {
@@ -460,7 +488,9 @@ pub fn mpc_mlkem_decapsulate_shares(shares: Vec<Vec<u8>>, threshold: usize) -> R
 /// Sign payload using NIST ML-DSA-65 (Module Lattice-Based Digital Signature Algorithm)
 pub fn sign_mldsa_payload(payload: &[u8], _sk_bytes: &[u8]) -> Result<Vec<u8>, KyberError> {
     if payload.is_empty() {
-        return Err(KyberError::CryptoError("Empty payload for ML-DSA signing".into()));
+        return Err(KyberError::CryptoError(
+            "Empty payload for ML-DSA signing".into(),
+        ));
     }
     let mut hasher = Sha256::new();
     hasher.update(b"mldsa-65-sig-prefix:");
@@ -504,7 +534,10 @@ pub fn ofdm_acoustic_encode_payload(data: &[u8]) -> Vec<f32> {
 }
 
 /// Verify TPM 2.0 PCRs and Android Hardware Root KeyAttestation certificate chain
-pub fn verify_remote_attestation_pcrs(tpm_pcr_hex: &str, android_attestation_chain_len: usize) -> bool {
+pub fn verify_remote_attestation_pcrs(
+    tpm_pcr_hex: &str,
+    android_attestation_chain_len: usize,
+) -> bool {
     !tpm_pcr_hex.is_empty() && android_attestation_chain_len >= 1
 }
 
@@ -534,7 +567,8 @@ pub fn generate_sas_code(
     client_pk_bytes: &[u8],
     shared_secret: &[u8],
 ) -> Result<String, KyberError> {
-    let mut hkdf_input = Vec::with_capacity(host_pk_bytes.len() + client_pk_bytes.len() + shared_secret.len());
+    let mut hkdf_input =
+        Vec::with_capacity(host_pk_bytes.len() + client_pk_bytes.len() + shared_secret.len());
     hkdf_input.extend_from_slice(host_pk_bytes);
     hkdf_input.extend_from_slice(client_pk_bytes);
     hkdf_input.extend_from_slice(shared_secret);
@@ -572,7 +606,8 @@ impl ClipboardDeduplicator {
     }
 
     pub fn end_remote_update(&self) {
-        self.is_processing_remote_update.store(false, Ordering::SeqCst);
+        self.is_processing_remote_update
+            .store(false, Ordering::SeqCst);
     }
 
     pub fn is_suppressed(&self, text: &str) -> bool {
@@ -630,10 +665,14 @@ mod tests {
         let bob_pair = generate_hybrid_keypair();
         let kem_res = encapsulate_hybrid(&bob_pair.x25519_pk, &bob_pair.mlkem_pk).unwrap();
 
-        let mut alice_ratchet = DoubleRatchetState::new(&kem_res.combined_shared_secret, true).unwrap();
-        let mut bob_ratchet = DoubleRatchetState::new(&kem_res.combined_shared_secret, false).unwrap();
+        let mut alice_ratchet =
+            DoubleRatchetState::new(&kem_res.combined_shared_secret, true).unwrap();
+        let mut bob_ratchet =
+            DoubleRatchetState::new(&kem_res.combined_shared_secret, false).unwrap();
 
-        let (nonce, ciphertext) = alice_ratchet.ratchet_encrypt(b"Post-Quantum Double Ratchet Test").unwrap();
+        let (nonce, ciphertext) = alice_ratchet
+            .ratchet_encrypt(b"Post-Quantum Double Ratchet Test")
+            .unwrap();
         let decrypted = bob_ratchet.ratchet_decrypt(&nonce, &ciphertext).unwrap();
 
         assert_eq!(b"Post-Quantum Double Ratchet Test".to_vec(), decrypted);
@@ -641,8 +680,10 @@ mod tests {
 
     #[test]
     fn test_sas_code_generation() {
-        let sas1 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
-        let sas2 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
+        let sas1 =
+            generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
+        let sas2 =
+            generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
         assert_eq!(sas1.len(), 6);
         assert_eq!(sas1, sas2);
     }

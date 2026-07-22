@@ -1,13 +1,25 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FlightEvent {
-    RatchetStep { seq: u64, path_id: u8 },
-    PathMigrated { from_ip: [u8; 4], to_ip: [u8; 4] },
-    WasmExecuted { duration_us: u32, fuel_used: u64 },
-    ErrorTrace { error_message: String, stacktrace: String },
+    RatchetStep {
+        seq: u64,
+        path_id: u8,
+    },
+    PathMigrated {
+        from_ip: [u8; 4],
+        to_ip: [u8; 4],
+    },
+    WasmExecuted {
+        duration_us: u32,
+        fuel_used: u64,
+    },
+    ErrorTrace {
+        error_message: String,
+        stacktrace: String,
+    },
 }
 
 pub struct FlightDataRecorder {
@@ -54,11 +66,14 @@ impl FlightDataRecorder {
     }
 }
 
-pub static GLOBAL_FLIGHT_RECORDER: std::sync::LazyLock<FlightDataRecorder> = std::sync::LazyLock::new(FlightDataRecorder::new);
+pub static GLOBAL_FLIGHT_RECORDER: std::sync::LazyLock<FlightDataRecorder> =
+    std::sync::LazyLock::new(FlightDataRecorder::new);
 
 /// Initialize Sentry Desktop Error Tracing SDK (Stub - Zero-Trust Local Logging Active)
 pub fn init_sentry_desktop_diagnostics(dsn: &str) {
     if !dsn.is_empty() {
-        tracing::info!("[Diagnostics] Local diagnostics active. Sentry telemetry bypassed. DSN: {dsn}");
+        tracing::info!(
+            "[Diagnostics] Local diagnostics active. Sentry telemetry bypassed. DSN: {dsn}"
+        );
     }
 }
