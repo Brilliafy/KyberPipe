@@ -1,18 +1,15 @@
 {
-  "device_name": "My Linux Workstation",
-  "device_picture": "",
-  "paired_device_name": "",
-  "paired_device_picture": "",
+  "device_name": null,
+  "device_picture": null,
+  "paired_device_name": null,
+  "paired_device_picture": null,
   "ddns_hostname": "",
   "enable_upnp": false,
   "enable_ddns": false,
   "is_paired": false,
   "file_access_granted_desktop": true,
   "file_access_granted_phone": false,
-  "theme_mode": "auto",
-  "pathway_order": [
-    "wifi_direct",
-    "mdns_lan",
-    "wireguard_wan"
-  ]
+  "theme_mode": null,
+  "pathway_order": null,
+  "wireguard_active": true
 }
