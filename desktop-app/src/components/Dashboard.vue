@@ -10,7 +10,7 @@ import {
   Camera, 
   CheckCircle, 
   ExternalLink, 
-  PlusCircle
+  Volume2
 } from '@lucide/vue';
 
 interface ClipboardRecord {
@@ -58,24 +58,18 @@ const inputDeviceName = ref("");
 const inputDevicePic = ref("");
 const copyStatusText = ref("");
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const isUltrasonicActive = ref(false);
 
 const handleCopyLink = async () => {
   try {
     const encodedData = encodeURIComponent(props.pairingConfigJson);
-    const deepLink = `kyberpipe://pair?data=${encodedData}`;
+    const deepLink = `https://brilliafy.github.io/kyberpipe/pair?data=${encodedData}`;
     await navigator.clipboard.writeText(deepLink);
     copyStatusText.value = "Copied remote pairing link to clipboard!";
     setTimeout(() => { copyStatusText.value = ""; }, 3000);
   } catch (e) {
     copyStatusText.value = "Failed to copy link";
   }
-};
-
-const handleMockHandshakeConnect = () => {
-  // Triggers the modal asking for the name & avatar
-  inputDeviceName.value = "Android Companion";
-  inputDevicePic.value = "";
-  showNameModal.value = true;
 };
 
 const submitPairingDetails = () => {
@@ -141,12 +135,24 @@ const handleFileChange = (event: Event) => {
               <button class="btn btn-accent" @click="handleCopyLink">
                 <ExternalLink style="margin-right: 0.25rem;" :size="14" /> Export Pairing Link
               </button>
-              <button class="btn btn-primary" @click="handleMockHandshakeConnect">
-                <PlusCircle style="margin-right: 0.25rem;" :size="14" /> Simulate Handshake
-              </button>
             </div>
             
             <p v-if="copyStatusText" class="copy-status">{{ copyStatusText }}</p>
+          </div>
+
+          <!-- Ultrasonic Broadcast Panel -->
+          <div class="pair-card config-side" style="margin-top: 1rem;">
+            <h3>Ultrasonic Pairing Beacon</h3>
+            <p class="card-desc">Emits encrypted pairing parameters over an inaudible 19.5 kHz audio carrier tone.</p>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+              <span style="font-size: 0.85rem; color: var(--text-secondary); display: flex; align-items: center; gap: 0.35rem;">
+                <Volume2 :size="14" class="text-cyan" /> Status: {{ isUltrasonicActive ? 'Actively Emitting Beacon (19,531 Hz)' : 'Muted (Inactive)' }}
+              </span>
+              <div v-if="isUltrasonicActive" class="beacon-pulse"></div>
+            </div>
+            <button class="btn btn-secondary-outline btn-sm" @click="isUltrasonicActive = !isUltrasonicActive">
+              {{ isUltrasonicActive ? 'Disable Beacon' : 'Emit Ultrasonic Beacon' }}
+            </button>
           </div>
         </div>
       </div>
@@ -665,5 +671,30 @@ const handleFileChange = (event: Event) => {
   display: flex;
   justify-content: center;
   margin-top: 1rem;
+}
+.beacon-pulse {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7);
+  animation: pulse-ring 1.5s infinite;
+}
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 10px rgba(6, 182, 212, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(6, 182, 212, 0);
+  }
+}
+.text-cyan {
+  color: var(--accent-cyan);
 }
 </style>

@@ -11,7 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { RefreshCw, ShieldAlert, Terminal } from "@lucide/vue";
+import { RefreshCw, ShieldAlert, Terminal, Bolt } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -33,19 +33,6 @@ interface ScriptResult {
   logs: string[];
 }
 
-interface SmsPacket {
-  sender: string;
-  body: string;
-  timestamp: number;
-}
-
-interface NotificationPacket {
-  title: string;
-  text: string;
-  app_package: string;
-  timestamp: number;
-}
-
 interface ClipboardRecord {
   id: string;
   text: string;
@@ -61,6 +48,7 @@ interface UnifiedNotification {
   appPackage: string;
   timestamp: string;
   type: "local" | "remote";
+  updatedAt?: number;
 }
 
 const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "notifications" | "light" | "logs" | "settings">("dashboard");
@@ -120,6 +108,7 @@ const isConnected = computed(() => connectionColor.value === "green");
 
 const wifiDirectActive = ref(true);
 const lanActive = ref(false);
+const wireguardActive = ref(true);
 const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
 
@@ -134,6 +123,7 @@ const enableDdns = ref(false);
 const isPaired = ref(false);
 const fileAccessGrantedDesktop = ref(false);
 const fileAccessGrantedPhone = ref(false);
+const pathwayOrder = ref<string[]>(["wifi_direct", "mdns_lan", "wireguard_wan"]);
 
 // Ambient Light Sandbox State
 const currentLux = ref(250.0);
@@ -144,9 +134,9 @@ const lastSyncStatus = ref("");
 const clipboardItems = ref<ClipboardRecord[]>([]);
 
 // Notifications & SMS State (Real)
-const smsList = ref<SmsPacket[]>([]);
-const notifList = ref<NotificationPacket[]>([]);
+const notifList = ref<UnifiedNotification[]>([]);
 const optimisticStatus = ref<string | null>(null);
+const autoPurgeDays = ref(7);
 
 const sasCode = ref("849-201");
 const neuralAnomalyEnabled = ref(false);
@@ -187,6 +177,8 @@ const loadSettings = async () => {
     fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
     fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
     themeMode.value = settings.theme_mode || "auto";
+    pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
+    wireguardActive.value = settings.wireguard_active !== undefined ? settings.wireguard_active : true;
   } catch (e) {
     console.error("Load settings error:", e);
   }
@@ -203,10 +195,53 @@ const saveSettings = async () => {
       enableUpnp: enableUpnp.value,
       enableDdns: enableDdns.value,
       isPaired: isPaired.value,
-      themeMode: themeMode.value
+      themeMode: themeMode.value,
+      pathwayOrder: pathwayOrder.value,
+      wireguardActive: wireguardActive.value
     });
   } catch (e) {
     console.error("Save settings error:", e);
+  }
+};
+
+const showFlatpakModal = ref(false);
+const flatpakCopyStatus = ref("");
+
+const verifyFlatpakPermissions = async () => {
+  try {
+    const sysInfo = await invoke<SystemInfo>("get_system_info");
+    systemInfo.value = sysInfo;
+    if (sysInfo.is_flatpak) {
+      const granted = await invoke<boolean>("check_flatpak_permissions");
+      if (!granted) {
+        showFlatpakModal.value = true;
+      }
+    }
+  } catch (e) {
+    console.error("Flatpak verify error:", e);
+  }
+};
+
+const copyFlatpakCommand = async () => {
+  try {
+    await navigator.clipboard.writeText("flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe");
+    flatpakCopyStatus.value = "Override command copied!";
+    setTimeout(() => { flatpakCopyStatus.value = ""; }, 2500);
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const handleFlatpakVerifyProceed = async () => {
+  const sysInfo = systemInfo.value;
+  if (sysInfo?.is_flatpak) {
+    const granted = await invoke<boolean>("check_flatpak_permissions");
+    if (granted) {
+      showFlatpakModal.value = false;
+    } else {
+      flatpakCopyStatus.value = "Permissions still not granted. Run the command above and click Verify.";
+      setTimeout(() => { flatpakCopyStatus.value = ""; }, 3000);
+    }
   }
 };
 
@@ -280,69 +315,56 @@ const handleSaveEditClipboard = async (payload: { id: string; text: string }) =>
 
 
 
-// Outgoing SMS dispatch
-const sendOptimisticSms = async (payload: { sender: string; body: string }) => {
-  const previousState = [...smsList.value];
-  optimisticStatus.value = "Outgoing message dispatched";
-  try {
-    smsList.value = await invoke<SmsPacket[]>("push_sms_packet", {
-      sender: payload.sender,
-      body: payload.body,
-      timestamp: Date.now(),
-    });
-    await refreshLogs();
-    setTimeout(() => { optimisticStatus.value = null; }, 2000);
-  } catch (e) {
-    smsList.value = previousState;
-    optimisticStatus.value = "Transmission failed (Rolled Back)";
-  }
-};
-
-// Push mock remote notification
-const handlePushMockNotification = async (payload: { title: string; text: string; app: string }) => {
-  try {
-    notifList.value = await invoke<NotificationPacket[]>("push_notification_packet", {
-      title: payload.title,
-      text: payload.text,
-      appPackage: payload.app,
-      timestamp: Date.now(),
-    });
-    await invoke("send_desktop_notification", {
-      title: `[Mirrored] ${payload.title}`,
-      body: payload.text,
-    });
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
 const displayNotifications = computed<UnifiedNotification[]>(() => {
-  const list: UnifiedNotification[] = [];
-  for (const s of smsList.value) {
-    list.push({
-      id: `sms_${s.timestamp}`,
-      source: "SMS Message",
-      title: s.sender,
-      body: s.body,
-      appPackage: "telephony.sms",
-      timestamp: new Date(s.timestamp).toLocaleTimeString(),
-      type: "remote",
-    });
-  }
-  for (const n of notifList.value) {
-    list.push({
-      id: `notif_${n.timestamp}`,
-      source: "App Notification",
-      title: n.title,
-      body: n.text,
-      appPackage: n.app_package,
-      timestamp: new Date(n.timestamp).toLocaleTimeString(),
-      type: "remote",
-    });
-  }
-  return list.sort((a, b) => b.id.localeCompare(a.id));
+  return [...notifList.value].sort((a, b) => {
+    const ta = a.updatedAt || new Date(a.timestamp).getTime();
+    const tb = b.updatedAt || new Date(b.timestamp).getTime();
+    return tb - ta;
+  });
 });
+
+const removeNotification = (id: string) => {
+  const notif = notifList.value.find(n => n.id === id);
+  notifList.value = notifList.value.filter(n => n.id !== id);
+  if (notif) notifySyncChannel(notif);
+};
+
+const notifySyncChannel = (notif: UnifiedNotification) => {
+  try {
+    invoke("push_notification_packet", {
+      title: notif.title || '',
+      text: notif.body || '',
+      appPackage: notif.appPackage || '',
+      timestamp: Date.now(),
+    });
+  } catch (e) {
+  }
+};
+
+const purgeOldNotifications = (days: number) => {
+  const cutoff = Date.now() - days * 86400000;
+  notifList.value = notifList.value.filter(n => {
+    const t = n.updatedAt || new Date(n.timestamp).getTime();
+    return t > cutoff;
+  });
+  try { localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value)); } catch {}
+};
+
+const loadPersistedNotifications = () => {
+  try {
+    const raw = localStorage.getItem('kyberpipe_notifications');
+    if (raw) {
+      const parsed = JSON.parse(raw) as UnifiedNotification[];
+      notifList.value = parsed;
+    }
+  } catch {}
+};
+
+const persistNotifications = () => {
+  try {
+    localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value));
+  } catch {}
+};
 
 const refreshLogs = async () => {
   try {
@@ -399,19 +421,29 @@ const triggerConnectionAttempt = async () => {
   await refreshLogs();
 
   try {
-    const info = await invoke<{
-      active_tier: number;
-      active_path_description: string;
-      latency_ms: number;
-    }>("evaluate_connection_status", {
-      wifiDirectActive: wifiDirectActive.value,
-      lanActive: lanActive.value,
-      publicEndpoint: resolvedPublicIp.value,
-    });
-    
+    let chosenMethod = "None";
+    for (const path of pathwayOrder.value) {
+      if (path === "wifi_direct" && wifiDirectActive.value) {
+        chosenMethod = "Wi-Fi Direct P2P";
+        break;
+      }
+      if (path === "mdns_lan" && lanActive.value) {
+        chosenMethod = "mDNS LAN";
+        break;
+      }
+      if (path === "wireguard_wan" && wireguardActive.value) {
+        chosenMethod = "WireGuard WAN Tunnel";
+        break;
+      }
+    }
+
+    if (chosenMethod === "None") {
+      throw new Error("No pathways enabled");
+    }
+
     await invoke("set_connection_status_full", {
       status: "ACTIVE",
-      method: info.active_path_description,
+      method: chosenMethod,
       color: "green"
     });
     attemptCount.value = 0;
@@ -466,13 +498,26 @@ async function handleGenerateKeyPair() {
   }
 }
 
-async function handleRunScript(code: string) {
+async function handleRunScript(code: string, isSandboxed: boolean, feedSourceCommand: string, onCompletionCode?: string) {
   try {
-    scriptResult.value = await invoke<ScriptResult>("execute_boa_script", {
+    const res = await invoke<ScriptResult>("execute_boa_script", {
       scriptCode: code,
+      isSandboxed: isSandboxed,
       lux: Number(currentLux.value),
+      feedSourceCommand: feedSourceCommand
     });
+    scriptResult.value = res;
     await refreshLogs();
+
+    if (res.success && onCompletionCode && onCompletionCode.trim()) {
+      await invoke("execute_boa_script", {
+        scriptCode: onCompletionCode,
+        isSandboxed: false,
+        lux: Number(currentLux.value),
+        feedSourceCommand: ""
+      });
+      await refreshLogs();
+    }
   } catch (e) {
     console.error("Execution failed: ", e);
   }
@@ -526,6 +571,15 @@ onMounted(async () => {
   await loadSettings();
   await handleGenerateKeyPair();
   await checkConnectionState();
+  await verifyFlatpakPermissions();
+  
+  // Load persisted notifications and purge old ones
+  loadPersistedNotifications();
+  purgeOldNotifications(autoPurgeDays.value);
+
+  // Auto-persist on tab switch and interval
+  watch(notifList, () => persistNotifications(), { deep: true });
+  setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000);
 
   // Load system info
   try {
@@ -589,9 +643,14 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="header-right">
-          <button class="btn btn-secondary btn-sm" style="margin-right: 0.5rem;" @click="currentTab = 'settings'">
-            Settings
+        <div class="header-right" style="display: flex; align-items: center; gap: 0.5rem;">
+          <button 
+            class="btn btn-secondary btn-sm" 
+            style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; margin-right: 0.5rem;" 
+            @click="currentTab = 'settings'" 
+            title="Settings"
+          >
+            <Bolt :size="16" />
           </button>
           <button class="btn-panic" @click="triggerSelfDestruct">
             <ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="14" /> Self-Destruct Wipe
@@ -622,14 +681,17 @@ onUnmounted(() => {
 
       <ConnectivityManager
         v-else-if="currentTab === 'connectivity'"
+        v-model:pathwayOrder="pathwayOrder"
         :wifiDirectActive="wifiDirectActive"
         :lanActive="lanActive"
+        :wireguardActive="wireguardActive"
         :resolvedPublicIp="resolvedPublicIp"
         :ddnsHostname="ddnsHostname"
         :enableUpnp="enableUpnp"
         :enableDdns="enableDdns"
         @update:wifiDirectActive="wifiDirectActive = $event; triggerConnectionAttempt()"
         @update:lanActive="lanActive = $event; triggerConnectionAttempt()"
+        @update:wireguardActive="wireguardActive = $event; triggerConnectionAttempt()"
         @update:ddnsHostname="ddnsHostname = $event"
         @update:enableUpnp="enableUpnp = $event"
         @update:enableDdns="enableDdns = $event"
@@ -662,9 +724,8 @@ onUnmounted(() => {
         :displayNotifications="displayNotifications" 
         :optimisticStatus="optimisticStatus"
         :isConnected="isConnected"
-        @sendSms="sendOptimisticSms"
-        @sendNotif="handlePushMockNotification"
         @connectDevice="currentTab = 'dashboard'"
+        @remove="removeNotification"
       />
 
       <AutomationManager 
@@ -724,6 +785,28 @@ onUnmounted(() => {
         @regenerateKeys="handleGenerateKeyPair"
         @saveSettings="saveSettings"
       />
+      <!-- Flatpak Permission Overlay Modal - MODAL NON-DISMISSIBLE until permissions granted -->
+      <div class="flatpak-modal-overlay" v-if="showFlatpakModal" @click.prevent>
+        <div class="flatpak-modal-card" @click.stop>
+          <h3 style="font-size: 1.25rem; font-weight: 800; color: #f87171; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+            <ShieldAlert :size="24" /> Sandbox Permissions Required
+          </h3>
+          <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 1.5rem; line-height: 1.5;">
+            KyberPipe is running inside a Flatpak container sandbox. To connect to companion devices, stream audio, and resolve local interfaces, you must grant host network, window, and pulseaudio portal permissions.
+          </p>
+          <div style="background: #0f172a; padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; font-family: monospace; font-size: 0.75rem; overflow-x: auto; margin-bottom: 1.25rem; text-align: left; white-space: pre-wrap; word-break: break-all; color: #38bdf8;">
+            flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe
+          </div>
+          <div style="display: flex; gap: 0.75rem; justify-content: center;">
+            <button class="btn btn-secondary" @click="copyFlatpakCommand" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+              {{ flatpakCopyStatus || 'Copy Command' }}
+            </button>
+            <button class="btn btn-primary" @click="handleFlatpakVerifyProceed" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+              Verify & Proceed
+            </button>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
@@ -737,6 +820,27 @@ onUnmounted(() => {
   --text-secondary: #94a3b8;
   --accent-cyan: #06b6d4;
   --accent-indigo: #6366f1;
+}
+
+.flatpak-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999999;
+}
+
+.flatpak-modal-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  padding: 2rem;
+  border-radius: 12px;
+  max-width: 500px;
+  text-align: center;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.5);
 }
 
 /* Theme overrides */

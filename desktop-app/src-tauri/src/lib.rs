@@ -159,6 +159,8 @@ pub fn run() {
             read_real_clipboard,
             write_real_clipboard,
             list_mock_files,
+            open_local_file,
+            check_flatpak_permissions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

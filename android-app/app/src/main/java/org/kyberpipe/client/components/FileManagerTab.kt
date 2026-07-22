@@ -21,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Security
 import java.io.File
 
 data class AndroidFileItem(
@@ -39,11 +41,14 @@ fun FileManagerTab(
     onFileAction: (AndroidFileItem) -> Unit
 ) {
     var activeSubTab by remember { mutableStateOf("local") }
-    val localGranted = PermissionHelper.hasStoragePermissions(androidx.compose.ui.platform.LocalContext.current)
-    val filesList = remember(activeSubTab, localGranted, isConnected, settings.fileAccessGrantedDesktop) {
+    var useScopedStorage by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val localGranted = PermissionHelper.hasStoragePermissions(context)
+
+    val filesList = remember(activeSubTab, localGranted, useScopedStorage, isConnected, settings.fileAccessGrantedDesktop) {
         val list = mutableListOf<AndroidFileItem>()
         if (activeSubTab == "local") {
-            if (localGranted) {
+            if (localGranted && !useScopedStorage) {
                 try {
                     val rootDir = Environment.getExternalStorageDirectory()
                     val files = rootDir.listFiles()
@@ -58,7 +63,30 @@ fun FileManagerTab(
                         )
                     }
                 } catch (e: Exception) {
-                    // Fallback to simulated local files if listing fails
+                    list.addAll(getSimulatedLocalFiles())
+                }
+            } else {
+                // Scoped sandbox storage fallback
+                try {
+                    val scopedDir = context.getExternalFilesDir(null)
+                    if (scopedDir != null) {
+                        val dummy = File(scopedDir, "KyberPipe_Shared_Scoped_File.txt")
+                        if (!dummy.exists()) {
+                            dummy.writeText("This is a shared document stored inside the KyberPipe permission-free scoped sandbox.")
+                        }
+                        val files = scopedDir.listFiles()
+                        files?.forEach { file ->
+                            list.add(
+                                AndroidFileItem(
+                                    name = file.name,
+                                    path = file.absolutePath,
+                                    isDir = file.isDirectory,
+                                    size = if (file.isDirectory) 0 else file.length()
+                                )
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
                     list.addAll(getSimulatedLocalFiles())
                 }
             }
@@ -70,6 +98,8 @@ fun FileManagerTab(
         list
     }
 
+    val colors = MaterialTheme.colorScheme
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -79,8 +109,8 @@ fun FileManagerTab(
         // Tab Row selectors
         TabRow(
             selectedTabIndex = if (activeSubTab == "local") 0 else 1,
-            containerColor = Color(0xFF161B2E),
-            contentColor = Color(0xFF06B6D4)
+            containerColor = colors.surface,
+            contentColor = colors.primary
         ) {
             Tab(
                 selected = activeSubTab == "local",
@@ -95,7 +125,7 @@ fun FileManagerTab(
         }
 
         if (activeSubTab == "local") {
-            if (!localGranted) {
+            if (!localGranted && !useScopedStorage) {
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -103,26 +133,43 @@ fun FileManagerTab(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("🔒 File System Access Blocked", fontWeight = FontWeight.Bold, color = Color.White)
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = colors.error,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("File System Access Blocked", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Access permissions to your local Android storage must be granted to explore files.",
+                        text = "Access permissions to your local Android storage are required to explore all files. Otherwise, you can use the permission-free sandbox directory.",
                         fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                        color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
                     )
                     Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = onPermissionRequest,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text("Grant Storage Access")
+                        Button(
+                            onClick = onPermissionRequest,
+                            colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
+                        ) {
+                            Text("Grant Storage Access")
+                        }
+                        Button(
+                            onClick = { useScopedStorage = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)
+                        ) {
+                            Text("Use Sandbox Directory")
+                        }
                     }
                 }
             } else {
-                // Grant Access switch settings to allow desktop to browse
+                // Grant Access card
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                    colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -135,15 +182,15 @@ fun FileManagerTab(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Expose Files to Desktop Node",
+                                text = if (useScopedStorage) "Exposing Scoped Sandbox Directory" else "Expose Files to Desktop Node",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = colors.onSurface
                             )
                             Text(
-                                text = "Allows PC to browse your Android folder",
+                                text = if (useScopedStorage) "Browsing: App Scoped storage sandbox" else "Allows PC to browse your Android folder",
                                 fontSize = 11.sp,
-                                color = Color(0xFF94A3B8)
+                                color = colors.onSurface.copy(alpha = 0.6f)
                             )
                         }
                         Switch(
@@ -153,6 +200,17 @@ fun FileManagerTab(
                                 onGrantLocalAccessToggle(it)
                             }
                         )
+                    }
+                }
+
+                if (useScopedStorage && localGranted) {
+                    // Show a helper to switch back to full storage
+                    Button(
+                        onClick = { useScopedStorage = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.secondary),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Switch to Full Storage Directory")
                     }
                 }
 
@@ -172,16 +230,16 @@ fun FileManagerTab(
                     Icon(
                         imageVector = Icons.Default.CloudOff,
                         contentDescription = null,
-                        tint = Color(0xFF94A3B8),
+                        tint = colors.onBackground.copy(alpha = 0.4f),
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Establish a secure connection with your desktop node to browse files remotely.",
                         fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                        color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
                     )
                 }
@@ -193,12 +251,19 @@ fun FileManagerTab(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("🔒 Access Pending PC Authorization", fontWeight = FontWeight.Bold, color = Color.White)
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = colors.error,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Access Pending PC Authorization", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Please go to Kyberpipe settings on your Linux Desktop and turn on 'Allow Phone to browse this PC's files'.",
+                        text = "Please go to KyberPipe settings on your Linux Desktop and turn on 'Allow Phone to browse this PC's files'.",
                         fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                        color = colors.onBackground.copy(alpha = 0.6f),
                         modifier = Modifier.padding(horizontal = 24.dp)
                     )
                 }
@@ -215,6 +280,7 @@ fun FilesListView(
     files: List<AndroidFileItem>,
     onFileAction: (AndroidFileItem) -> Unit
 ) {
+    val colors = MaterialTheme.colorScheme
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -228,12 +294,12 @@ fun FilesListView(
                     .padding(32.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("Directory is empty.", color = Color(0xFF64748B), fontSize = 13.sp)
+                Text("Directory is empty.", color = colors.onBackground.copy(alpha = 0.4f), fontSize = 13.sp)
             }
         } else {
             files.forEach { file ->
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -257,13 +323,13 @@ fun FilesListView(
                                 text = file.name,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = colors.onSurface
                             )
                             if (!file.isDir) {
                                 Text(
                                     text = formatBytes(file.size),
                                     fontSize = 11.sp,
-                                    color = Color(0xFF94A3B8)
+                                    color = colors.onSurface.copy(alpha = 0.6f)
                                 )
                             }
                         }
