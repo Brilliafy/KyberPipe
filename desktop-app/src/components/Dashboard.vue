@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, nextTick } from "vue";
+import { ref, watch, nextTick } from "vue";
 import QRCode from 'qrcode';
 import { 
   Shield, 
@@ -64,11 +64,13 @@ const qrCanvasRef = ref<HTMLCanvasElement | null>(null);
 
 const generateQR = async () => {
   await nextTick();
-  if (!qrCanvasRef.value || !props.pairingConfigJson) return;
+  const canvas = qrCanvasRef.value;
+  if (!canvas || !props.pairingConfigJson) return;
+  const parent = canvas.parentElement;
+  const size = parent ? Math.min(parent.clientWidth || 180, 200) : 200;
+  canvas.width = size;
+  canvas.height = size;
   try {
-    const canvas = qrCanvasRef.value;
-    const parent = canvas.parentElement;
-    const size = parent ? Math.min(parent.clientWidth, 200) : 200;
     await QRCode.toCanvas(canvas, props.pairingConfigJson, {
       width: size,
       margin: 2,
@@ -79,8 +81,7 @@ const generateQR = async () => {
   }
 };
 
-watch(() => props.pairingConfigJson, generateQR);
-onMounted(generateQR);
+watch(() => props.pairingConfigJson, generateQR, { immediate: true });
 
 const handleCopyLink = async () => {
   try {
@@ -380,11 +381,14 @@ const handleFileChange = (event: Event) => {
   align-items: center;
   justify-content: center;
   margin: 1.5rem auto;
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 4px;
 }
 .qr-canvas {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 8px;
+  border-radius: 4px;
 }
 
 .sas-block {
