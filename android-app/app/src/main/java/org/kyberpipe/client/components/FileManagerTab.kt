@@ -150,19 +150,22 @@ fun FileManagerTab(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Button(
                             onClick = onPermissionRequest,
+                            modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                         ) {
-                            Text("Grant Storage Access")
+                            Text("Grant Storage Access", maxLines = 1)
                         }
                         Button(
                             onClick = { useScopedStorage = true },
+                            modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)
                         ) {
-                            Text("Use Sandbox Directory")
+                            Text("Use Sandbox Directory", maxLines = 1)
                         }
                     }
                 }

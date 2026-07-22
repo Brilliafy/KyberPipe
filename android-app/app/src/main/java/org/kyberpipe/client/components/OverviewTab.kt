@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -47,7 +48,10 @@ fun OverviewTab(
     onNavigateToClipboard: () -> Unit,
     onNavigateToNotifications: () -> Unit,
     onNavigateToSettings: () -> Unit,
-    onPairMockDevice: (String) -> Unit
+    onPairMockDevice: (String) -> Unit,
+    pairingConfigInput: String = "",
+    onPairingConfigChange: (String) -> Unit = {},
+    onTriggerHandshake: () -> Unit = {}
 ) {
     val colors = MaterialTheme.colorScheme
 
@@ -119,35 +123,50 @@ fun OverviewTab(
 
             when (selectedMethod) {
                 "manual" -> {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = "Enter Pairing Credentials",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Go to the Settings tab to enter the desktop pairing code or paste the configuration JSON.",
-                                fontSize = 11.sp,
-                                color = colors.onSurface.copy(alpha = 0.6f),
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = onNavigateToSettings,
-                                colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
-                                modifier = Modifier.fillMaxWidth()
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Text("Go to Settings")
+                                Text(
+                                    text = "Enter Pairing Code",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = pairingConfigInput,
+                                    onValueChange = onPairingConfigChange,
+                                    label = { Text("Paste 6-digit code or JSON", fontSize = 11.sp) },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = colors.onSurface,
+                                        unfocusedTextColor = colors.onSurface,
+                                        focusedBorderColor = colors.primary,
+                                        unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
+                                    ),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    maxLines = 3,
+                                    singleLine = false
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = onTriggerHandshake,
+                                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Complete PQC Handshake & Connect")
+                                }
                             }
                         }
                     }

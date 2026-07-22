@@ -1,5 +1,6 @@
 package org.kyberpipe.client.components
 
+import android.content.pm.PackageManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -16,6 +17,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.ui.platform.LocalContext
 
 data class AndroidNotificationRecord(
     val id: String,
@@ -37,6 +40,7 @@ fun NotificationsTab(
     onConnectRequest: () -> Unit
 ) {
     var activeSubTab by remember { mutableStateOf("all") }
+    val context = LocalContext.current
 
     val filteredList = remember(activeSubTab, notifications) {
         val activeNotifs = notifications.filter { !it.isDismissed }
@@ -55,7 +59,6 @@ fun NotificationsTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Tab Row
         TabRow(
             selectedTabIndex = when (activeSubTab) {
                 "local" -> 1
@@ -114,7 +117,6 @@ fun NotificationsTab(
                 }
             }
         } else {
-            // Notifications List
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -143,20 +145,30 @@ fun NotificationsTab(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = record.title,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = colors.onSurface,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Notifications,
+                                                contentDescription = null,
+                                                tint = colors.primary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = record.title,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = colors.onSurface
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = record.appPackage.substringAfterLast("."),
-                                            fontSize = 11.sp,
-                                            color = colors.primary,
-                                            modifier = Modifier.padding(end = 8.dp)
+                                            text = getAppLabel(context, record.appPackage),
+                                            fontSize = 10.sp,
+                                            color = colors.primary
                                         )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         IconButton(
                                             onClick = { onDismiss(record.id) },
                                             modifier = Modifier.size(24.dp)
@@ -189,5 +201,15 @@ fun NotificationsTab(
                 }
             }
         }
+    }
+}
+
+private fun getAppLabel(context: android.content.Context, packageName: String): String {
+    return try {
+        val pm = context.packageManager
+        val ai = pm.getApplicationInfo(packageName, 0)
+        pm.getApplicationLabel(ai).toString()
+    } catch (e: Exception) {
+        packageName.substringAfterLast(".")
     }
 }
