@@ -1,4 +1,4 @@
-id: org.kyberpipe.KyberPipe
+id: io.github.brilliafy.kyberpipe
 runtime: org.gnome.Platform
 runtime-version: "46"
 sdk: org.gnome.Sdk

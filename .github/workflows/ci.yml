@@ -57,10 +57,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 26
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '26'
           distribution: 'temurin'
 
       - name: Gradle Lint & Test
@@ -72,7 +72,7 @@ jobs:
   build-and-release:
     name: Compile & Sign Release Artifacts
     needs: [rust-check-and-test, desktop-frontend-check, android-check]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && false # Set to true to enable automated releases
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,10 +83,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Set up JDK 17
+      - name: Set up JDK 26
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '26'
           distribution: 'temurin'
 
       - name: Install pnpm
@@ -108,21 +108,18 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease
         env:
-          # Optional gradle signing flags if configured in build.gradle
           RELEASE_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           RELEASE_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          RELEASE_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          RELEASE_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
 
       - name: Sign Android APK
-        uses: rtsypin/sign-android-release@v4
-        id: sign_app
+        uses: r0adk3ll/upload-packer-action@v1
         with:
           releaseDirectory: android-app/app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          signingKeyBase64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           alias: ${{ secrets.ANDROID_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        # Fallback to upload unsigned if secrets are not set
         continue-on-error: true
 
       # 2. Compile Tauri Desktop App (.deb, .AppImage)
@@ -145,15 +142,23 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
+      - name: Import GPG Key for Flatpak signing
+        uses: crazy-max/ghaction-import-gpg@v6
+        id: import_gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+        continue-on-error: true
+
       - name: Build Flatpak Bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: KyberPipe.flatpak
-          manifest-path: flatpak/org.kyberpipe.KyberPipe.yaml
+          manifest-path: flatpak/io.github.brilliafy.kyberpipe.yaml
           repository-name: flathub
           run-tests: false
           # GPG signs flatpak if GPG key is present in secrets
-          gpg-sign: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          gpg-sign: ${{ steps.import_gpg.outputs.keyid }}
         continue-on-error: true
 
       # 4. Upload APK & Flatpak to the compiled Tagged Release
