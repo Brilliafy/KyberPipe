@@ -565,7 +565,25 @@ fun MainScreen(
                         onPairMockDevice = { nodeName ->
                             tempPcName = nodeName
                             showFirstConnectModal = true
-                        }
+                        },
+                        pairingConfigInput = pairingConfigInput,
+                        onPairingConfigChange = { newValue ->
+                            val clean = newValue.replace("-", "")
+                            val isDeleting = newValue.length < pairingConfigInput.length
+                            val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
+                                if (isDeleting && clean.length == 3) {
+                                    clean.take(2)
+                                } else if (clean.length >= 3) {
+                                    if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+                                } else {
+                                    clean
+                                }
+                            } else {
+                                newValue
+                            }
+                            pairingConfigInput = formatted
+                        },
+                        onTriggerHandshake = handlePairingHandshake
                     )
                 }
                 TabItem.FILES -> {
