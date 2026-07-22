@@ -202,6 +202,7 @@ fun FileManagerTab(
     }
 
     if (showAddDialog) {
+<<<<<<< HEAD
         showAddDialog = false
         useScope.value = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -213,6 +214,54 @@ fun FileManagerTab(
             onPermissionRequest()
         }
         MainScope().launch { delay(1500); refreshKey++ }
+=======
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("Add File Access") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Choose how KyberPipe accesses your files:", fontSize = 14.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showAddDialog = false
+                            useScope.value = false
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            } else {
+                                onPermissionRequest()
+                            }
+                            MainScope().launch { delay(1500); refreshKey++ }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
+                    ) { Text("Grant Full File Access") }
+                    Spacer(Modifier.height(4.dp))
+                    Button(
+                        onClick = {
+                            showAddDialog = false
+                            useScope.value = true
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            } else {
+                                onPermissionRequest()
+                            }
+                            MainScope().launch { delay(1500); refreshKey++ }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)
+                    ) { Text("Setup Storage Scopes") }
+                }
+            },
+            confirmButton = {}
+        )
+>>>>>>> origin/main
     }
 }
 
