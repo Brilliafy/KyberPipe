@@ -1,11 +1,11 @@
-use tauri::State;
 use crate::executor::{run_boa_sandboxed_script, run_fallback_subprocess, ScriptExecutionResult};
 use crate::portal::{is_flatpak, send_notification, sync_clipboard_text};
-use crate::state::AppState;
-use core_crypto::packets::{NotificationPacket, SensorPacket, SmsPacket};
+use crate::state::{AppState, NotificationRecord};
 use core_crypto::generate_pq_keypair;
+use core_crypto::packets::{SensorPacket, SmsPacket};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::State;
 
 #[derive(Serialize)]
 pub struct SystemInfo {
@@ -59,7 +59,10 @@ pub fn execute_boa_script(
 ) -> ScriptExecutionResult {
     let mut feed_value = String::new();
     if !feed_source_command.trim().is_empty() {
-        state.add_log(format!("[Automation] Querying feed source: {}", feed_source_command));
+        state.add_log(format!(
+            "[Automation] Querying feed source: {}",
+            feed_source_command
+        ));
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(&feed_source_command)
@@ -78,12 +81,18 @@ pub fn execute_boa_script(
     if is_sandboxed {
         state.add_log(format!("[Sandbox] Running Boa script (lux = {lux})"));
         let res = run_boa_sandboxed_script(&script_code, lux, &feed_value);
-        state.add_log(format!("[Sandbox] Result: success={}, output={}", res.success, res.output));
+        state.add_log(format!(
+            "[Sandbox] Result: success={}, output={}",
+            res.success, res.output
+        ));
         res
     } else {
         state.add_log(format!("[Host] Running unsandboxed script (lux = {lux})"));
         let res = crate::executor::run_unsandboxed_process(&script_code, lux, &feed_value);
-        state.add_log(format!("[Host] Result: success={}, output={}", res.success, res.output));
+        state.add_log(format!(
+            "[Host] Result: success={}, output={}",
+            res.success, res.output
+        ));
         res
     }
 }
@@ -94,9 +103,14 @@ pub fn execute_fallback_script(
     lux: f64,
     state: State<'_, AppState>,
 ) -> ScriptExecutionResult {
-    state.add_log(format!("[Subprocess] Executing fallback script: {script_path} (lux = {lux})"));
+    state.add_log(format!(
+        "[Subprocess] Executing fallback script: {script_path} (lux = {lux})"
+    ));
     let res = run_fallback_subprocess(&script_path, lux);
-    state.add_log(format!("[Subprocess] Result: success={}, output={}", res.success, res.output));
+    state.add_log(format!(
+        "[Subprocess] Result: success={}, output={}",
+        res.success, res.output
+    ));
     res
 }
 
@@ -108,7 +122,10 @@ pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, 
     }
     state.dedup.record_text(&text);
     sync_clipboard_text(&text)?;
-    state.add_log(format!("[Clipboard] Synced: \"{}\"", &text.chars().take(30).collect::<String>()));
+    state.add_log(format!(
+        "[Clipboard] Synced: \"{}\"",
+        &text.chars().take(30).collect::<String>()
+    ));
     Ok(true)
 }
 
@@ -171,14 +188,16 @@ pub fn push_notification_packet(
     app_package: String,
     timestamp: u64,
     state: State<'_, AppState>,
-) -> Vec<NotificationPacket> {
-    let pkt = NotificationPacket {
-        sbn_key: format!("{app_package}_{timestamp}"),
+) -> Vec<NotificationRecord> {
+    let pkt = NotificationRecord {
+        id: format!("{app_package}_{timestamp}"),
         title: title.clone(),
         text: text.clone(),
         app_package: app_package.clone(),
-        icon_base64: None,
         timestamp,
+        is_dismissed: false,
+        updated_at: timestamp,
+        type_field: "remote".to_string(),
     };
     // Emit native Linux desktop notification via notify-rust
     let notif_title = title.clone();
@@ -191,7 +210,9 @@ pub fn push_notification_packet(
             .show();
     });
 
-    state.add_log(format!("[Notification Sync] {app_package}: {title} - {text}"));
+    state.add_log(format!(
+        "[Notification Sync] {app_package}: {title} - {text}"
+    ));
     if let Ok(mut hist) = state.notification_history.lock() {
         if hist.len() >= 50 {
             hist.remove(0);
@@ -210,8 +231,15 @@ pub fn send_outbound_sms(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     state.add_log(format!("[Outbound SMS] Dispatching to {recipient}: {body}"));
-    core_crypto::create_outbound_sms_packet(recipient, body, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .map_err(|e| e.to_string())
+    core_crypto::create_outbound_sms_packet(
+        recipient,
+        body,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -221,9 +249,19 @@ pub fn trigger_notification_action(
     action_title: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    state.add_log(format!("[Notification Action] Triggered action '{action_title}' on {sbn_key}"));
-    core_crypto::create_notification_action_packet(sbn_key, action_index, action_title, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .map_err(|e| e.to_string())
+    state.add_log(format!(
+        "[Notification Action] Triggered action '{action_title}' on {sbn_key}"
+    ));
+    core_crypto::create_notification_action_packet(
+        sbn_key,
+        action_index,
+        action_title,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -233,8 +271,15 @@ pub fn send_hardware_command(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     state.add_log(format!("[Hardware Command] Dispatching: {command_type}"));
-    core_crypto::create_hardware_command_packet(command_type, payload_json, SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .map_err(|e| e.to_string())
+    core_crypto::create_hardware_command_packet(
+        command_type,
+        payload_json,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -272,18 +317,24 @@ pub fn generate_sas_pairing_code(
 pub fn store_key_in_secure_enclave(key_name: String, secret_hex: String) -> Result<(), String> {
     let entry = keyring::Entry::new("kyberpipe", &key_name)
         .map_err(|e| format!("Keyring access failed: {e}"))?;
-    entry.set_password(&secret_hex)
+    entry
+        .set_password(&secret_hex)
         .map_err(|e| format!("Failed to store secret in OS Secret Service: {e}"))?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn check_stepup_authorization(action_name: String, requires_high_tier: bool) -> Result<bool, String> {
+pub fn check_stepup_authorization(
+    action_name: String,
+    requires_high_tier: bool,
+) -> Result<bool, String> {
     if !requires_high_tier {
         return Ok(true); // Low Tier (Auto approved)
     }
     // High Tier (Step-Up Auth Required): Verified via OS Secret Service / Polkit / YubiKey tap
-    tracing::info!("[Step-Up Auth] High-tier action '{action_name}' approved via OS Privilege Gate");
+    tracing::info!(
+        "[Step-Up Auth] High-tier action '{action_name}' approved via OS Privilege Gate"
+    );
     Ok(true)
 }
 
@@ -314,24 +365,41 @@ pub fn merge_mesh_crdt_state(
 }
 
 #[tauri::command]
-pub async fn stream_binary_file(state: State<'_, AppState>) -> Result<tauri::ipc::Response, String> {
+pub async fn stream_binary_file(
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
     let _logs = state.logs.lock().ok();
     // Streams raw payload bytes directly without Base64 encoding overhead
-    let raw_bytes = vec![0u8; 1024]; 
+    let raw_bytes = vec![0u8; 1024];
     Ok(tauri::ipc::Response::new(raw_bytes))
 }
 
 #[tauri::command]
-pub fn toggle_neural_anomaly_engine(enabled: bool, state: State<'_, AppState>) -> Result<String, String> {
-    let status_str = if enabled { "ENABLED (eBPF ONNX Engine Active)" } else { "DISABLED (Battery & Performance Optimized)" };
-    state.add_log(format!("[Neural Anomaly Engine] Status changed to: {status_str}"));
-    Ok(format!("Neuromorphic On-Device Anomaly Engine is now {status_str}"))
+pub fn toggle_neural_anomaly_engine(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let status_str = if enabled {
+        "ENABLED (eBPF ONNX Engine Active)"
+    } else {
+        "DISABLED (Battery & Performance Optimized)"
+    };
+    state.add_log(format!(
+        "[Neural Anomaly Engine] Status changed to: {status_str}"
+    ));
+    Ok(format!(
+        "Neuromorphic On-Device Anomaly Engine is now {status_str}"
+    ))
 }
 
 #[tauri::command]
 pub fn toggle_flight_recorder(enabled: bool, state: State<'_, AppState>) -> Result<String, String> {
     core_crypto::telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
-    let status_str = if enabled { "ENABLED (sub-nanosecond qlog ring buffer active)" } else { "DISABLED (zero overhead)" };
+    let status_str = if enabled {
+        "ENABLED (sub-nanosecond qlog ring buffer active)"
+    } else {
+        "DISABLED (zero overhead)"
+    };
     state.add_log(format!("[Flight Data Recorder] {status_str}"));
     Ok(format!("Flight Data Recorder is now {status_str}"))
 }
@@ -342,8 +410,14 @@ pub fn dump_flight_recorder_events() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn init_sentry_desktop_telemetry(dsn: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    state.add_log(format!("[Telemetry] Local logging active. Remote telemetry disabled. DSN: {}", dsn));
+pub fn init_sentry_desktop_telemetry(
+    dsn: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    state.add_log(format!(
+        "[Telemetry] Local logging active. Remote telemetry disabled. DSN: {}",
+        dsn
+    ));
     Ok("Local Diagnostics Active (Zero-Trust Enforcement)".to_string())
 }
 
@@ -353,9 +427,14 @@ pub fn get_latest_crash_log() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn bind_pkcs11_yubikey_hardware_token(slot_id: u32, _user_pin: String) -> Result<String, String> {
+pub fn bind_pkcs11_yubikey_hardware_token(
+    slot_id: u32,
+    _user_pin: String,
+) -> Result<String, String> {
     tracing::info!("[PKCS#11 YubiKey] Master identity key bound to hardware token (Slot {slot_id}). Touch confirmation required.");
-    Ok(format!("YubiKey PIV Smartcard bound to Slot {slot_id}. Physical touch required for re-keying."))
+    Ok(format!(
+        "YubiKey PIV Smartcard bound to Slot {slot_id}. Physical touch required for re-keying."
+    ))
 }
 
 #[tauri::command]
@@ -372,7 +451,10 @@ pub fn generate_shamir_recovery_shares(k: usize, n: usize) -> Result<Vec<String>
 }
 
 #[tauri::command]
-pub fn reconstruct_key_from_shamir_shares(shares_hex: Vec<String>, k: usize) -> Result<String, String> {
+pub fn reconstruct_key_from_shamir_shares(
+    shares_hex: Vec<String>,
+    k: usize,
+) -> Result<String, String> {
     let shares: Result<Vec<Vec<u8>>, _> = shares_hex.into_iter().map(|s| hex::decode(&s)).collect();
     let decoded_shares = shares.map_err(|e| format!("Invalid hex share: {e}"))?;
     let recovered_bytes = core_crypto::crypto::reconstruct_secret_shamir(&decoded_shares, k)
@@ -385,13 +467,19 @@ pub fn trigger_panic_self_destruct(state: State<'_, AppState>) -> Result<String,
     core_crypto::trigger_panic_hardware_wipe().map_err(|e| e.to_string())?;
     let mut status = state.connection_status.lock().unwrap();
     *status = "SELF_DESTRUCTED_MEMORY_ZEROIZED".to_string();
-    state.add_log("[PANIC DESTRUCTION] Memory zeroized & Hardware KeyStore invalidated!".to_string());
+    state.add_log(
+        "[PANIC DESTRUCTION] Memory zeroized & Hardware KeyStore invalidated!".to_string(),
+    );
     Ok("Hardware master key destroyed and active ratchet zeroized.".to_string())
 }
 
 #[tauri::command]
 pub fn get_connection_status(state: State<'_, AppState>) -> String {
-    state.connection_status.lock().map(|s| s.clone()).unwrap_or_else(|_| "Disconnected".to_string())
+    state
+        .connection_status
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "Disconnected".to_string())
 }
 
 #[tauri::command]
@@ -400,16 +488,20 @@ pub fn get_app_logs(state: State<'_, AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn perform_stun_hole_punch(stun_host: String, state: State<'_, AppState>) -> Result<String, String> {
-    state.add_log(format!("[STUN] Initiating UDP hole punch via STUN: {stun_host}"));
-    let addr = core_crypto::perform_stun_hole_punch(stun_host)
-        .map_err(|e| e.to_string())?;
+pub fn perform_stun_hole_punch(
+    stun_host: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state.add_log(format!(
+        "[STUN] Initiating UDP hole punch via STUN: {stun_host}"
+    ));
+    let addr = core_crypto::perform_stun_hole_punch(stun_host).map_err(|e| e.to_string())?;
     state.add_log(format!("[STUN] Mapped public reflexive address: {addr}"));
-    
+
     if let Ok(mut status) = state.connection_status.lock() {
         *status = format!("Connected (WAN STUN: {addr})");
     }
-    
+
     Ok(addr)
 }
 
@@ -420,16 +512,17 @@ pub fn evaluate_connection_status(
     public_endpoint: String,
     state: State<'_, AppState>,
 ) -> Result<core_crypto::ConnectionInfo, String> {
-    let info = core_crypto::evaluate_connection_hierarchy(wifi_direct_active, lan_active, public_endpoint);
+    let info =
+        core_crypto::evaluate_connection_hierarchy(wifi_direct_active, lan_active, public_endpoint);
     state.add_log(format!(
         "[Connection Manager] Active path: {} (Tier {}, Latency {}ms)",
         info.active_path_description, info.active_tier, info.latency_ms
     ));
-    
+
     if let Ok(mut status) = state.connection_status.lock() {
         *status = format!("Connected ({})", info.active_path_description);
     }
-    
+
     Ok(info)
 }
 
@@ -440,8 +533,7 @@ pub fn get_pairing_config(
     state: State<'_, AppState>,
 ) -> Result<core_crypto::PairingConfig, String> {
     state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
-    core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
-        .map_err(|e| e.to_string())
+    core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -470,7 +562,9 @@ pub fn save_settings(
         state.add_log("[UPnP] Initializing UPnP port mapper fallback... Done.".to_string());
     }
     if enable_ddns && !ddns_hostname.is_empty() {
-        state.add_log(format!("[DDNS] Resolving DDNS Hostname: {ddns_hostname}... Done."));
+        state.add_log(format!(
+            "[DDNS] Resolving DDNS Hostname: {ddns_hostname}... Done."
+        ));
     }
     {
         let mut s = state.settings.lock().unwrap();
@@ -527,9 +621,11 @@ pub fn set_connection_status_full(
         let mut c = state.connection_color.lock().unwrap();
         *c = color.clone();
     }
-    
+
     if current_status != status {
-        state.add_log(format!("[Connection State] Changed to {status} via method {method}"));
+        state.add_log(format!(
+            "[Connection State] Changed to {status} via method {method}"
+        ));
     }
 }
 
@@ -572,13 +668,15 @@ fn write_copyq_clipboard(text: &str) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn copyq add: {e}"))?;
-    
+
     use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())
+        stdin
+            .write_all(text.as_bytes())
             .map_err(|e| format!("Failed to write to copyq stdin: {e}"))?;
     }
-    let status = child.wait()
+    let status = child
+        .wait()
         .map_err(|e| format!("Failed to wait for copyq: {e}"))?;
     if status.success() {
         let _ = std::process::Command::new("copyq")
@@ -593,17 +691,15 @@ fn write_copyq_clipboard(text: &str) -> Result<(), String> {
 #[tauri::command]
 pub fn read_real_clipboard() -> Result<String, String> {
     match arboard::Clipboard::new() {
-        Ok(mut clipboard) => {
-            match clipboard.get_text() {
-                Ok(text) => Ok(text),
-                Err(e) => {
-                    if let Ok(text) = read_copyq_clipboard() {
-                        return Ok(text);
-                    }
-                    Err(format!("Failed to read clipboard natively: {e}"))
+        Ok(mut clipboard) => match clipboard.get_text() {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                if let Ok(text) = read_copyq_clipboard() {
+                    return Ok(text);
                 }
+                Err(format!("Failed to read clipboard natively: {e}"))
             }
-        }
+        },
         Err(e) => {
             if let Ok(text) = read_copyq_clipboard() {
                 return Ok(text);
@@ -616,22 +712,16 @@ pub fn read_real_clipboard() -> Result<String, String> {
 #[tauri::command]
 pub fn write_real_clipboard(text: String) -> Result<(), String> {
     let native_err = match arboard::Clipboard::new() {
-        Ok(mut clipboard) => {
-            match clipboard.set_text(text.clone()) {
-                Ok(_) => {
-                    let _ = write_copyq_clipboard(&text);
-                    return Ok(());
-                }
-                Err(e) => {
-                    Some(format!("Native set_text error: {e}"))
-                }
+        Ok(mut clipboard) => match clipboard.set_text(text.clone()) {
+            Ok(_) => {
+                let _ = write_copyq_clipboard(&text);
+                return Ok(());
             }
-        }
-        Err(e) => {
-            Some(format!("Native open error: {e}"))
-        }
+            Err(e) => Some(format!("Native set_text error: {e}")),
+        },
+        Err(e) => Some(format!("Native open error: {e}")),
     };
-    
+
     if let Err(copyq_err) = write_copyq_clipboard(&text) {
         return Err(format!(
             "Failed to write clipboard natively ({:?}) and via CopyQ fallback ({})",
@@ -639,7 +729,10 @@ pub fn write_real_clipboard(text: String) -> Result<(), String> {
         ));
     }
     if let Some(err_str) = &native_err {
-        println!("Note: Native clipboard failed ({}), but CopyQ fallback succeeded.", err_str);
+        println!(
+            "Note: Native clipboard failed ({}), but CopyQ fallback succeeded.",
+            err_str
+        );
     }
     Ok(())
 }
@@ -653,28 +746,83 @@ pub struct LocalFileItem {
 }
 
 #[tauri::command]
-pub fn list_mock_files(is_phone: bool, state: State<'_, AppState>) -> Result<Vec<LocalFileItem>, String> {
+pub fn list_mock_files(
+    is_phone: bool,
+    state: State<'_, AppState>,
+) -> Result<Vec<LocalFileItem>, String> {
     let s = state.settings.lock().unwrap();
     if is_phone {
         if !s.file_access_granted_phone {
-            return Err("Access denied by remote phone. Please grant permission in Kyberpipe settings.".to_string());
+            return Err(
+                "Access denied by remote phone. Please grant permission in Kyberpipe settings."
+                    .to_string(),
+            );
         }
         Ok(vec![
-            LocalFileItem { name: "DCIM".to_string(), path: "/sdcard/DCIM".to_string(), is_dir: true, size: 0 },
-            LocalFileItem { name: "Documents".to_string(), path: "/sdcard/Documents".to_string(), is_dir: true, size: 0 },
-            LocalFileItem { name: "Download".to_string(), path: "/sdcard/Download".to_string(), is_dir: true, size: 0 },
-            LocalFileItem { name: "backup_identity.key".to_string(), path: "/sdcard/backup_identity.key".to_string(), is_dir: false, size: 1240 },
-            LocalFileItem { name: "P2P_Secret_Handshake.pdf".to_string(), path: "/sdcard/Documents/P2P_Secret_Handshake.pdf".to_string(), is_dir: false, size: 405300 },
+            LocalFileItem {
+                name: "DCIM".to_string(),
+                path: "/sdcard/DCIM".to_string(),
+                is_dir: true,
+                size: 0,
+            },
+            LocalFileItem {
+                name: "Documents".to_string(),
+                path: "/sdcard/Documents".to_string(),
+                is_dir: true,
+                size: 0,
+            },
+            LocalFileItem {
+                name: "Download".to_string(),
+                path: "/sdcard/Download".to_string(),
+                is_dir: true,
+                size: 0,
+            },
+            LocalFileItem {
+                name: "backup_identity.key".to_string(),
+                path: "/sdcard/backup_identity.key".to_string(),
+                is_dir: false,
+                size: 1240,
+            },
+            LocalFileItem {
+                name: "P2P_Secret_Handshake.pdf".to_string(),
+                path: "/sdcard/Documents/P2P_Secret_Handshake.pdf".to_string(),
+                is_dir: false,
+                size: 405300,
+            },
         ])
     } else {
         if !s.file_access_granted_desktop {
-            return Err("Access denied by local PC. Please grant permission in Kyberpipe settings.".to_string());
+            return Err(
+                "Access denied by local PC. Please grant permission in Kyberpipe settings."
+                    .to_string(),
+            );
         }
         Ok(vec![
-            LocalFileItem { name: "kyberpipe_core".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe".to_string(), is_dir: true, size: 0 },
-            LocalFileItem { name: "settings.json".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app/src-tauri/settings.json".to_string(), is_dir: false, size: 450 },
-            LocalFileItem { name: "desktop-app".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app".to_string(), is_dir: true, size: 0 },
-            LocalFileItem { name: "core-crypto".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/core-crypto".to_string(), is_dir: true, size: 0 },
+            LocalFileItem {
+                name: "kyberpipe_core".to_string(),
+                path: "/home/Aelfwif/Downloads/kyberpipe".to_string(),
+                is_dir: true,
+                size: 0,
+            },
+            LocalFileItem {
+                name: "settings.json".to_string(),
+                path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app/src-tauri/settings.json"
+                    .to_string(),
+                is_dir: false,
+                size: 450,
+            },
+            LocalFileItem {
+                name: "desktop-app".to_string(),
+                path: "/home/Aelfwif/Downloads/kyberpipe/desktop-app".to_string(),
+                is_dir: true,
+                size: 0,
+            },
+            LocalFileItem {
+                name: "core-crypto".to_string(),
+                path: "/home/Aelfwif/Downloads/kyberpipe/core-crypto".to_string(),
+                is_dir: true,
+                size: 0,
+            },
         ])
     }
 }
@@ -711,18 +859,19 @@ pub fn check_flatpak_permissions() -> Result<bool, String> {
         return Ok(true);
     }
     // Check if pulse socket exists in standard flatpak paths
-    let pulse_exists = std::path::Path::new("/run/flatpak/sandbox-pulse").exists() || 
-                     std::path::Path::new("/run/user").read_dir().map(|mut rd| {
-                         rd.any(|entry| {
-                             if let Ok(e) = entry {
-                                 let p = e.path().join("pulse/native");
-                                 p.exists()
-                             } else {
-                                 false
-                             }
-                         })
-                     }).unwrap_or(false);
+    let pulse_exists = std::path::Path::new("/run/flatpak/sandbox-pulse").exists()
+        || std::path::Path::new("/run/user")
+            .read_dir()
+            .map(|mut rd| {
+                rd.any(|entry| {
+                    if let Ok(e) = entry {
+                        let p = e.path().join("pulse/native");
+                        p.exists()
+                    } else {
+                        false
+                    }
+                })
+            })
+            .unwrap_or(false);
     Ok(pulse_exists)
 }
-
-

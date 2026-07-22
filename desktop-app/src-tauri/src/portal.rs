@@ -12,8 +12,8 @@ pub async fn send_notification(title: &str, body: &str) -> Result<(), String> {
         info!("Flatpak sandbox detected: Dispatching notification via XDG Desktop Portal (ashpd)");
         match ashpd::desktop::notification::NotificationProxy::new().await {
             Ok(proxy) => {
-                let notification = ashpd::desktop::notification::Notification::new(title)
-                    .body(Some(body));
+                let notification =
+                    ashpd::desktop::notification::Notification::new(title).body(Some(body));
                 proxy
                     .add_notification("kyberpipe-notif", notification)
                     .await
@@ -45,8 +45,8 @@ pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
         Ok(())
     } else {
         info!("Native Linux detected: Syncing clipboard via arboard");
-        let mut board = arboard::Clipboard::new()
-            .map_err(|e| format!("Failed to access clipboard: {e}"))?;
+        let mut board =
+            arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {e}"))?;
         board
             .set_text(text.to_string())
             .map_err(|e| format!("Failed to set clipboard text: {e}"))?;

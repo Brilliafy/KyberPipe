@@ -13,7 +13,7 @@ struct Cli {
 enum Commands {
     /// Print active transport path, latency, and mesh nodes status
     Status,
-    
+
     /// Send instant text payload directly to paired devices
     Send {
         /// Text payload to send
@@ -43,12 +43,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stream => {
             let mut stdin = io::stdin();
             let mut buffer = Vec::new();
-            
+
             // Read from stdin to support non-TTY piping (e.g. cat file.txt | kyberpipe stream)
             if !is_terminal::is_terminal(&stdin) {
                 stdin.read_to_end(&mut buffer)?;
                 let text = String::from_utf8_lossy(&buffer);
-                println!("🔒 Non-TTY input detected ({} bytes). Streaming over QUIC...", buffer.len());
+                println!(
+                    "🔒 Non-TTY input detected ({} bytes). Streaming over QUIC...",
+                    buffer.len()
+                );
                 println!("Sent: {}", text.trim());
             } else {
                 println!("Error: Non-TTY stdin pipe input required. Example: cat file.txt | kyberpipe stream");
