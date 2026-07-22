@@ -40,16 +40,20 @@ pub async fn send_notification(title: &str, body: &str) -> Result<(), String> {
 /// Dynamic clipboard sync dispatcher
 pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
     if is_flatpak() {
-        info!("Flatpak sandbox detected: Syncing clipboard via Portal");
-        // Flatpak clipboard sync hook
+        info!("Flatpak sandbox detected: Syncing clipboard via Portal/fallbacks");
+        let _ = crate::commands::write_clipboard_fallback(text);
         Ok(())
     } else {
-        info!("Native Linux detected: Syncing clipboard via arboard");
-        let mut board =
-            arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {e}"))?;
-        board
-            .set_text(text.to_string())
-            .map_err(|e| format!("Failed to set clipboard text: {e}"))?;
-        Ok(())
+        info!("Native Linux detected: Syncing clipboard via arboard/fallbacks");
+        match arboard::Clipboard::new() {
+            Ok(mut board) => {
+                if board.set_text(text.to_string()).is_ok() {
+                    let _ = crate::commands::write_clipboard_fallback(text);
+                    return Ok(());
+                }
+            }
+            Err(_) => {}
+        }
+        crate::commands::write_clipboard_fallback(text)
     }
 }
