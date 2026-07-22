@@ -1,4 +1,12 @@
+<<<<<<< HEAD
 use boa_engine::{js_string, property::Attribute, Context, JsValue, Source};
+=======
+use boa_engine::{
+    js_string,
+    property::Attribute,
+    Source, Context, JsValue,
+};
+>>>>>>> origin/main
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
 use tracing::info;
@@ -16,6 +24,7 @@ pub struct ScriptExecutionResult {
 
 /// Runs user script inside an isolated, in-memory Boa JS Engine VM.
 /// Completely isolated from filesystem, network, and process execution space.
+<<<<<<< HEAD
 pub fn run_boa_sandboxed_script(
     script_code: &str,
     lux: f64,
@@ -25,6 +34,10 @@ pub fn run_boa_sandboxed_script(
         "Executing sandboxed JS code via Boa Engine (lux = {}, feed = {})",
         lux, feed_data
     );
+=======
+pub fn run_boa_sandboxed_script(script_code: &str, lux: f64, feed_data: &str) -> ScriptExecutionResult {
+    info!("Executing sandboxed JS code via Boa Engine (lux = {}, feed = {})", lux, feed_data);
+>>>>>>> origin/main
 
     // Clear previous logs
     ENGINE_LOGS.with(|logs| {
@@ -46,6 +59,30 @@ pub fn run_boa_sandboxed_script(
     );
 
     // Inject feedData global variable
+<<<<<<< HEAD
+=======
+    let _ = context.register_global_property(
+        js_string!("feedData"),
+        JsValue::from(js_string!(feed_data)),
+        Attribute::all(),
+    );
+
+    // Inject system.notify / console log function
+    let console_log = boa_engine::native_function::NativeFunction::from_fn_ptr(|_this, args, _ctx| {
+        let msg = args
+            .first()
+            .map(|v| v.display().to_string())
+            .unwrap_or_default();
+        info!("[Boa Engine Log] {msg}");
+        ENGINE_LOGS.with(|logs| {
+            logs.borrow_mut().push(msg);
+        });
+        Ok(JsValue::undefined())
+    });
+
+    let func_obj = boa_engine::object::FunctionObjectBuilder::new(context.realm(), console_log).build();
+
+>>>>>>> origin/main
     let _ = context.register_global_property(
         js_string!("feedData"),
         JsValue::from(js_string!(feed_data)),
@@ -91,6 +128,7 @@ pub fn run_boa_sandboxed_script(
     );
 
     // Inject getFeedData native function
+<<<<<<< HEAD
     let get_feed_data =
         boa_engine::native_function::NativeFunction::from_fn_ptr(|_this, _args, ctx| {
             let global_obj = ctx.global_object().clone();
@@ -105,6 +143,21 @@ pub fn run_boa_sandboxed_script(
 
     let _ =
         context.register_global_property(js_string!("getFeedData"), get_feed_obj, Attribute::all());
+=======
+    let get_feed_data = boa_engine::native_function::NativeFunction::from_fn_ptr(|_this, _args, ctx| {
+        let global_obj = ctx.global_object().clone();
+        let val = global_obj.get(js_string!("feedData"), ctx).unwrap_or(JsValue::from(js_string!("")));
+        Ok(val)
+    });
+
+    let get_feed_obj = boa_engine::object::FunctionObjectBuilder::new(context.realm(), get_feed_data).build();
+
+    let _ = context.register_global_property(
+        js_string!("getFeedData"),
+        get_feed_obj,
+        Attribute::all(),
+    );
+>>>>>>> origin/main
 
     let res = context.eval(Source::from_bytes(script_code.as_bytes()));
     let collected_logs = ENGINE_LOGS.with(|logs| logs.borrow().clone());
@@ -162,6 +215,7 @@ pub fn run_fallback_subprocess(script_path: &str, lux: f64) -> ScriptExecutionRe
 }
 
 /// Run an arbitrary shell/python command on the host directly (Unsandboxed).
+<<<<<<< HEAD
 pub fn run_unsandboxed_process(
     script_code: &str,
     lux: f64,
@@ -171,6 +225,10 @@ pub fn run_unsandboxed_process(
         "Executing unsandboxed code directly on host (lux = {}, feed = {})",
         lux, feed_data
     );
+=======
+pub fn run_unsandboxed_process(script_code: &str, lux: f64, feed_data: &str) -> ScriptExecutionResult {
+    info!("Executing unsandboxed code directly on host (lux = {}, feed = {})", lux, feed_data);
+>>>>>>> origin/main
 
     let output_result = Command::new("sh")
         .arg("-c")
