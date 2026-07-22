@@ -202,6 +202,19 @@ fun FileManagerTab(
     }
 
     if (showAddDialog) {
+<<<<<<< HEAD
+        showAddDialog = false
+        useScope.value = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+        } else {
+            onPermissionRequest()
+        }
+        MainScope().launch { delay(1500); refreshKey++ }
+=======
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             title = { Text("Add File Access") },
@@ -248,6 +261,7 @@ fun FileManagerTab(
             },
             confirmButton = {}
         )
+>>>>>>> origin/main
     }
 }
 
