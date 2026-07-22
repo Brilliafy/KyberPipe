@@ -13,6 +13,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Computer
 
 data class AndroidClipboardRecord(
     val id: String,
@@ -83,12 +87,19 @@ fun ClipboardTab(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text("🔌 Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Pair and connect your Linux Desktop node to view and synchronize remote clipboard entries.",
-                    fontSize = 12.sp,
-                    color = Color(0xFF94A3B8),
+                Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Pair and connect your Linux Desktop node to view and synchronize remote clipboard entries.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8),
                     modifier = Modifier.padding(horizontal = 24.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))
@@ -171,14 +182,22 @@ fun ClipboardTab(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    val badgeColor = if (item.source == "local") Color(0xFF38BDF8) else Color(0xFFC084FC)
-                                    val badgeLabel = if (item.source == "local") "📱 Mobile" else "💻 PC"
-                                    Text(
-                                        text = badgeLabel,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = badgeColor
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        val isLocal = item.source == "local"
+                                        Icon(
+                                            imageVector = if (isLocal) Icons.Default.PhoneAndroid else Icons.Default.Computer,
+                                            contentDescription = null,
+                                            tint = if (isLocal) Color(0xFF38BDF8) else Color(0xFFC084FC),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = if (isLocal) "Mobile" else "PC",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isLocal) Color(0xFF38BDF8) else Color(0xFFC084FC)
+                                        )
+                                    }
                                     Text(
                                         text = "Synced",
                                         fontSize = 10.sp,

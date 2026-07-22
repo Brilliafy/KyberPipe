@@ -98,8 +98,8 @@ const testExecution = () => {
 
         <div style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 0.5rem;">
           <h4>Create New Handler</h4>
-          <input v-model="newScriptName" placeholder="Handler Name" style="padding: 0.4rem; background: #0f172a; color: white; border: 1px solid var(--border-color); border-radius: 6px;" />
-          <input v-model="newScriptTrigger" placeholder="Trigger Condition" style="padding: 0.4rem; background: #0f172a; color: white; border: 1px solid var(--border-color); border-radius: 6px;" />
+          <input v-model="newScriptName" placeholder="Handler Name" style="padding: 0.4rem; background: var(--bg-dark); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px;" />
+          <input v-model="newScriptTrigger" placeholder="Trigger Condition" style="padding: 0.4rem; background: var(--bg-dark); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px;" />
           <button class="btn btn-secondary btn-sm" @click="createScript">Create</button>
         </div>
       </div>
@@ -110,7 +110,7 @@ const testExecution = () => {
           <h3>Editing Handler: {{ scripts[selectedIndex].name }}</h3>
           <div style="margin-bottom: 0.5rem;">
             <label style="font-size: 0.85rem; color: var(--text-secondary);">Trigger Condition Rule:</label>
-            <input v-model="scripts[selectedIndex].triggerCondition" style="width: 100%; padding: 0.5rem; border-radius: 6px; background: #0f172a; color: white; border: 1px solid var(--border-color); margin-top: 0.25rem;" />
+            <input v-model="scripts[selectedIndex].triggerCondition" style="width: 100%; padding: 0.5rem; border-radius: 6px; background: var(--bg-dark); color: var(--text-primary); border: 1px solid var(--border-color); margin-top: 0.25rem;" />
           </div>
 
           <div>
@@ -127,7 +127,7 @@ const testExecution = () => {
         </div>
 
         <!-- Simulation Submenu Section -->
-        <div v-if="showSimulationPanel" style="background: rgba(15, 23, 42, 0.6); padding: 1.25rem; border-radius: 12px; border: 1px solid var(--border-color); margin-top: 1rem;">
+        <div v-if="showSimulationPanel" style="background: var(--bg-dark); padding: 1.25rem; border-radius: 12px; border: 1px solid var(--border-color); margin-top: 1rem;">
           <h4>Simulated Light Environment Testbed</h4>
           <div class="lux-controls" style="margin-top: 0.5rem;">
             <label style="font-size: 0.85rem; color: var(--text-secondary);">Simulated Level: <strong>{{ currentLux }} lux</strong></label>

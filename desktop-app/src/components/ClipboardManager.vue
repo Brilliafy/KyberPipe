@@ -233,7 +233,7 @@ const handleSave = (id: string) => {
   margin-bottom: 1.5rem;
 }
 .editor-section {
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--bg-dark);
   border: 1px solid var(--border-color);
   padding: 1.5rem;
   border-radius: 12px;
@@ -249,8 +249,8 @@ const handleSave = (id: string) => {
 }
 .input-row input {
   flex: 1;
-  background: #0f172a;
-  color: white;
+  background: var(--bg-dark);
+  color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 0.6rem 1rem;
   border-radius: 8px;
@@ -265,22 +265,22 @@ const handleSave = (id: string) => {
   text-align: center;
   padding: 2rem;
   color: var(--text-secondary);
-  background: rgba(15, 23, 42, 0.1);
+  background: var(--bg-dark);
   border-radius: 8px;
 }
 .msg-card {
   padding: 1rem;
   border-radius: 12px;
-  background: rgba(30, 41, 59, 0.4);
+  background: var(--bg-card);
   margin-bottom: 0.75rem;
-  border: 1px solid rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--border-color);
 }
 .edit-input {
   width: 100%;
   padding: 0.5rem;
   border-radius: 6px;
-  background: #0f172a;
-  color: white;
+  background: var(--bg-dark);
+  color: var(--text-primary);
   border: 1px solid var(--border-color);
   margin-bottom: 0.5rem;
 }

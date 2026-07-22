@@ -17,6 +17,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.CloudOff
 import java.io.File
 
 data class AndroidFileItem(
@@ -165,7 +169,14 @@ fun FileManagerTab(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("🔌 Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
+                    Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Establish a secure connection with your desktop node to browse files remotely.",
@@ -234,9 +245,11 @@ fun FilesListView(
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = if (file.isDir) "📁" else "📄",
-                            fontSize = 20.sp
+                        Icon(
+                            imageVector = if (file.isDir) Icons.Default.Folder else Icons.Default.Description,
+                            contentDescription = null,
+                            tint = if (file.isDir) Color(0xFFF59E0B) else Color(0xFF38BDF8),
+                            modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {

@@ -20,6 +20,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
 import org.kyberpipe.client.utils.SettingsManager
 import uniffi.core_crypto.PqKeyPair
 import java.io.ByteArrayOutputStream
@@ -86,7 +88,12 @@ fun SettingsTab(
                                 contentScale = ContentScale.Crop
                             )
                         } else {
-                            Text("📷", fontSize = 24.sp)
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Select Avatar",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
                         }
                     }
 

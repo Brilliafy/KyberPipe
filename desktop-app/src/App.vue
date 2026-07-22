@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 // Import Refactored Sub-Components
@@ -116,6 +116,10 @@ const currentThemeClass = computed(() => {
   if (themeMode.value === "dark") return ""; // Default dark theme
   return isSystemDark.value ? "" : "theme-daylight";
 });
+
+watch(currentThemeClass, (newClass) => {
+  document.documentElement.className = newClass;
+}, { immediate: true });
 
 // Methods
 
@@ -675,18 +679,18 @@ onUnmounted(() => {
 }
 
 /* Theme overrides */
-.app-layout.theme-daylight {
+html.theme-daylight {
   --bg-dark: #f8fafc;
   --bg-card: #ffffff;
-  --border-color: #cbd5e1;
+  --border-color: #e2e8f0;
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --accent-cyan: #0284c7;
 }
-.app-layout.theme-oled-black {
+html.theme-oled-black {
   --bg-dark: #000000;
-  --bg-card: #050505;
-  --border-color: #262626;
+  --bg-card: #0a0a0a;
+  --border-color: #1f1f1f;
   --text-primary: #ffffff;
   --text-secondary: #a3a3a3;
   --accent-cyan: #ef4444;
@@ -702,22 +706,24 @@ body {
   background-color: var(--bg-dark);
   color: var(--text-primary);
   overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 .app-layout {
   display: flex;
   height: 100vh;
   width: 100vw;
-  background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.1) 0%, transparent 40%),
-              radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
+  background-color: var(--bg-dark);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 .sidebar {
   width: 260px;
-  background: rgba(15, 20, 36, 0.85);
+  background: var(--bg-card);
   backdrop-filter: blur(16px);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   padding: 1.5rem 1rem;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 .brand {
   display: flex;
@@ -775,8 +781,8 @@ body {
   color: var(--text-primary);
 }
 .nav-menu button.active {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.25), rgba(6, 182, 212, 0.15));
-  color: #ffffff;
+  background: rgba(6, 182, 212, 0.1);
+  color: var(--accent-cyan);
   border-left: 3px solid var(--accent-cyan);
 }
 .sidebar-footer {
@@ -796,6 +802,7 @@ body {
   flex-direction: column;
   overflow-y: auto;
   padding: 2rem;
+  transition: background-color 0.3s ease;
 }
 .top-bar {
   display: flex;
@@ -807,13 +814,14 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg-card);
   padding: 0.5rem 1.25rem;
   border-radius: 30px;
   border: 1px solid var(--border-color);
   font-size: 0.85rem;
   font-weight: 700;
   color: var(--text-secondary);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 .status-badge.green {
   color: #22c55e;

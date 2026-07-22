@@ -1,0 +1,13 @@
+{
+  "device_name": "My Linux Workstation",
+  "device_picture": "",
+  "paired_device_name": "",
+  "paired_device_picture": "",
+  "ddns_hostname": "",
+  "enable_upnp": false,
+  "enable_ddns": false,
+  "is_paired": false,
+  "file_access_granted_desktop": false,
+  "file_access_granted_phone": false,
+  "theme_mode": "auto"
+}
