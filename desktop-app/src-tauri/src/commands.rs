@@ -124,7 +124,7 @@ pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, 
     sync_clipboard_text(&text)?;
     state.add_log(format!(
         "[Clipboard] Synced: \"{}\"",
-        &text.chars().take(30).collect::<String>()
+        text.chars().take(30).collect::<String>()
     ));
     Ok(true)
 }
@@ -543,6 +543,7 @@ pub fn get_settings(state: State<'_, AppState>) -> crate::state::AppSettings {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_settings(
     device_name: Option<String>,
     device_picture: Option<String>,
@@ -649,7 +650,7 @@ pub fn grant_file_access(
 
 fn read_copyq_clipboard() -> Result<String, String> {
     let output = std::process::Command::new("copyq")
-        .args(&["read", "0"])
+        .args(["read", "0"])
         .output()
         .map_err(|e| format!("Failed to execute copyq read: {e}"))?;
     if output.status.success() {
@@ -664,7 +665,7 @@ fn read_copyq_clipboard() -> Result<String, String> {
 
 fn write_copyq_clipboard(text: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("copyq")
-        .args(&["add", "-"])
+        .args(["add", "-"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn copyq add: {e}"))?;
@@ -680,7 +681,7 @@ fn write_copyq_clipboard(text: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to wait for copyq: {e}"))?;
     if status.success() {
         let _ = std::process::Command::new("copyq")
-            .args(&["select", "0"])
+            .args(["select", "0"])
             .status();
         Ok(())
     } else {
