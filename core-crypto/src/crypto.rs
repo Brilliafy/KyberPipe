@@ -412,9 +412,9 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
             let y_i = shares[i][byte_idx + 2] as u16;
             let mut num = 1u16;
             let mut den = 1u16;
-            for j in 0..k {
+            for (j, share) in shares.iter().enumerate().take(k) {
                 if i != j {
-                    let x_j = shares[j][0] as u16;
+                    let x_j = share[0] as u16;
                     num = (num * x_j) % 255;
                     den =
                         (den * (if x_j >= x_i {
