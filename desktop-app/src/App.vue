@@ -33,19 +33,6 @@ interface ScriptResult {
   logs: string[];
 }
 
-interface SmsPacket {
-  sender: string;
-  body: string;
-  timestamp: number;
-}
-
-interface NotificationPacket {
-  title: string;
-  text: string;
-  app_package: string;
-  timestamp: number;
-}
-
 interface ClipboardRecord {
   id: string;
   text: string;
@@ -61,6 +48,7 @@ interface UnifiedNotification {
   appPackage: string;
   timestamp: string;
   type: "local" | "remote";
+  updatedAt?: number;
 }
 
 const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "notifications" | "light" | "logs" | "settings">("dashboard");
@@ -146,9 +134,9 @@ const lastSyncStatus = ref("");
 const clipboardItems = ref<ClipboardRecord[]>([]);
 
 // Notifications & SMS State (Real)
-const smsList = ref<SmsPacket[]>([]);
-const notifList = ref<NotificationPacket[]>([]);
+const notifList = ref<UnifiedNotification[]>([]);
 const optimisticStatus = ref<string | null>(null);
+const autoPurgeDays = ref(7);
 
 const sasCode = ref("849-201");
 const neuralAnomalyEnabled = ref(false);
@@ -225,7 +213,9 @@ const verifyFlatpakPermissions = async () => {
     systemInfo.value = sysInfo;
     if (sysInfo.is_flatpak) {
       const granted = await invoke<boolean>("check_flatpak_permissions");
-      showFlatpakModal.value = !granted;
+      if (!granted) {
+        showFlatpakModal.value = true;
+      }
     }
   } catch (e) {
     console.error("Flatpak verify error:", e);
@@ -239,6 +229,19 @@ const copyFlatpakCommand = async () => {
     setTimeout(() => { flatpakCopyStatus.value = ""; }, 2500);
   } catch (e) {
     console.error(e);
+  }
+};
+
+const handleFlatpakVerifyProceed = async () => {
+  const sysInfo = systemInfo.value;
+  if (sysInfo?.is_flatpak) {
+    const granted = await invoke<boolean>("check_flatpak_permissions");
+    if (granted) {
+      showFlatpakModal.value = false;
+    } else {
+      flatpakCopyStatus.value = "Permissions still not granted. Run the command above and click Verify.";
+      setTimeout(() => { flatpakCopyStatus.value = ""; }, 3000);
+    }
   }
 };
 
@@ -312,69 +315,56 @@ const handleSaveEditClipboard = async (payload: { id: string; text: string }) =>
 
 
 
-// Outgoing SMS dispatch
-const sendOptimisticSms = async (payload: { sender: string; body: string }) => {
-  const previousState = [...smsList.value];
-  optimisticStatus.value = "Outgoing message dispatched";
-  try {
-    smsList.value = await invoke<SmsPacket[]>("push_sms_packet", {
-      sender: payload.sender,
-      body: payload.body,
-      timestamp: Date.now(),
-    });
-    await refreshLogs();
-    setTimeout(() => { optimisticStatus.value = null; }, 2000);
-  } catch (e) {
-    smsList.value = previousState;
-    optimisticStatus.value = "Transmission failed (Rolled Back)";
-  }
-};
-
-// Push mock remote notification
-const handlePushMockNotification = async (payload: { title: string; text: string; app: string }) => {
-  try {
-    notifList.value = await invoke<NotificationPacket[]>("push_notification_packet", {
-      title: payload.title,
-      text: payload.text,
-      appPackage: payload.app,
-      timestamp: Date.now(),
-    });
-    await invoke("send_desktop_notification", {
-      title: `[Mirrored] ${payload.title}`,
-      body: payload.text,
-    });
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
 const displayNotifications = computed<UnifiedNotification[]>(() => {
-  const list: UnifiedNotification[] = [];
-  for (const s of smsList.value) {
-    list.push({
-      id: `sms_${s.timestamp}`,
-      source: "SMS Message",
-      title: s.sender,
-      body: s.body,
-      appPackage: "telephony.sms",
-      timestamp: new Date(s.timestamp).toLocaleTimeString(),
-      type: "remote",
-    });
-  }
-  for (const n of notifList.value) {
-    list.push({
-      id: `notif_${n.timestamp}`,
-      source: "App Notification",
-      title: n.title,
-      body: n.text,
-      appPackage: n.app_package,
-      timestamp: new Date(n.timestamp).toLocaleTimeString(),
-      type: "remote",
-    });
-  }
-  return list.sort((a, b) => b.id.localeCompare(a.id));
+  return [...notifList.value].sort((a, b) => {
+    const ta = a.updatedAt || new Date(a.timestamp).getTime();
+    const tb = b.updatedAt || new Date(b.timestamp).getTime();
+    return tb - ta;
+  });
 });
+
+const removeNotification = (id: string) => {
+  const notif = notifList.value.find(n => n.id === id);
+  notifList.value = notifList.value.filter(n => n.id !== id);
+  if (notif) notifySyncChannel(notif);
+};
+
+const notifySyncChannel = (notif: UnifiedNotification) => {
+  try {
+    invoke("push_notification_packet", {
+      title: notif.title || '',
+      text: notif.body || '',
+      appPackage: notif.appPackage || '',
+      timestamp: Date.now(),
+    });
+  } catch (e) {
+  }
+};
+
+const purgeOldNotifications = (days: number) => {
+  const cutoff = Date.now() - days * 86400000;
+  notifList.value = notifList.value.filter(n => {
+    const t = n.updatedAt || new Date(n.timestamp).getTime();
+    return t > cutoff;
+  });
+  try { localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value)); } catch {}
+};
+
+const loadPersistedNotifications = () => {
+  try {
+    const raw = localStorage.getItem('kyberpipe_notifications');
+    if (raw) {
+      const parsed = JSON.parse(raw) as UnifiedNotification[];
+      notifList.value = parsed;
+    }
+  } catch {}
+};
+
+const persistNotifications = () => {
+  try {
+    localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value));
+  } catch {}
+};
 
 const refreshLogs = async () => {
   try {
@@ -582,6 +572,14 @@ onMounted(async () => {
   await handleGenerateKeyPair();
   await checkConnectionState();
   await verifyFlatpakPermissions();
+  
+  // Load persisted notifications and purge old ones
+  loadPersistedNotifications();
+  purgeOldNotifications(autoPurgeDays.value);
+
+  // Auto-persist on tab switch and interval
+  watch(notifList, () => persistNotifications(), { deep: true });
+  setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000);
 
   // Load system info
   try {
@@ -726,9 +724,8 @@ onUnmounted(() => {
         :displayNotifications="displayNotifications" 
         :optimisticStatus="optimisticStatus"
         :isConnected="isConnected"
-        @sendSms="sendOptimisticSms"
-        @sendNotif="handlePushMockNotification"
         @connectDevice="currentTab = 'dashboard'"
+        @remove="removeNotification"
       />
 
       <AutomationManager 
@@ -788,9 +785,9 @@ onUnmounted(() => {
         @regenerateKeys="handleGenerateKeyPair"
         @saveSettings="saveSettings"
       />
-      <!-- Flatpak Permission Overlay Modal -->
-      <div class="flatpak-modal-overlay" v-if="showFlatpakModal">
-        <div class="flatpak-modal-card">
+      <!-- Flatpak Permission Overlay Modal - MODAL NON-DISMISSIBLE until permissions granted -->
+      <div class="flatpak-modal-overlay" v-if="showFlatpakModal" @click.prevent>
+        <div class="flatpak-modal-card" @click.stop>
           <h3 style="font-size: 1.25rem; font-weight: 800; color: #f87171; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
             <ShieldAlert :size="24" /> Sandbox Permissions Required
           </h3>
@@ -804,7 +801,7 @@ onUnmounted(() => {
             <button class="btn btn-secondary" @click="copyFlatpakCommand" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
               {{ flatpakCopyStatus || 'Copy Command' }}
             </button>
-            <button class="btn btn-primary" @click="verifyFlatpakPermissions" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+            <button class="btn btn-primary" @click="handleFlatpakVerifyProceed" style="padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
               Verify & Proceed
             </button>
           </div>
@@ -828,7 +825,8 @@ onUnmounted(() => {
 .flatpak-modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;

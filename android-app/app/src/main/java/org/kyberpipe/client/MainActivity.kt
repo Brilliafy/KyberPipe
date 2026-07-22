@@ -156,9 +156,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestInitialPermissions() {
-        if (!PermissionHelper.hasSmsPermissions(this)) {
-            PermissionHelper.requestSmsPermissions(this)
-        }
         if (!PermissionHelper.isNotificationListenerEnabled(this)) {
             PermissionHelper.requestNotificationListenerPermission(this)
         }
@@ -267,6 +264,7 @@ fun MainScreen(
     // Toggles
     var wifiDirectActive by remember { mutableStateOf(true) }
     var lanActive by remember { mutableStateOf(false) }
+    var wireguardActive by remember { mutableStateOf(true) }
     var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
     var pairingConfigInput by remember { mutableStateOf("") }
     var sasCodeDisplay by remember { mutableStateOf("849-201") }
@@ -287,6 +285,18 @@ fun MainScreen(
 
     LaunchedEffect(Unit) {
         notifStore.purgeOldRecords(settings.purgeDays, notificationsList)
+    }
+
+    // Auto-sync notifications every 30 seconds
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30000)
+            val stored = notifStore.loadNotifications()
+            val changed = notifStore.mergeSync(notificationsList, stored)
+            if (changed) {
+                addLog("[Sync] Notifications auto-synced with local store")
+            }
+        }
     }
 
     // Load initial deep link config

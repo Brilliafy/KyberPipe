@@ -4,7 +4,8 @@ import {
   Wifi, 
   Network, 
   Globe, 
-  Activity 
+  Activity,
+  GripVertical
 } from '@lucide/vue';
 
 const props = defineProps<{
@@ -34,28 +35,43 @@ const stunHostInput = ref("stun.l.google.com:19302");
 const ddnsInput = ref(props.ddnsHostname);
 const showDrawer = ref(false);
 
-const handleDdnsChange = () => {
-  emit("update:ddnsHostname", ddnsInput.value);
-};
-
 const dragIndex = ref<number | null>(null);
-const handleDragStart = (index: number) => {
+const dragOverIndex = ref<number | null>(null);
+const handleDragStart = (event: DragEvent, index: number) => {
   dragIndex.value = index;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
 };
-const handleDragOver = (event: DragEvent) => {
+const handleDragOver = (event: DragEvent, index: number) => {
   event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+  dragOverIndex.value = index;
 };
 const handleDrop = (index: number) => {
-  if (dragIndex.value === null || dragIndex.value === index) return;
+  if (dragIndex.value === null || dragIndex.value === index) {
+    dragIndex.value = null;
+    dragOverIndex.value = null;
+    return;
+  }
   const newOrder = [...props.pathwayOrder];
   const [removed] = newOrder.splice(dragIndex.value, 1);
   newOrder.splice(index, 0, removed);
   emit("update:pathwayOrder", newOrder);
   emit("saveSettings");
   dragIndex.value = null;
+  dragOverIndex.value = null;
 };
 const handleDragEnd = () => {
   dragIndex.value = null;
+  dragOverIndex.value = null;
+};
+
+const handleDdnsChange = () => {
+  emit("update:ddnsHostname", ddnsInput.value);
 };
 
 const handleToggle = (key: string, checked: boolean) => {
@@ -280,26 +296,20 @@ onUnmounted(() => {
             class="interface-item"
             :class="{ 
               active: activeKey === pKey,
-              inactive: !isPathwayActive(pKey)
+              inactive: !isPathwayActive(pKey),
+              'drag-over': dragOverIndex === index
             }"
             draggable="true"
-            @dragstart="handleDragStart(index)"
-            @dragover="handleDragOver($event)"
+            @dragstart="handleDragStart($event, index)"
+            @dragover="handleDragOver($event, index)"
             @drop="handleDrop(index)"
             @dragend="handleDragEnd"
           >
             <div class="interface-header">
               <div class="interface-title">
-                <div class="drag-handle" style="cursor: grab; display: flex; align-items: center; color: var(--text-secondary); margin-right: 0.5rem;">
-                  <svg width="12" height="18" viewBox="0 0 12 18" fill="currentColor">
-                    <circle cx="2" cy="3" r="1.5" />
-                    <circle cx="2" cy="9" r="1.5" />
-                    <circle cx="2" cy="15" r="1.5" />
-                    <circle cx="8" cy="3" r="1.5" />
-                    <circle cx="8" cy="9" r="1.5" />
-                    <circle cx="8" cy="15" r="1.5" />
-                  </svg>
-                </div>
+                <span class="drag-handle">
+                  <GripVertical :size="14" />
+                </span>
                 <span class="tier-number">Priority {{ index + 1 }}</span>
                 <component 
                   :is="pKey === 'wifi_direct' ? Wifi : (pKey === 'mdns_lan' ? Network : Globe)" 
@@ -490,13 +500,18 @@ onUnmounted(() => {
   box-shadow: 0 0 15px rgba(6, 182, 212, 0.1);
 }
 .interface-item.inactive {
-  opacity: 0.65;
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.02);
+  opacity: 0.85;
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.03);
 }
 :global(html.theme-daylight) .interface-item.inactive {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.05);
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.03);
+}
+.interface-item.drag-over {
+  border-color: var(--accent-indigo);
+  outline: 2px dashed var(--accent-indigo);
+  outline-offset: -2px;
 }
 .interface-header {
   display: flex;
@@ -509,6 +524,22 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.9rem;
+}
+.drag-handle {
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  margin-right: 0.2rem;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.2s;
+}
+.drag-handle:hover {
+  color: var(--accent-cyan);
+}
+.drag-handle:active {
+  cursor: grabbing;
 }
 .tier-number {
   background: rgba(255, 255, 255, 0.1);

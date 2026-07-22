@@ -192,10 +192,19 @@ const formatSize = (bytes: number) => {
               <td>{{ file.is_dir ? 'Directory' : 'File' }}</td>
               <td>{{ formatSize(file.size) }}</td>
               <td style="position: relative;">
+                <button
+                  class="btn btn-secondary btn-sm"
+                  @click="handleOpenLocal(file.path)"
+                  style="padding: 0.25rem 0.5rem; margin-right: 0.25rem;"
+                  title="Open"
+                >
+                  <ExternalLink :size="14" />
+                </button>
                 <button 
                   class="btn btn-secondary btn-sm"
                   @click="toggleMenu(file.path, $event)"
                   style="padding: 0.25rem 0.5rem;"
+                  title="More actions"
                 >
                   <MoreVertical :size="14" />
                 </button>
@@ -206,14 +215,12 @@ const formatSize = (bytes: number) => {
                   @click.stop
                 >
                   <button 
-                    v-if="activeSubTab === 'pc'"
                     class="menu-item" 
                     @click="handleOpenLocal(file.path); openMenuFile = null"
                   >
                     <ExternalLink :size="12" /> Open
                   </button>
                   <button 
-                    v-if="activeSubTab === 'phone'"
                     class="menu-item" 
                     @click="windowAlert('Initiating secure peer-to-peer download...'); openMenuFile = null"
                   >

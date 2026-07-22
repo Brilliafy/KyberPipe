@@ -29,7 +29,7 @@ enum class TabItem(val title: String) {
     FILES("Files"),
     CLIPBOARD("Clip"),
     NOTIFICATIONS("Alerts"),
-    SETTINGS("Config");
+    SETTINGS("Ops");
 
     fun getIcon(): ImageVector {
         return when (this) {
@@ -75,15 +75,13 @@ fun BottomNavigationBar(
                     tint = if (isSelected) colors.primary else colors.onSurface.copy(alpha = 0.6f),
                     modifier = Modifier.size(22.dp)
                 )
-                if (tab != TabItem.SETTINGS) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = tab.title,
-                        fontSize = 10.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isSelected) colors.primary else colors.onSurface.copy(alpha = 0.6f)
-                    )
-                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = tab.title,
+                    fontSize = 10.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isSelected) colors.primary else colors.onSurface.copy(alpha = 0.6f)
+                )
             }
         }
     }

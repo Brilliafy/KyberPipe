@@ -6,10 +6,10 @@ import {
   Monitor, 
   Smartphone, 
   AlertCircle,
-  MessageSquare,
   Check,
   Archive,
-  VolumeX
+  VolumeX,
+  Trash2
 } from '@lucide/vue';
 import { invoke } from "@tauri-apps/api/core";
 
@@ -32,56 +32,27 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "connectDevice"): void;
+  (e: "remove", id: string): void;
 }>();
 
 const activeSubTab = ref<"all" | "local" | "remote">("all");
 const selectedNotif = ref<UnifiedNotification | null>(null);
-const replyText = ref("");
 const actionStatus = ref("");
 
 const filteredNotifications = computed(() => {
   const list = props.displayNotifications;
   if (activeSubTab.value === "local") {
-    return list.filter(n => n.type === "local");
+    return list.filter(n => n.source === 'desktop' || n.type === "local");
   }
   if (activeSubTab.value === "remote") {
-    return list.filter(n => n.type === "remote");
+    return list.filter(n => n.source === 'android' || n.type === "remote");
   }
   return list;
 });
 
-const isReplyable = computed(() => {
-  if (!selectedNotif.value) return false;
-  const pkg = selectedNotif.value.appPackage.toLowerCase();
-  return pkg.includes("whatsapp") || 
-         pkg.includes("securesms") || 
-         pkg.includes("messaging") || 
-         pkg.includes("telephony.sms") || 
-         selectedNotif.value.type === "remote";
-});
-
 const selectNotification = (notif: UnifiedNotification) => {
   selectedNotif.value = notif;
-  replyText.value = "";
   actionStatus.value = "";
-};
-
-const handleSendReply = async () => {
-  if (!selectedNotif.value || !replyText.value.trim()) return;
-  try {
-    actionStatus.value = "Sending reply via secure tunnel...";
-    const sbnKey = selectedNotif.value.sbn_key || selectedNotif.value.id;
-    await invoke("trigger_notification_action", {
-      sbnKey: sbnKey,
-      actionIndex: 0,
-      actionTitle: `Reply: ${replyText.value.trim()}`
-    });
-    actionStatus.value = "Reply successfully sent!";
-    replyText.value = "";
-    setTimeout(() => { actionStatus.value = ""; }, 3000);
-  } catch (e) {
-    actionStatus.value = `Reply failed: ${e}`;
-  }
 };
 
 const handleTriggerAction = async (index: number, title: string) => {
@@ -104,7 +75,7 @@ const handleTriggerAction = async (index: number, title: string) => {
 
 <template>
   <section class="panel">
-    <h2 class="section-title"><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Notification & SMS Center</h2>
+    <h2 class="section-title"><Bell style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> Notification Center</h2>
     <p class="section-subtitle">Real-time notification mirroring and remote PQC reply actions.</p>
 
     <!-- Sub tabs -->
@@ -178,7 +149,7 @@ const handleTriggerAction = async (index: number, title: string) => {
       <div class="notifications-actions-col">
         <div class="actions-card" v-if="selectedNotif">
           <h3>Notification Details</h3>
-          <p class="card-desc">Execute P2P operations and quick replies directly over the secure link.</p>
+          <p class="card-desc">View notification details and execute P2P operations over the secure link.</p>
           
           <div class="detail-group">
             <span class="detail-label">Source app:</span>
@@ -195,26 +166,9 @@ const handleTriggerAction = async (index: number, title: string) => {
             <p class="detail-text">{{ selectedNotif.body }}</p>
           </div>
 
-          <!-- Native Reply Integration -->
-          <div class="reply-section" v-if="isReplyable">
-            <div class="form-group">
-              <label>Native Quick Reply:</label>
-              <input 
-                type="text" 
-                v-model="replyText" 
-                placeholder="Type your response..." 
-                class="input-text" 
-                @keyup.enter="handleSendReply"
-              />
-            </div>
-            <button class="btn btn-primary" @click="handleSendReply" :disabled="!replyText.trim() || !isConnected">
-              <MessageSquare style="margin-right: 0.25rem;" :size="14" /> Send Reply
-            </button>
-          </div>
-
-          <!-- Expose actions/buttons -->
-          <div class="actions-buttons-list" v-if="selectedNotif.type === 'remote'">
-            <label class="action-list-label">Available Remote Actions:</label>
+          <!-- Actions buttons -->
+          <div class="actions-buttons-list">
+            <label class="action-list-label">Available Actions:</label>
             <div class="buttons-grid">
               <button class="btn btn-secondary-outline btn-sm" @click="handleTriggerAction(1, 'Mark as Read')" :disabled="!isConnected">
                 <Check :size="12" style="margin-right:0.25rem" /> Mark as Read
@@ -224,6 +178,9 @@ const handleTriggerAction = async (index: number, title: string) => {
               </button>
               <button class="btn btn-secondary-outline btn-sm" @click="handleTriggerAction(3, 'Mute')" :disabled="!isConnected">
                 <VolumeX :size="12" style="margin-right:0.25rem" /> Mute App
+              </button>
+              <button class="btn btn-secondary-outline btn-sm danger-btn" @click="emit('remove', selectedNotif.id); selectedNotif = null; actionStatus = 'Notification dismissed'">
+                <Trash2 :size="12" style="margin-right:0.25rem" /> Dismiss
               </button>
             </div>
           </div>

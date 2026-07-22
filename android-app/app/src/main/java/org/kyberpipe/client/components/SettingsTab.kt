@@ -50,6 +50,9 @@ fun SettingsTab(
     var ddnsEnabled by remember { mutableStateOf(settings.enableDdns) }
     var themeState by remember { mutableStateOf(settings.themeMode) }
     var amoledState by remember { mutableStateOf(settings.amoledMode) }
+    var wifiDirectToggled by remember { mutableStateOf(true) }
+    var lanToggled by remember { mutableStateOf(false) }
+    var wireguardToggled by remember { mutableStateOf(true) }
 
     val colors = MaterialTheme.colorScheme
 
@@ -262,7 +265,7 @@ fun SettingsTab(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 var orderList by remember(settings.pathwayOrder) {
-                    mutableStateOf(settings.pathwayOrder.split(","))
+                    mutableStateOf(settings.pathwayOrder.split(",").toMutableList())
                 }
 
                 val pathwayNames = mapOf(
@@ -271,58 +274,96 @@ fun SettingsTab(
                     "wireguard_wan" to "WireGuard WAN Tunnel Overlay"
                 )
 
+                val pathwayToggles = mapOf(
+                    "wifi_direct" to wifiDirectToggled,
+                    "mdns_lan" to lanToggled,
+                    "wireguard_wan" to wireguardToggled
+                )
+
+                fun togglePathway(key: String, checked: Boolean) {
+                    val activeCount = listOf(wifiDirectToggled, lanToggled, wireguardToggled).count { it }
+                    if (!checked && activeCount <= 1) {
+                        return
+                    }
+                    when (key) {
+                        "wifi_direct" -> wifiDirectToggled = checked
+                        "mdns_lan" -> lanToggled = checked
+                        "wireguard_wan" -> wireguardToggled = checked
+                    }
+                    onSaveSettings()
+                }
+
                 orderList.forEachIndexed { index, pathKey ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    val isActive = pathwayToggles[pathKey] ?: false
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isActive) colors.surfaceVariant else colors.surface.copy(alpha = 0.5f)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "${index + 1}. ${pathwayNames[pathKey] ?: pathKey}",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.onSurface
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Button(
-                                onClick = {
-                                    if (index > 0) {
-                                        val mutable = orderList.toMutableList()
-                                        val temp = mutable[index]
-                                        mutable[index] = mutable[index - 1]
-                                        mutable[index - 1] = temp
-                                        orderList = mutable
-                                        settings.pathwayOrder = mutable.joinToString(",")
-                                        onSaveSettings()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = isActive,
+                                        onCheckedChange = { togglePathway(pathKey, it) },
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column {
+                                        Text(
+                                            text = "${index + 1}. ${pathwayNames[pathKey] ?: pathKey}",
+                                            fontSize = 13.sp,
+                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isActive) colors.onSurface else colors.onSurface.copy(alpha = 0.5f)
+                                        )
                                     }
-                                },
-                                enabled = index > 0,
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("▲", fontSize = 10.sp)
+                                }
                             }
-                            Button(
-                                onClick = {
-                                    if (index < orderList.size - 1) {
-                                        val mutable = orderList.toMutableList()
-                                        val temp = mutable[index]
-                                        mutable[index] = mutable[index + 1]
-                                        mutable[index + 1] = temp
-                                        orderList = mutable
-                                        settings.pathwayOrder = mutable.joinToString(",")
-                                        onSaveSettings()
-                                    }
-                                },
-                                enabled = index < orderList.size - 1,
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("▼", fontSize = 10.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Button(
+                                    onClick = {
+                                        if (index > 0) {
+                                            val mutable = orderList.toMutableList()
+                                            val temp = mutable[index]
+                                            mutable[index] = mutable[index - 1]
+                                            mutable[index - 1] = temp
+                                            orderList = mutable
+                                            settings.pathwayOrder = mutable.joinToString(",")
+                                            onSaveSettings()
+                                        }
+                                    },
+                                    enabled = index > 0,
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("▲", fontSize = 10.sp)
+                                }
+                                Button(
+                                    onClick = {
+                                        if (index < orderList.size - 1) {
+                                            val mutable = orderList.toMutableList()
+                                            val temp = mutable[index]
+                                            mutable[index] = mutable[index + 1]
+                                            mutable[index + 1] = temp
+                                            orderList = mutable
+                                            settings.pathwayOrder = mutable.joinToString(",")
+                                            onSaveSettings()
+                                        }
+                                    },
+                                    enabled = index < orderList.size - 1,
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("▼", fontSize = 10.sp)
+                                }
                             }
                         }
                     }

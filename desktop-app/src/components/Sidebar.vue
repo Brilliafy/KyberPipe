@@ -29,21 +29,7 @@ const emit = defineEmits<{
   <aside class="sidebar">
     <div class="brand">
       <div class="logo-container">
-        <svg class="logo-svg" viewBox="0 0 100 100" width="36" height="36" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <!-- Calligraphic Double-lined Z -->
-          <path d="M 20,28 C 30,28 35,22 45,28 C 55,34 65,22 75,28" stroke="var(--accent-cyan)" stroke-width="4.5" stroke-linecap="round"/>
-          <path d="M 20,33 C 30,33 35,27 45,33 C 55,39 65,27 75,33" stroke="var(--accent-cyan)" stroke-width="1.5" stroke-linecap="round"/>
-          
-          <path d="M 70,28 C 60,45 40,60 30,72" stroke="var(--accent-cyan)" stroke-width="4.5" stroke-linecap="round"/>
-          <path d="M 74,28 C 64,45 44,60 34,72" stroke="var(--accent-cyan)" stroke-width="1.5" stroke-linecap="round"/>
-          
-          <path d="M 22,72 C 32,78 45,68 55,72" stroke="var(--accent-cyan)" stroke-width="4.5" stroke-linecap="round"/>
-          <path d="M 22,67 C 32,73 45,63 55,67" stroke="var(--accent-cyan)" stroke-width="1.5" stroke-linecap="round"/>
-          
-          <!-- Subscript script-like q -->
-          <circle cx="70" cy="74" r="8" stroke="var(--text-primary)" stroke-width="3" stroke-linecap="round"/>
-          <path d="M 78,74 C 78,82 78,85 78,88 C 78,92 72,94 68,94" stroke="var(--text-primary)" stroke-width="3" stroke-linecap="round"/>
-        </svg>
+        <img src="../assets/logo.png" alt="KyberPipe Logo" class="logo-img" />
       </div>
       <div class="brand-text">
         <h2>KyberPipe</h2>
@@ -115,13 +101,13 @@ const emit = defineEmits<{
   justify-content: center;
   width: 42px;
   height: 42px;
-  border-radius: 8px;
-  overflow: visible;
 }
-.logo-svg {
-  width: 36px;
-  height: 36px;
+.logo-img {
+  width: 42px;
+  height: 42px;
+  object-fit: cover;
   display: block;
+  border-radius: 0;
 }
 .nav-icon {
   margin-right: 0.5rem;

@@ -41,8 +41,8 @@ fun NotificationsTab(
     val filteredList = remember(activeSubTab, notifications) {
         val activeNotifs = notifications.filter { !it.isDismissed }
         when (activeSubTab) {
-            "local" -> activeNotifs.filter { it.type == "local" }
-            "remote" -> activeNotifs.filter { it.type == "remote" }
+            "local" -> activeNotifs.filter { it.type == "local" || it.type.startsWith("local") }
+            "remote" -> activeNotifs.filter { it.type == "remote" || it.type.startsWith("remote") }
             else -> activeNotifs
         }
     }
