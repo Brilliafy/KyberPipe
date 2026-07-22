@@ -162,20 +162,15 @@ const handleFileChange = (event: Event) => {
       <p class="card-desc">Authorize directories read/write options for secure cross-device file transfer.</p>
       <div class="permissions-settings">
         <label class="switch-row">
-          <input 
-            type="checkbox" 
-            :checked="fileAccessGrantedDesktop" 
-            @change="emit('update:fileAccessGrantedDesktop', ($event.target as HTMLInputElement).checked); emit('saveSettings')"
-          />
+          <span class="toggle-switch">
+            <input 
+              type="checkbox" 
+              :checked="fileAccessGrantedDesktop" 
+              @change="emit('update:fileAccessGrantedDesktop', ($event.target as HTMLInputElement).checked); emit('saveSettings')"
+            />
+            <span class="toggle-slider"></span>
+          </span>
           <span>Allow Phone to browse this PC's files</span>
-        </label>
-        <label class="switch-row" style="margin-top: 0.5rem; display: block;">
-          <input 
-            type="checkbox" 
-            :checked="fileAccessGrantedPhone" 
-            @change="emit('update:fileAccessGrantedPhone', ($event.target as HTMLInputElement).checked); emit('saveSettings')"
-          />
-          <span>Allow PC to browse Android companion files</span>
         </label>
       </div>
     </div>
@@ -186,28 +181,34 @@ const handleFileChange = (event: Event) => {
       <div class="card" style="padding: 1.5rem;">
         <h3><Activity style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Flight Data Recorder</h3>
         <p class="card-desc">Lock-free sub-nanosecond binary event tracing ring buffer for post-mortem diagnostics.</p>
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <input 
-            type="checkbox" 
-            id="check-flight" 
-            :checked="flightRecorderEnabled" 
-            @change="emit('update:flightRecorderEnabled', ($event.target as HTMLInputElement).checked)" 
-          />
-          <label for="check-flight" style="color: var(--text-primary); cursor: pointer;">Enable Flight Data (qlog)</label>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <label class="toggle-switch">
+            <input 
+              type="checkbox" 
+              id="check-flight" 
+              :checked="flightRecorderEnabled" 
+              @change="emit('update:flightRecorderEnabled', ($event.target as HTMLInputElement).checked)" 
+            />
+            <span class="toggle-slider"></span>
+          </label>
+          <label for="check-flight" style="color: var(--text-primary); cursor: pointer; font-size: 0.85rem;">Enable Flight Data (qlog)</label>
         </div>
       </div>
 
       <div class="card" style="padding: 1.5rem;">
         <h3><ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Neuromorphic Anomaly Engine</h3>
         <p class="card-desc">Real-time eBPF packet-timing anomaly detection & auto-isolation.</p>
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <input 
-            type="checkbox" 
-            id="check-anomaly" 
-            :checked="neuralAnomalyEnabled" 
-            @change="emit('update:neuralAnomalyEnabled', ($event.target as HTMLInputElement).checked)" 
-          />
-          <label for="check-anomaly" style="color: var(--text-primary); cursor: pointer;">Enable eBPF ONNX Engine</label>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <label class="toggle-switch">
+            <input 
+              type="checkbox" 
+              id="check-anomaly" 
+              :checked="neuralAnomalyEnabled" 
+              @change="emit('update:neuralAnomalyEnabled', ($event.target as HTMLInputElement).checked)" 
+            />
+            <span class="toggle-slider"></span>
+          </label>
+          <label for="check-anomaly" style="color: var(--text-primary); cursor: pointer; font-size: 0.85rem;">Enable eBPF ONNX Engine</label>
         </div>
       </div>
     </div>
@@ -344,10 +345,47 @@ const handleFileChange = (event: Event) => {
 .switch-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.75rem;
   font-size: 0.9rem;
   color: var(--text-primary);
   cursor: pointer;
+}
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: #334155;
+  border-radius: 22px;
+  transition: 0.2s;
+}
+.toggle-slider:before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--accent-cyan);
+}
+.toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(18px);
 }
 .code-box {
   width: 100%;
