@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, watch, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { 
   FolderOpen, 
@@ -9,7 +9,11 @@ import {
   AlertCircle, 
   Folder, 
   FileText, 
-  Download 
+  Download,
+  MoreVertical,
+  Trash2,
+  Edit3,
+  ExternalLink
 } from '@lucide/vue';
 
 const props = defineProps<{
@@ -66,8 +70,45 @@ watch([activeSubTab, () => props.fileAccessGrantedDesktop, () => props.fileAcces
   loadFiles();
 });
 
+const openMenuFile = ref<string | null>(null);
+
+const toggleMenu = (path: string, event: Event) => {
+  event.stopPropagation();
+  openMenuFile.value = openMenuFile.value === path ? null : path;
+};
+
+const handleOpenLocal = async (path: string) => {
+  try {
+    await invoke("open_local_file", { path });
+  } catch (err) {
+    alert("Error opening file: " + err);
+  }
+};
+
+const promptRename = (file: LocalFileItem) => {
+  const newName = prompt("Rename " + file.name + " to:", file.name);
+  if (newName && newName !== file.name) {
+    file.name = newName;
+  }
+};
+
+const promptDelete = (file: LocalFileItem) => {
+  if (confirm("Are you sure you want to delete " + file.name + "?")) {
+    fileList.value = fileList.value.filter(f => f.path !== file.path);
+  }
+};
+
+const clickListener = () => {
+  openMenuFile.value = null;
+};
+
 onMounted(() => {
   loadFiles();
+  window.addEventListener("click", clickListener);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("click", clickListener);
 });
 
 const formatSize = (bytes: number) => {
@@ -150,14 +191,54 @@ const formatSize = (bytes: number) => {
               </td>
               <td>{{ file.is_dir ? 'Directory' : 'File' }}</td>
               <td>{{ formatSize(file.size) }}</td>
-              <td>
+              <td style="position: relative;">
+                <button
+                  class="btn btn-secondary btn-sm"
+                  @click="handleOpenLocal(file.path)"
+                  style="padding: 0.25rem 0.5rem; margin-right: 0.25rem;"
+                  title="Open"
+                >
+                  <ExternalLink :size="14" />
+                </button>
                 <button 
                   class="btn btn-secondary btn-sm"
-                  @click="windowAlert('Initiating secure peer-to-peer download...')"
+                  @click="toggleMenu(file.path, $event)"
+                  style="padding: 0.25rem 0.5rem;"
+                  title="More actions"
                 >
-                  <component :is="file.is_dir ? FolderOpen : Download" :size="12" style="margin-right: 0.25rem;" />
-                  {{ file.is_dir ? 'Open' : 'Download' }}
+                  <MoreVertical :size="14" />
                 </button>
+                <!-- Context Menu Dropdown -->
+                <div 
+                  v-if="openMenuFile === file.path" 
+                  class="file-context-menu"
+                  @click.stop
+                >
+                  <button 
+                    class="menu-item" 
+                    @click="handleOpenLocal(file.path); openMenuFile = null"
+                  >
+                    <ExternalLink :size="12" /> Open
+                  </button>
+                  <button 
+                    class="menu-item" 
+                    @click="windowAlert('Initiating secure peer-to-peer download...'); openMenuFile = null"
+                  >
+                    <Download :size="12" /> Download
+                  </button>
+                  <button 
+                    class="menu-item" 
+                    @click="promptRename(file); openMenuFile = null"
+                  >
+                    <Edit3 :size="12" /> Rename
+                  </button>
+                  <button 
+                    class="menu-item danger" 
+                    @click="promptDelete(file); openMenuFile = null"
+                  >
+                    <Trash2 :size="12" /> Delete
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -274,5 +355,43 @@ const formatSize = (bytes: number) => {
 }
 .file-icon {
   flex-shrink: 0;
+}
+.file-context-menu {
+  position: absolute;
+  right: 1.25rem;
+  top: 2.2rem;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  overflow: hidden;
+  padding: 0.25rem 0;
+}
+.menu-item {
+  background: transparent;
+  border: none;
+  color: #f1f5f9;
+  text-align: left;
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  transition: background 0.15s;
+}
+.menu-item:hover {
+  background: #334155;
+}
+.menu-item.danger {
+  color: #ef4444;
+}
+.menu-item.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
 }
 </style>

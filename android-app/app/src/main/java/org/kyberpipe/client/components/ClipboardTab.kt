@@ -46,6 +46,8 @@ fun ClipboardTab(
         }
     }
 
+    val colors = MaterialTheme.colorScheme
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -59,8 +61,8 @@ fun ClipboardTab(
                 "remote" -> 2
                 else -> 0
             },
-            containerColor = Color(0xFF161B2E),
-            contentColor = Color(0xFF06B6D4)
+            containerColor = colors.surface,
+            contentColor = colors.primary
         ) {
             Tab(
                 selected = activeSubTab == "all",
@@ -88,24 +90,24 @@ fun ClipboardTab(
                 verticalArrangement = Arrangement.Center
             ) {
                 Icon(
-                        imageVector = Icons.Default.CloudOff,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Pair and connect your Linux Desktop node to view and synchronize remote clipboard entries.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                    imageVector = Icons.Default.CloudOff,
+                    contentDescription = null,
+                    tint = colors.onBackground.copy(alpha = 0.4f),
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = colors.onBackground)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Pair and connect your Linux Desktop node to view and synchronize remote clipboard entries.",
+                    fontSize = 12.sp,
+                    color = colors.onBackground.copy(alpha = 0.6f),
                     modifier = Modifier.padding(horizontal = 24.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = onConnectRequest,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4))
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                 ) {
                     Text("Connect a Device")
                 }
@@ -113,27 +115,27 @@ fun ClipboardTab(
         } else {
             // New Sync Payload Input
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        text = "Sync Clipboard Payload",
+                        text = "Add Clipboard Item",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF06B6D4)
+                        color = colors.primary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        placeholder = { Text("Type clipboard text...", color = Color(0xFF64748B)) },
+                        placeholder = { Text("Add clipboard item...", color = colors.onSurface.copy(alpha = 0.4f)) },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
+                            focusedTextColor = colors.onSurface,
+                            unfocusedTextColor = colors.onSurface,
+                            focusedBorderColor = colors.primary,
+                            unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 3
@@ -146,10 +148,10 @@ fun ClipboardTab(
                                 inputText = ""
                             }
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
                         modifier = Modifier.align(Alignment.End)
                     ) {
-                        Text("Sync Text")
+                        Text("Add Item")
                     }
                 }
             }
@@ -168,12 +170,12 @@ fun ClipboardTab(
                             .padding(32.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("No clipboard entries found in this view.", color = Color(0xFF64748B), fontSize = 13.sp)
+                        Text("No clipboard entries found in this view.", color = colors.onBackground.copy(alpha = 0.4f), fontSize = 13.sp)
                     }
                 } else {
                     filteredItems.forEach { item ->
                         Card(
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -201,20 +203,20 @@ fun ClipboardTab(
                                     Text(
                                         text = "Synced",
                                         fontSize = 10.sp,
-                                        color = Color(0xFF64748B)
+                                        color = colors.onSurface.copy(alpha = 0.4f)
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = item.text,
                                     fontSize = 13.sp,
-                                    color = Color(0xFFE2E8F0)
+                                    color = colors.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
                                         onClick = { onCopyClipboard(item.text) },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
+                                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                                         modifier = Modifier.height(28.dp)
                                     ) {
@@ -222,11 +224,11 @@ fun ClipboardTab(
                                     }
                                     Button(
                                         onClick = { onDeleteClipboard(item.id) },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x33EF4444)),
+                                        colors = ButtonDefaults.buttonColors(containerColor = colors.error.copy(alpha = 0.15f)),
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                                         modifier = Modifier.height(28.dp)
                                     ) {
-                                        Text("Delete", fontSize = 11.sp, color = Color.Red)
+                                        Text("Delete", fontSize = 11.sp, color = colors.error)
                                     }
                                 }
                             }

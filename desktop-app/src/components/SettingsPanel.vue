@@ -52,6 +52,17 @@ const emit = defineEmits<{
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
+const flatpakCopyStatus = ref("");
+const copyFlatpakOverride = async () => {
+  try {
+    await navigator.clipboard.writeText("flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe");
+    flatpakCopyStatus.value = "Command copied!";
+    setTimeout(() => { flatpakCopyStatus.value = ""; }, 3000);
+  } catch (e) {
+    flatpakCopyStatus.value = "Failed to copy";
+  }
+};
+
 const triggerFilePicker = () => {
   if (fileInputRef.value) {
     fileInputRef.value.click();
@@ -99,7 +110,7 @@ const handleFileChange = (event: Event) => {
 
       <div class="theme-autodetect-row" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary);">
         <span v-if="themeMode === 'auto'">
-          ℹ️ Autodetect from OS is currently enabled. Theme changes dynamically based on OS styling.
+          Info: Autodetect from OS is currently enabled. Theme changes dynamically based on OS styling.
         </span>
       </div>
     </div>
@@ -176,6 +187,19 @@ const handleFileChange = (event: Event) => {
           <span>Allow PC to browse Android companion files</span>
         </label>
       </div>
+    </div>
+
+    <!-- Flatpak Sandbox Permission Helper -->
+    <div class="card" style="margin-bottom: 1.5rem; padding: 1.5rem;">
+      <h3><ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Flatpak Sandbox Permission Helper</h3>
+      <p class="card-desc">If running inside a Flatpak container, grant host network, window, and audio communication overrides via CLI:</p>
+      <div style="background: var(--bg-dark); padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border-color); font-family: monospace; font-size: 0.8rem; overflow-x: auto; margin-bottom: 0.75rem; white-space: pre-wrap; word-break: break-all;">
+        flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe
+      </div>
+      <button class="btn btn-secondary-outline btn-sm" @click="copyFlatpakOverride">
+        Copy Override Command
+      </button>
+      <span v-if="flatpakCopyStatus" style="font-size: 0.8rem; color: var(--accent-cyan); margin-left: 1rem;">{{ flatpakCopyStatus }}</span>
     </div>
 
     <!-- Flight recorder and anomaly engine toggles -->

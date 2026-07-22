@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Clear
 
 data class AndroidNotificationRecord(
     val id: String,
@@ -22,7 +23,9 @@ data class AndroidNotificationRecord(
     val text: String,
     val appPackage: String,
     val timestamp: Long,
-    val type: String // "local" | "remote"
+    val type: String, // "local" | "remote"
+    var isDismissed: Boolean = false,
+    var updatedAt: Long = System.currentTimeMillis()
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -30,20 +33,21 @@ data class AndroidNotificationRecord(
 fun NotificationsTab(
     notifications: List<AndroidNotificationRecord>,
     isConnected: Boolean,
-    onSendSms: (recipient: String, body: String) -> Unit,
+    onDismiss: (id: String) -> Unit,
     onConnectRequest: () -> Unit
 ) {
     var activeSubTab by remember { mutableStateOf("all") }
-    var smsRecipient by remember { mutableStateOf("") }
-    var smsBody by remember { mutableStateOf("") }
 
     val filteredList = remember(activeSubTab, notifications) {
+        val activeNotifs = notifications.filter { !it.isDismissed }
         when (activeSubTab) {
-            "local" -> notifications.filter { it.type == "local" }
-            "remote" -> notifications.filter { it.type == "remote" }
-            else -> notifications
+            "local" -> activeNotifs.filter { it.type == "local" || it.type.startsWith("local") }
+            "remote" -> activeNotifs.filter { it.type == "remote" || it.type.startsWith("remote") }
+            else -> activeNotifs
         }
     }
+
+    val colors = MaterialTheme.colorScheme
 
     Column(
         modifier = Modifier
@@ -58,8 +62,8 @@ fun NotificationsTab(
                 "remote" -> 2
                 else -> 0
             },
-            containerColor = Color(0xFF161B2E),
-            contentColor = Color(0xFF06B6D4)
+            containerColor = colors.surface,
+            contentColor = colors.primary
         ) {
             Tab(
                 selected = activeSubTab == "all",
@@ -87,87 +91,29 @@ fun NotificationsTab(
                 verticalArrangement = Arrangement.Center
             ) {
                 Icon(
-                        imageVector = Icons.Default.CloudOff,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = Color.White)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF94A3B8),
+                    imageVector = Icons.Default.CloudOff,
+                    contentDescription = null,
+                    tint = colors.onBackground.copy(alpha = 0.4f),
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = colors.onBackground)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Establish a secure connection with your desktop node to mirror alerts and notification feeds.",
+                    fontSize = 12.sp,
+                    color = colors.onBackground.copy(alpha = 0.6f),
                     modifier = Modifier.padding(horizontal = 24.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = onConnectRequest,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4))
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
                 ) {
                     Text("Connect a Device")
                 }
             }
         } else {
-            // Outbound SMS card helper
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B2E)),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = "Send Outbound SMS via PC Link",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF06B6D4)
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = smsRecipient,
-                        onValueChange = { smsRecipient = it },
-                        label = { Text("Recipient Number", fontSize = 11.sp) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 1
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = smsBody,
-                        onValueChange = { smsBody = it },
-                        label = { Text("SMS Message Body", fontSize = 11.sp) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF06B6D4),
-                            unfocusedBorderColor = Color(0xFF334155)
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 2
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = {
-                            if (smsRecipient.trim().isNotEmpty() && smsBody.trim().isNotEmpty()) {
-                                onSendSms(smsRecipient.trim(), smsBody.trim())
-                                smsBody = ""
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4)),
-                        modifier = Modifier.align(Alignment.End),
-                        enabled = isConnected
-                    ) {
-                        Text("Send SMS")
-                    }
-                }
-            }
-
             // Notifications List
             Column(
                 modifier = Modifier
@@ -182,43 +128,59 @@ fun NotificationsTab(
                             .padding(32.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("No notifications matched this view.", color = Color(0xFF64748B), fontSize = 13.sp)
+                        Text("No notifications matched this view.", color = colors.onBackground.copy(alpha = 0.4f), fontSize = 13.sp)
                     }
                 } else {
                     filteredList.forEach { record ->
                         Card(
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
                                         text = record.title,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                        color = colors.onSurface,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    Text(
-                                        text = record.appPackage.substringAfterLast("."),
-                                        fontSize = 11.sp,
-                                        color = Color(0xFF06B6D4)
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = record.appPackage.substringAfterLast("."),
+                                            fontSize = 11.sp,
+                                            color = colors.primary,
+                                            modifier = Modifier.padding(end = 8.dp)
+                                        )
+                                        IconButton(
+                                            onClick = { onDismiss(record.id) },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Clear,
+                                                contentDescription = "Dismiss",
+                                                tint = colors.onSurface.copy(alpha = 0.5f),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = record.text,
                                     fontSize = 13.sp,
-                                    color = Color(0xFFE2E8F0)
+                                    color = colors.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(record.timestamp)),
                                     fontSize = 10.sp,
-                                    color = Color(0xFF64748B),
+                                    color = colors.onSurface.copy(alpha = 0.4f),
                                     modifier = Modifier.align(Alignment.End)
                                 )
                             }

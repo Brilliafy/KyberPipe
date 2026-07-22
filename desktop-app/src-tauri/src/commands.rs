@@ -52,13 +52,40 @@ pub fn generate_keypair(state: State<'_, AppState>) -> Result<KeyPairDTO, String
 #[tauri::command]
 pub fn execute_boa_script(
     script_code: String,
+    is_sandboxed: bool,
     lux: f64,
+    feed_source_command: String,
     state: State<'_, AppState>,
 ) -> ScriptExecutionResult {
-    state.add_log(format!("[Sandbox] Running Boa script (lux = {lux})"));
-    let res = run_boa_sandboxed_script(&script_code, lux);
-    state.add_log(format!("[Sandbox] Result: success={}, output={}", res.success, res.output));
-    res
+    let mut feed_value = String::new();
+    if !feed_source_command.trim().is_empty() {
+        state.add_log(format!("[Automation] Querying feed source: {}", feed_source_command));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&feed_source_command)
+            .output();
+        match output {
+            Ok(out) => {
+                feed_value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                state.add_log(format!("[Automation] Resolved feed data: {}", feed_value));
+            }
+            Err(e) => {
+                state.add_log(format!("[Automation] Feed source command failed: {}", e));
+            }
+        }
+    }
+
+    if is_sandboxed {
+        state.add_log(format!("[Sandbox] Running Boa script (lux = {lux})"));
+        let res = run_boa_sandboxed_script(&script_code, lux, &feed_value);
+        state.add_log(format!("[Sandbox] Result: success={}, output={}", res.success, res.output));
+        res
+    } else {
+        state.add_log(format!("[Host] Running unsandboxed script (lux = {lux})"));
+        let res = crate::executor::run_unsandboxed_process(&script_code, lux, &feed_value);
+        state.add_log(format!("[Host] Result: success={}, output={}", res.success, res.output));
+        res
+    }
 }
 
 #[tauri::command]
@@ -434,6 +461,8 @@ pub fn save_settings(
     enable_ddns: bool,
     is_paired: bool,
     theme_mode: Option<String>,
+    pathway_order: Option<Vec<String>>,
+    wireguard_active: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.add_log("[Settings] Updating preferences".to_string());
@@ -454,6 +483,8 @@ pub fn save_settings(
         s.enable_ddns = enable_ddns;
         s.is_paired = is_paired;
         s.theme_mode = theme_mode;
+        s.pathway_order = pathway_order;
+        s.wireguard_active = wireguard_active;
     }
     state.save_settings();
     Ok(())
@@ -520,20 +551,97 @@ pub fn grant_file_access(
     state.settings.lock().unwrap().clone()
 }
 
+fn read_copyq_clipboard() -> Result<String, String> {
+    let output = std::process::Command::new("copyq")
+        .args(&["read", "0"])
+        .output()
+        .map_err(|e| format!("Failed to execute copyq read: {e}"))?;
+    if output.status.success() {
+        let text = String::from_utf8(output.stdout)
+            .map_err(|e| format!("Invalid UTF-8 from copyq: {e}"))?;
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+    }
+    Err("CopyQ returned empty or non-success".to_string())
+}
+
+fn write_copyq_clipboard(text: &str) -> Result<(), String> {
+    let mut child = std::process::Command::new("copyq")
+        .args(&["add", "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn copyq add: {e}"))?;
+    
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write to copyq stdin: {e}"))?;
+    }
+    let status = child.wait()
+        .map_err(|e| format!("Failed to wait for copyq: {e}"))?;
+    if status.success() {
+        let _ = std::process::Command::new("copyq")
+            .args(&["select", "0"])
+            .status();
+        Ok(())
+    } else {
+        Err("CopyQ returned non-success".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn read_real_clipboard() -> Result<String, String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| format!("Failed to open clipboard: {e}"))?;
-    clipboard.get_text()
-        .map_err(|e| format!("Failed to read clipboard text: {e}"))
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => {
+            match clipboard.get_text() {
+                Ok(text) => Ok(text),
+                Err(e) => {
+                    if let Ok(text) = read_copyq_clipboard() {
+                        return Ok(text);
+                    }
+                    Err(format!("Failed to read clipboard natively: {e}"))
+                }
+            }
+        }
+        Err(e) => {
+            if let Ok(text) = read_copyq_clipboard() {
+                return Ok(text);
+            }
+            Err(format!("Failed to open native clipboard: {e}"))
+        }
+    }
 }
 
 #[tauri::command]
 pub fn write_real_clipboard(text: String) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| format!("Failed to open clipboard: {e}"))?;
-    clipboard.set_text(text)
-        .map_err(|e| format!("Failed to write clipboard text: {e}"))
+    let native_err = match arboard::Clipboard::new() {
+        Ok(mut clipboard) => {
+            match clipboard.set_text(text.clone()) {
+                Ok(_) => {
+                    let _ = write_copyq_clipboard(&text);
+                    return Ok(());
+                }
+                Err(e) => {
+                    Some(format!("Native set_text error: {e}"))
+                }
+            }
+        }
+        Err(e) => {
+            Some(format!("Native open error: {e}"))
+        }
+    };
+    
+    if let Err(copyq_err) = write_copyq_clipboard(&text) {
+        return Err(format!(
+            "Failed to write clipboard natively ({:?}) and via CopyQ fallback ({})",
+            native_err, copyq_err
+        ));
+    }
+    if let Some(err_str) = &native_err {
+        println!("Note: Native clipboard failed ({}), but CopyQ fallback succeeded.", err_str);
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -569,6 +677,52 @@ pub fn list_mock_files(is_phone: bool, state: State<'_, AppState>) -> Result<Vec
             LocalFileItem { name: "core-crypto".to_string(), path: "/home/Aelfwif/Downloads/kyberpipe/core-crypto".to_string(), is_dir: true, size: 0 },
         ])
     }
+}
+
+#[tauri::command]
+pub fn open_local_file(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn check_flatpak_permissions() -> Result<bool, String> {
+    if !is_flatpak() {
+        return Ok(true);
+    }
+    // Check if pulse socket exists in standard flatpak paths
+    let pulse_exists = std::path::Path::new("/run/flatpak/sandbox-pulse").exists() || 
+                     std::path::Path::new("/run/user").read_dir().map(|mut rd| {
+                         rd.any(|entry| {
+                             if let Ok(e) = entry {
+                                 let p = e.path().join("pulse/native");
+                                 p.exists()
+                             } else {
+                                 false
+                             }
+                         })
+                     }).unwrap_or(false);
+    Ok(pulse_exists)
 }
 
 

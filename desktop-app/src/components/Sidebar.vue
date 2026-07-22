@@ -7,7 +7,7 @@ import {
   Bell, 
   Cpu, 
   Terminal, 
-  Settings 
+  Bolt 
 } from '@lucide/vue';
 
 defineProps<{
@@ -28,10 +28,12 @@ const emit = defineEmits<{
 <template>
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo-badge">KP</div>
+      <div class="logo-container">
+        <img src="../assets/logo.png" alt="KyberPipe Logo" class="logo-img" />
+      </div>
       <div class="brand-text">
         <h2>KyberPipe</h2>
-        <span class="subtext">POST-QUANTUM ENGINE</span>
+        <span class="subtext">POST-QUANTUM CONNECTIVITY PIPELINE</span>
       </div>
     </div>
 
@@ -82,7 +84,7 @@ const emit = defineEmits<{
         :class="{ active: currentTab === 'settings' }"
         @click="emit('update:currentTab', 'settings')"
       >
-        <Settings class="nav-icon" :size="18" /> Settings
+        <Bolt class="nav-icon" :size="18" /> Settings
       </button>
     </nav>
 
@@ -93,6 +95,20 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
+.logo-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+}
+.logo-img {
+  width: 42px;
+  height: 42px;
+  object-fit: cover;
+  display: block;
+  border-radius: 0;
+}
 .nav-icon {
   margin-right: 0.5rem;
   color: var(--text-secondary);
