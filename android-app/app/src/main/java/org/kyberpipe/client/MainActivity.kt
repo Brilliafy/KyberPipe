@@ -593,7 +593,6 @@ fun MainScreen(
                         onPermissionRequest = { PermissionHelper.requestStoragePermissions(activity) },
                         onGrantLocalAccessToggle = { settings.fileAccessGrantedPhone = it },
                         onFileAction = { item ->
-                            Toast.makeText(context, "Accessing ${item.name}...", Toast.LENGTH_SHORT).show()
                         }
                     )
                 }
