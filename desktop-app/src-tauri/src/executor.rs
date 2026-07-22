@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use tracing::info;
 
 thread_local! {
-    static ENGINE_LOGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static ENGINE_LOGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -52,6 +52,12 @@ pub struct MultipathScheduler {
     next_path_idx: std::sync::atomic::AtomicUsize,
 }
 
+impl Default for MultipathScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultipathScheduler {
     pub fn new() -> Self {
         Self {

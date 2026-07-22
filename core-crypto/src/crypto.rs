@@ -412,9 +412,9 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
             let y_i = shares[i][byte_idx + 2] as u16;
             let mut num = 1u16;
             let mut den = 1u16;
-            for j in 0..k {
+            for (j, share) in shares.iter().enumerate().take(k) {
                 if i != j {
-                    let x_j = shares[j][0] as u16;
+                    let x_j = share[0] as u16;
                     num = (num * x_j) % 255;
                     den =
                         (den * (if x_j >= x_i {
@@ -424,7 +424,7 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
                         })) % 255;
                 }
             }
-            let l_i = if den == 0 { 1 } else { (num / den) as u8 };
+            let l_i = num.checked_div(den).map(|d| d as u8).unwrap_or(1);
             recovered_byte ^= (y_i as u8) ^ l_i;
         }
         secret.push(recovered_byte);
