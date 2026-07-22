@@ -1,42 +1,36 @@
 package org.kyberpipe.client.components
 
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
-import androidx.compose.foundation.background
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.kyberpipe.client.utils.PermissionHelper
-import org.kyberpipe.client.utils.SettingsManager
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import java.io.File
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.kyberpipe.client.utils.PermissionHelper
+import org.kyberpipe.client.utils.SettingsManager
+import java.io.File
 
 data class AndroidFileItem(
     val name: String,
@@ -57,65 +51,65 @@ fun FileManagerTab(
     var activeSubTab by remember { mutableStateOf("local") }
     var refreshKey by remember { mutableStateOf(0) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var currentPath by remember { mutableStateOf("") }
+    var contextMenuFile by remember { mutableStateOf<AndroidFileItem?>(null) }
     val context = LocalContext.current
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                refreshKey++
-            }
+            if (event == Lifecycle.Event.ON_RESUME) refreshKey++
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val hasAllFiles = remember(refreshKey) { PermissionHelper.hasStoragePermissions(context) }
-    val hasScopeFiles = remember(refreshKey) {
-        try {
-            context.getExternalFilesDir(null)?.exists() == true
-        } catch (e: Exception) { false }
-    }
     val useScope = remember { mutableStateOf(false) }
     val effectiveAllFiles = hasAllFiles && !useScope.value
 
-    val filesListKey = "$activeSubTab-$effectiveAllFiles-$useScope.value-$isConnected-${settings.fileAccessGrantedDesktop}-$refreshKey"
+    LaunchedEffect(activeSubTab, effectiveAllFiles, useScope.value, refreshKey) {
+        if (activeSubTab == "local") {
+            val root = if (effectiveAllFiles) Environment.getExternalStorageDirectory().absolutePath
+                       else context.getExternalFilesDir(null)?.absolutePath ?: ""
+            if (currentPath.isEmpty() || !currentPath.startsWith(root)) {
+                currentPath = root
+            }
+        }
+    }
+
+    val filesListKey = "$activeSubTab-$currentPath-$refreshKey-$isConnected-${settings.fileAccessGrantedDesktop}"
     val filesList = remember(filesListKey) {
         val list = mutableListOf<AndroidFileItem>()
-        if (activeSubTab == "local") {
-            if (effectiveAllFiles) {
-                try {
-                    val rootDir = Environment.getExternalStorageDirectory()
-                    rootDir.listFiles()?.forEach { file ->
+        if (activeSubTab == "local" && currentPath.isNotEmpty()) {
+            try {
+                val dirFile = File(currentPath)
+                if (dirFile.exists() && dirFile.isDirectory) {
+                    dirFile.listFiles()?.forEach { file ->
                         list.add(AndroidFileItem(file.name, file.absolutePath, file.isDirectory, if (file.isDirectory) 0 else file.length()))
                     }
-                } catch (e: Exception) {
-                    list.addAll(getSimulatedLocalFiles())
                 }
-            } else if (useScope.value) {
-                try {
-                    context.getExternalFilesDir(null)?.listFiles()?.forEach { file ->
-                        list.add(AndroidFileItem(file.name, file.absolutePath, file.isDirectory, if (file.isDirectory) 0 else file.length()))
-                    }
-                } catch (e: Exception) { }
-            }
-        } else if (isConnected && settings.fileAccessGrantedDesktop) {
+            } catch (e: Exception) { }
+        } else if (activeSubTab == "remote" && isConnected && settings.fileAccessGrantedDesktop) {
             list.addAll(getSimulatedPcFiles())
         }
-        list
+        list.sortedByDescending { it.isDir }.sortedBy { it.name }
+    }
+
+    fun navigateToDir(path: String) {
+        currentPath = path
+    }
+
+    fun navigateUp() {
+        val parent = File(currentPath).parent
+        if (parent != null) currentPath = parent
     }
 
     val colors = MaterialTheme.colorScheme
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        TabRow(
-            selectedTabIndex = if (activeSubTab == "local") 0 else 1,
-            containerColor = colors.surface,
-            contentColor = colors.primary
-        ) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TabRow(selectedTabIndex = if (activeSubTab == "local") 0 else 1,
+            containerColor = colors.surface, contentColor = colors.primary) {
             Tab(selected = activeSubTab == "local", onClick = { activeSubTab = "local" },
                 text = { Text("Local Storage", fontSize = 12.sp) })
             Tab(selected = activeSubTab == "remote", onClick = { activeSubTab = "remote" },
@@ -124,85 +118,93 @@ fun FileManagerTab(
 
         if (activeSubTab == "local") {
             if (!hasAllFiles && !useScope.value) {
-                Column(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.Lock, contentDescription = null, tint = colors.error, modifier = Modifier.size(48.dp))
+                Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Default.Lock, null, tint = colors.error, modifier = Modifier.size(48.dp))
                     Spacer(Modifier.height(12.dp))
                     Text("No File Access", fontWeight = FontWeight.Bold, color = colors.onBackground)
                     Spacer(Modifier.height(8.dp))
-                    Text("Choose how you want to access files on this device.", fontSize = 12.sp,
-                        color = colors.onBackground.copy(alpha = 0.6f), modifier = Modifier.padding(horizontal = 24.dp))
+                    Text("Tap Add Files to choose access method.", fontSize = 12.sp, color = colors.onBackground.copy(alpha = 0.6f))
                     Spacer(Modifier.height(16.dp))
-                    Button(onClick = { showAddDialog = true }) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add Files")
-                    }
+                    Button(onClick = { showAddDialog = true }) { Text("Add Files") }
                 }
             } else {
-                if (filesList.isEmpty() && !effectiveAllFiles) {
-                    Column(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text("No files in current scope.", color = colors.onBackground.copy(alpha = 0.6f))
-                        Spacer(Modifier.height(12.dp))
-                        Button(onClick = { showAddDialog = true }) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Add Files")
+                Card(colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (File(currentPath).parent != null) {
+                            IconButton(onClick = { navigateUp() }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.ArrowBack, null, modifier = Modifier.size(16.dp))
+                            }
                         }
+                        Spacer(Modifier.width(6.dp))
+                        Icon(Icons.Default.Folder, null, tint = colors.primary, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(File(currentPath).name, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = colors.onSurface, maxLines = 1)
+                    }
+                }
+
+                if (filesList.isEmpty()) {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Text("This folder is empty.", color = colors.onBackground.copy(alpha = 0.4f))
                     }
                 } else {
-                    FilesListView(filesList, onFileAction)
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        FilesListView(filesList, colors, contextMenuFile, { contextMenuFile = it }, {
+                            if (it.isDir) navigateToDir(it.path)
+                            else contextMenuFile = it
+                        }, onFileAction)
+                    }
                 }
-                Spacer(Modifier.height(8.dp))
-                Button(onClick = { showAddDialog = true }, modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (effectiveAllFiles) "Manage Storage Access" else "Manage Storage Scopes")
+
+                Spacer(Modifier.height(4.dp))
+                // Bottom bar with Add and Manage buttons
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { showAddDialog = true }, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Add, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Add Files", fontSize = 13.sp)
+                    }
+                    OutlinedButton(onClick = {
+                        val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:${context.packageName}")
+                        }
+                        context.startActivity(intent)
+                        MainScope().launch { delay(1500); refreshKey++ }
+                    }, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Settings, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Manage", fontSize = 13.sp)
+                    }
                 }
             }
         } else {
             if (!isConnected) {
-                Column(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.CloudOff, contentDescription = null, tint = colors.onBackground.copy(alpha = 0.4f), modifier = Modifier.size(48.dp))
+                Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Default.CloudOff, null, tint = colors.onBackground.copy(alpha = 0.4f), modifier = Modifier.size(48.dp))
                     Spacer(Modifier.height(12.dp))
-                    Text("Companion PC Offline", fontWeight = FontWeight.Bold, color = colors.onBackground)
+                    Text("Companion PC Offline", fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
-                    Text("Establish a secure connection with your desktop node to browse files remotely.",
-                        fontSize = 12.sp, color = colors.onBackground.copy(alpha = 0.6f), modifier = Modifier.padding(horizontal = 24.dp))
+                    Text("Connect your desktop node to browse files remotely.", fontSize = 12.sp, color = colors.onBackground.copy(alpha = 0.6f))
                 }
             } else if (!settings.fileAccessGrantedDesktop) {
-                Column(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.Security, contentDescription = null, tint = colors.error, modifier = Modifier.size(48.dp))
+                Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Default.Security, null, tint = colors.error, modifier = Modifier.size(48.dp))
                     Spacer(Modifier.height(12.dp))
-                    Text("Access Pending PC Authorization", fontWeight = FontWeight.Bold, color = colors.onBackground)
+                    Text("PC Authorization Required", fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
-                    Text("Please go to KyberPipe settings on your Linux Desktop and allow phone to browse files.",
-                        fontSize = 12.sp, color = colors.onBackground.copy(alpha = 0.6f), modifier = Modifier.padding(horizontal = 24.dp))
+                    Text("Allow phone access in KyberPipe desktop settings.", fontSize = 12.sp, color = colors.onBackground.copy(alpha = 0.6f))
                 }
             } else {
-                FilesListView(filesList, onFileAction)
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    FilesListView(filesList, colors, contextMenuFile, { contextMenuFile = it }, {
+                        if (it.isDir) navigateToDir(it.path)
+                        else contextMenuFile = it
+                    }, onFileAction)
+                }
             }
         }
     }
 
     if (showAddDialog) {
-<<<<<<< HEAD
         showAddDialog = false
         useScope.value = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -214,92 +216,88 @@ fun FileManagerTab(
             onPermissionRequest()
         }
         MainScope().launch { delay(1500); refreshKey++ }
-=======
+    }
+
+    // Context menu dropdown
+    contextMenuFile?.let { file ->
         AlertDialog(
-            onDismissRequest = { showAddDialog = false },
-            title = { Text("Add File Access") },
+            onDismissRequest = { contextMenuFile = null },
+            title = { Text(file.name, fontSize = 16.sp) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Choose how KyberPipe accesses your files:", fontSize = 14.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = {
-                            showAddDialog = false
-                            useScope.value = false
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                                context.startActivity(intent)
-                            } else {
-                                onPermissionRequest()
-                            }
-                            MainScope().launch { delay(1500); refreshKey++ }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
-                    ) { Text("Grant Full File Access") }
-                    Spacer(Modifier.height(4.dp))
-                    Button(
-                        onClick = {
-                            showAddDialog = false
-                            useScope.value = true
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                                context.startActivity(intent)
-                            } else {
-                                onPermissionRequest()
-                            }
-                            MainScope().launch { delay(1500); refreshKey++ }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = colors.secondary)
-                    ) { Text("Setup Storage Scopes") }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (isConnected) {
+                        TextButton(onClick = {
+                            Toast.makeText(context, "Copying ${file.name} to PC...", Toast.LENGTH_SHORT).show()
+                            contextMenuFile = null
+                        }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Computer, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Copy to PC")
+                        }
+                        TextButton(onClick = {
+                            Toast.makeText(context, "Moving ${file.name} to PC...", Toast.LENGTH_SHORT).show()
+                            contextMenuFile = null
+                        }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Computer, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Move to PC")
+                        }
+                        HorizontalDivider()
+                    }
+                    TextButton(onClick = {
+                        Toast.makeText(context, "Deleted ${file.name}", Toast.LENGTH_SHORT).show()
+                        contextMenuFile = null
+                    }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))) {
+                        Icon(Icons.Default.Delete, null, tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Delete", color = Color(0xFFEF4444))
+                    }
                 }
             },
-            confirmButton = {}
+            confirmButton = { TextButton(onClick = { contextMenuFile = null }) { Text("Cancel") } }
         )
->>>>>>> origin/main
     }
 }
 
 @Composable
-fun FilesListView(files: List<AndroidFileItem>, onFileAction: (AndroidFileItem) -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Column(
-        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        if (files.isEmpty()) {
-            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                Text("No files.", color = colors.onBackground.copy(alpha = 0.4f), fontSize = 13.sp)
-            }
-        } else {
-            files.forEach { file ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth().clickable { onFileAction(file) }
-                ) {
-                    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (file.isDir) Icons.Default.Folder else Icons.Default.Description,
-                            contentDescription = null,
-                            tint = if (file.isDir) Color(0xFFF59E0B) else Color(0xFF38BDF8),
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(file.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
-                            if (!file.isDir) Text(formatBytes(file.size), fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
+fun FilesListView(
+    files: List<AndroidFileItem>,
+    colors: androidx.compose.material3.ColorScheme,
+    contextMenuFile: AndroidFileItem?,
+    onContextMenu: (AndroidFileItem) -> Unit,
+    onTap: (AndroidFileItem) -> Unit,
+    onFileAction: (AndroidFileItem) -> Unit
+) {
+    Box(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        files.forEach { file ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = if (file.isDir) Icons.Default.Folder else Icons.Default.Description,
+                        null,
+                        tint = if (file.isDir) Color(0xFFF59E0B) else Color(0xFF38BDF8),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f).clickable { onTap(file) }) {
+                        Text(file.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface, maxLines = 1)
+                        if (!file.isDir) {
+                            Text(formatBytes(file.size), fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.5f))
                         }
+                    }
+                    IconButton(onClick = { onContextMenu(file) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.MoreVert, null, tint = colors.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
                     }
                 }
             }
         }
     }
+}
 }
 
 private fun formatBytes(bytes: Long): String {
@@ -307,13 +305,6 @@ private fun formatBytes(bytes: Long): String {
     if (bytes < 1048576) return "${(bytes / 1024.0).toInt()} KB"
     return "${String.format("%.1f", bytes / 1048576.0)} MB"
 }
-
-private fun getSimulatedLocalFiles(): List<AndroidFileItem> = listOf(
-    AndroidFileItem("DCIM", "/sdcard/DCIM", true, 0),
-    AndroidFileItem("Documents", "/sdcard/Documents", true, 0),
-    AndroidFileItem("Download", "/sdcard/Download", true, 0),
-    AndroidFileItem("backup_identity.key", "/sdcard/backup_identity.key", false, 1240)
-)
 
 private fun getSimulatedPcFiles(): List<AndroidFileItem> = listOf(
     AndroidFileItem("kyberpipe_core", "/home/Aelfwif/Downloads/kyberpipe", true, 0),
