@@ -125,16 +125,27 @@ fun QrCodeScannerView(
                     .padding(bottom = 12.dp),
                 contentAlignment = Alignment.BottomCenter
             ) {
-                Text(
-                    text = "Align QR Code inside the green frame",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Tap screen for high-res capture",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Button(
+                        onClick = { scanRequested = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.9f)),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("Tap to Scan", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         } else {
             Column(
@@ -171,7 +182,36 @@ fun CameraPreview(
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
-    val frameCount = remember { mutableStateOf(0) }
+    var scanRequested by remember { mutableStateOf(false) }
+
+    // Tap-to-capture: grab a high-res bitmap from PreviewView and decode it
+    LaunchedEffect(scanRequested) {
+        if (!scanRequested) return@LaunchedEffect
+        val bitmap = previewView.bitmap
+        if (bitmap != null) {
+            Log.d("QrCodeScanner", "Captured bitmap: ${bitmap.width}x${bitmap.height}")
+            try {
+                val inputImage = InputImage.fromBitmap(bitmap, 0)
+                barcodeScanner.process(inputImage)
+                    .addOnSuccessListener { barcodes ->
+                        for (b in barcodes) {
+                            val v = b.rawValue
+                            if (v != null && v.isNotEmpty()) {
+                                Log.w("QrCodeScanner", "CAPTURE DECODED ${v.length} chars")
+                                onQrScanned(v)
+                                break
+                            }
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e("QrCodeScanner", "capture decode fail: ${e.message}")
+                    }
+            } catch (e: Exception) {
+                Log.e("QrCodeScanner", "capture error", e)
+            }
+        }
+        scanRequested = false
+    }
 
     DisposableEffect(Unit) {
         Log.d("QrCodeScanner", "setting up camera")
@@ -186,34 +226,25 @@ fun CameraPreview(
 
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(android.util.Size(1280, 720))
+                .setTargetResolution(android.util.Size(1920, 1080))
                 .build()
 
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                val c = frameCount.value + 1
-                frameCount.value = c
-                if (c % 30 == 0) Log.d("QrCodeScanner", "frames=$c")
                 val img = imageProxy.image
-                if (img == null) {
-                    if (c % 30 == 0) Log.w("QrCodeScanner", "null image, format=${imageProxy.format}")
-                    imageProxy.close()
-                    return@setAnalyzer
-                }
+                if (img == null) { imageProxy.close(); return@setAnalyzer }
                 val inputImage = InputImage.fromMediaImage(img, imageProxy.imageInfo.rotationDegrees)
                 barcodeScanner.process(inputImage)
                     .addOnSuccessListener { barcodes ->
                         for (b in barcodes) {
                             val v = b.rawValue
                             if (v != null && v.isNotEmpty()) {
-                                Log.w("QrCodeScanner", "DECODED ${v.length} chars")
+                                Log.w("QrCodeScanner", "REALTIME DECODED ${v.length} chars")
                                 onQrScanned(v)
                                 break
                             }
                         }
                     }
-                    .addOnFailureListener { e ->
-                        if (c % 30 == 0) Log.e("QrCodeScanner", "mlkit: ${e.message}")
-                    }
+                    .addOnFailureListener { /* normal — keep scanning */ }
                     .addOnCompleteListener { imageProxy.close() }
             }
 
