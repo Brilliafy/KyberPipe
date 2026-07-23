@@ -1178,12 +1178,6 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                     
                     let resp_str = serde_json::to_string(&resp).unwrap_or_default();
                     ("200 OK", resp_str)
-                } else if req_str.contains("GET /api/pair-config") {
-                    let config = state_clone.pairing_config.lock().unwrap().clone();
-                    match config {
-                        Some(json) => ("200 OK", json),
-                        None => ("404 NOT FOUND", r#"{"error":"no_config"}"#.to_string()),
-                    }
                 } else {
                     ("404 NOT FOUND", "{}".to_string())
                 };
@@ -1213,68 +1207,4 @@ pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::syn
 #[tauri::command]
 pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
     state.media_state.lock().unwrap().clone()
-}
-
-#[tauri::command]
-pub fn store_pairing_config(
-    config_json: String,
-    wifi_direct_active: bool,
-    lan_active: bool,
-    wireguard_active: bool,
-    state: State<'_, std::sync::Arc<AppState>>,
-) -> Result<String, String> {
-    let parsed = serde_json::from_str::<serde_json::Value>(&config_json).ok();
-    let host_ip = parsed
-        .as_ref()
-        .and_then(|v| {
-            v.get("local_ip")
-                .and_then(|ip| ip.as_str().map(|s| s.to_string()))
-        })
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let wifi_mac = parsed.as_ref().and_then(|v| {
-        v.get("wifi_direct_mac")
-            .and_then(|m| m.as_str().map(|s| s.to_string()))
-    });
-    let pub_endpoint = parsed
-        .as_ref()
-        .and_then(|v| {
-            v.get("stun_endpoint")
-                .and_then(|s| s.as_str().map(|s| s.to_string()))
-        })
-        .unwrap_or_else(|| "stun.l.google.com:19302".to_string());
-    *state.pairing_config.lock().unwrap() = Some(config_json);
-    let mut transports = Vec::new();
-    if wifi_direct_active {
-        transports.push("wfd");
-    }
-    if lan_active {
-        transports.push("lan");
-    }
-    if wireguard_active {
-        transports.push("wg");
-    }
-    if transports.is_empty() {
-        return Err(
-            "No connectivity pathways enabled. Enable at least one in Settings > Connectivity."
-                .to_string(),
-        );
-    }
-    let nonce_prefix = parsed
-        .as_ref()
-        .and_then(|v| v.get("pairing_nonce_hex").and_then(|n| n.as_str()))
-        .map(|n| n.chars().take(8).collect::<String>())
-        .unwrap_or_default();
-    let mut info = serde_json::json!({
-        "t": transports,
-        "h": host_ip,
-        "p": 23520,
-        "n": nonce_prefix,
-        "e": pub_endpoint
-    });
-    if let Some(ref mac) = wifi_mac {
-        info.as_object_mut()
-            .unwrap()
-            .insert("m".to_string(), serde_json::Value::String(mac.clone()));
-    }
-    Ok(serde_json::to_string(&info).unwrap_or_default())
 }

@@ -170,7 +170,6 @@ pub fn run() {
             check_flatpak_permissions,
             trigger_desktop_media_action,
             get_media_state,
-            store_pairing_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

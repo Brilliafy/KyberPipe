@@ -66,7 +66,6 @@ pub struct AppState {
     pub notifications_path: String,
     pub media_state: Mutex<MediaState>,
     pub pending_media_action: Mutex<Option<u32>>,
-    pub pairing_config: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -113,7 +112,6 @@ impl Default for AppState {
             notifications_path,
             media_state: Mutex::new(MediaState::default()),
             pending_media_action: Mutex::new(None),
-            pairing_config: Mutex::new(None),
         }
     }
 }

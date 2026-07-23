@@ -69,7 +69,7 @@ const generateQR = async () => {
       width: 200,
       margin: 2,
       errorCorrectionLevel: 'L',
-      color: { dark: '#0f172a', light: '#ffffff' }
+      color: { dark: '#000000', light: '#ffffff' }
     });
   } catch (e) {
     console.error('QR generation failed:', e);
@@ -370,8 +370,8 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1rem;
 }
 .qr-code-simulator {
-  width: 180px;
-  height: 180px;
+  width: 280px;
+  height: 280px;
   display: flex;
   align-items: center;
   justify-content: center;
