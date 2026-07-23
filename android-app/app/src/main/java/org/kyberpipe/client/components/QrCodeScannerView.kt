@@ -2,8 +2,8 @@ package org.kyberpipe.client.components
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.ImageFormat
 import android.util.Log
+import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -34,12 +34,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.PlanarYUVLuminanceSource
-import com.google.zxing.common.HybridBinarizer
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 
 @Composable
@@ -81,16 +79,13 @@ fun QrCodeScannerView(
         if (hasCameraPermission) {
             CameraPreview(onQrScanned = onQrScanned)
             
-            // Premium Cutout Overlay with custom visual guidelines
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val squareSize = 160.dp.toPx()
                 val left = (size.width - squareSize) / 2
                 val top = (size.height - squareSize) / 2
 
-                // 1. Draw solid overlay background
                 drawRect(color = Color.Black.copy(alpha = 0.5f))
 
-                // 2. Draw cutout rectangle with BlendMode.Clear
                 drawRoundRect(
                     color = Color.Transparent,
                     topLeft = Offset(left, top),
@@ -99,7 +94,6 @@ fun QrCodeScannerView(
                     blendMode = BlendMode.Clear
                 )
 
-                // 3. Draw a green frame border around the cutout
                 drawRoundRect(
                     color = Color.Green,
                     topLeft = Offset(left, top),
@@ -109,7 +103,6 @@ fun QrCodeScannerView(
                 )
             }
 
-            // Close button overlay
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -126,7 +119,6 @@ fun QrCodeScannerView(
                 }
             }
 
-            // Instructional text overlay
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -172,22 +164,20 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val decodeHints = remember {
-        mapOf(
-            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-            DecodeHintType.ALSO_INVERTED to true
-        )
+    val options = remember {
+        BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
     }
+    val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
 
     DisposableEffect(Unit) {
-        Log.d("QrCodeScanner", "DisposableEffect: setting up camera")
+        Log.d("QrCodeScanner", "setting up camera")
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-
-        Log.d("QrCodeScanner", "CameraPreview: setting up camera")
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
-            Log.d("QrCodeScanner", "CameraProvider acquired")
+            Log.d("QrCodeScanner", "camera acquired")
 
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
@@ -199,50 +189,46 @@ fun CameraPreview(
                 .build()
 
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                Log.v("QrCodeScanner", "Frame ${imageProxy.width}x${imageProxy.height}")
-                if (imageProxy.format != ImageFormat.YUV_420_888) {
+                val img = imageProxy.image
+                if (img == null) {
+                    Log.w("QrCodeScanner", "null image, format=${imageProxy.format}")
                     imageProxy.close()
                     return@setAnalyzer
                 }
-                val plane = imageProxy.planes[0]
-                val buf = plane.buffer
-                val data = ByteArray(buf.remaining())
-                buf.get(data)
-                buf.rewind()
-
-                val source = PlanarYUVLuminanceSource(
-                    data, plane.rowStride, imageProxy.height,
-                    0, 0, imageProxy.width, imageProxy.height, false
-                )
-                try {
-                    val bitmap = BinaryBitmap(HybridBinarizer(source))
-                    val result = MultiFormatReader().decode(bitmap, decodeHints)
-                    Log.w("QrCodeScanner", "ZXing decoded OK (${result.text.length} chars)")
-                    if (result.text.isNotEmpty()) onQrScanned(result.text)
-                } catch (e: Exception) {
-                    Log.v("QrCodeScanner", "No QR: ${e::class.simpleName}")
-                }
-                imageProxy.close()
+                val inputImage = InputImage.fromMediaImage(img, imageProxy.imageInfo.rotationDegrees)
+                barcodeScanner.process(inputImage)
+                    .addOnSuccessListener { barcodes ->
+                        for (b in barcodes) {
+                            val v = b.rawValue
+                            if (v != null && v.isNotEmpty()) {
+                                Log.w("QrCodeScanner", "DECODED ${v.length} chars")
+                                onQrScanned(v)
+                                break
+                            }
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e("QrCodeScanner", "mlkit fail: ${e.message}")
+                    }
+                    .addOnCompleteListener { imageProxy.close() }
             }
 
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    imageAnalysis
+                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview, imageAnalysis
                 )
-                Log.d("QrCodeScanner", "Camera bound to lifecycle")
-            } catch (exc: Exception) {
-                Log.e("QrCodeScanner", "Use case binding failed", exc)
+                Log.d("QrCodeScanner", "bound")
+            } catch (e: Exception) {
+                Log.e("QrCodeScanner", "bind fail", e)
             }
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            Log.d("QrCodeScanner", "CameraPreview: disposing")
+            Log.d("QrCodeScanner", "dispose")
             executor.shutdown()
-            ProcessCameraProvider.getInstance(context).get().unbindAll()
+            barcodeScanner.close()
         }
     }
 
