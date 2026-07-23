@@ -196,8 +196,11 @@ fun CameraPreview(
                     val yBuf = yPlane.buffer
                     val yStride = yPlane.rowStride
                     val stride = if (yStride >= w) yStride else w
-                    val yRaw = ByteArray(yBuf.remaining())
-                    yBuf.get(yRaw)
+                    yBuf.rewind()
+                    val minBytes = stride * h
+                    val yRaw = ByteArray(minBytes)
+                    val toRead = minOf(yBuf.remaining(), minBytes)
+                    yBuf.get(yRaw, 0, toRead)
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
                         val source = PlanarYUVLuminanceSource(
