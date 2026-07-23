@@ -531,19 +531,21 @@ fun OverviewTab(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("Node Metrics", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
                             }
+                            val isConnected = isPaired && (connectionColor == Color.Green || connectionStatus.contains("ACTIVE", ignoreCase = true))
                             Column {
                                 Text(
-                                    text = "RTT: 4.8 ms",
+                                    text = if (isConnected) "RTT: 4.8 ms" else "RTT: N/A (Disconnected)",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.Green
+                                    color = if (isConnected) Color.Green else colors.onSurface.copy(alpha = 0.5f)
                                 )
                                 Text(
-                                    text = "Path: ${if (connectionMethod == "None") "Offline" else connectionMethod.substringBefore(" ")}",
+                                    text = "Path: ${if (!isConnected || connectionMethod == "None") "Offline" else connectionMethod.substringBefore(" ")}",
                                     fontSize = 10.sp,
                                     color = colors.onSurface.copy(alpha = 0.6f)
                                 )
                             }
+
                         }
                     }
                 }

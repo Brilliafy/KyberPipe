@@ -490,44 +490,32 @@ fun MainScreen(
         while (true) {
             delay(2500)
             if (settings.isPaired) {
-                val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                    try {
-                        JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                    } catch (e: Exception) {
-                        "10.0.2.2"
-                    }
-                } else {
-                    "10.0.2.2"
-                }
+                val targetHostIp = settings.pairedHostIp.ifEmpty { "10.0.2.2" }
 
                 val responseText = withContext(Dispatchers.IO) {
-                    try {
-                        val url = java.net.URL("http://10.0.2.2:23520/api/poll")
-                        val conn = url.openConnection() as java.net.HttpURLConnection
-                        conn.requestMethod = "GET"
-                        conn.connectTimeout = 1500
-                        conn.readTimeout = 1500
-                        val text = conn.inputStream.bufferedReader().use { it.readText() }
-                        conn.disconnect()
-                        text
-                    } catch (e: Exception) {
-                        if (hostIp != "10.0.2.2") {
-                            try {
-                                val url2 = java.net.URL("http://$hostIp:23520/api/poll")
-                                val conn2 = url2.openConnection() as java.net.HttpURLConnection
-                                conn2.requestMethod = "GET"
-                                conn2.connectTimeout = 1500
-                                conn2.readTimeout = 1500
-                                val text2 = conn2.inputStream.bufferedReader().use { it.readText() }
-                                conn2.disconnect()
-                                text2
-                            } catch (e2: Exception) {
-                                null
+                    val ipsToTry = mutableListOf(targetHostIp)
+                    if (targetHostIp != "10.0.2.2") {
+                        ipsToTry.add("10.0.2.2")
+                    }
+
+                    var result: String? = null
+                    for (ip in ipsToTry) {
+                        try {
+                            val url = java.net.URL("http://$ip:23520/api/poll")
+                            val conn = url.openConnection() as java.net.HttpURLConnection
+                            conn.requestMethod = "GET"
+                            conn.connectTimeout = 1500
+                            conn.readTimeout = 1500
+                            val text = conn.inputStream.bufferedReader().use { it.readText() }
+                            conn.disconnect()
+                            if (text.isNotEmpty()) {
+                                result = text
+                                break
                             }
-                        } else {
-                            null
+                        } catch (_: Exception) {
                         }
                     }
+                    result
                 }
 
                 if (responseText != null) {
@@ -595,18 +583,21 @@ fun MainScreen(
     // First Connection Modal (Dynamic profile nickname on connect)
     var showFirstConnectModal by remember { mutableStateOf(false) }
     var tempPcName by remember { mutableStateOf("") }
+    var tempHostIp by remember { mutableStateOf("10.0.2.2") }
 
     val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
         val hostPkHex = json.getString("host_identity_pk_hex")
         val wireguardPkHex = json.getString("wireguard_pk_hex")
+        tempHostIp = json.optString("local_ip", "10.0.2.2")
         val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
         val myPkHex = keyPair?.mlkemPkHex ?: ""
         val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
         sasCodeDisplay = computedSas
         tempPcName = "Linux Desktop workstation"
         showFirstConnectModal = true
-        addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+        addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
     }
+
 
     val handlePairingHandshake = {
         val cleanInput = pairingConfigInput.trim().replace("-", "")
@@ -857,15 +848,7 @@ fun MainScreen(
                 confirmButton = {
                     Button(
                         onClick = {
-                            val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                                try {
-                                    JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                                } catch (e: Exception) {
-                                    "10.0.2.2"
-                                }
-                            } else {
-                                "10.0.2.2"
-                            }
+                            val hostIp = if (tempHostIp.isNotEmpty() && tempHostIp != "10.0.2.2") tempHostIp else settings.pairedHostIp.ifEmpty { "10.0.2.2" }
                             val jsonBody = JSONObject().put("name", settings.deviceName).toString()
                             sendPostRequestAsync("http://10.0.2.2:23520/api/pair", jsonBody)
                             if (hostIp != "10.0.2.2") {
@@ -877,6 +860,7 @@ fun MainScreen(
                             settings.pairedHostIp = hostIp
                             showFirstConnectModal = false
                             evaluateConnection()
+
                         }
                     ) {
                         Text("Confirm & Connect")

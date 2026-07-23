@@ -420,6 +420,20 @@ pub fn evaluate_connection_hierarchy(
     }
 }
 
+fn get_system_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ip.is_empty() && ip != "0.0.0.0" {
+                    return ip;
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 #[uniffi::export]
 pub fn generate_pairing_config(
     host_pk_hex: String,
@@ -430,7 +444,7 @@ pub fn generate_pairing_config(
 
     Ok(PairingConfig {
         host_identity_pk_hex: host_pk_hex,
-        local_ip: "192.168.1.150".to_string(),
+        local_ip: get_system_local_ip(),
         wifi_direct_mac: "4a:5b:6c:7d:8e:9f".to_string(),
         wireguard_pk_hex,
         stun_endpoint: "stun.l.google.com:19302".to_string(),
