@@ -66,22 +66,41 @@ const qrDataUrl = ref("");
 const generateQR = async () => {
   if (!props.pairingConfigJson) return;
   try {
-    const compressed = deflate(props.pairingConfigJson);
+    const rawJson = props.pairingConfigJson.trim();
+    const minified = rawJson.startsWith('{') ? JSON.stringify(JSON.parse(rawJson)) : rawJson;
+    
+    // Compress large ML-KEM-768 pairing payload with zlib deflate
+    const compressed = deflate(minified, { level: 9 });
     const bytes = new Uint8Array(compressed);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     const b64 = btoa(binary);
-    console.log('QR compressed: ' + compressed.length + ' bytes -> ' + b64.length + ' base64 chars');
+    console.log('QR payload: raw ' + minified.length + ' -> compressed ' + b64.length + ' chars');
+
     qrDataUrl.value = await QRCode.toDataURL(b64, {
-      width: 400,
-      margin: 4,
+      margin: 2,
+      scale: 6,
       errorCorrectionLevel: 'L',
       color: { dark: '#000000', light: '#ffffff' }
     });
   } catch (e) {
     console.error('QR generation failed:', e);
+    try {
+      const rawJson = props.pairingConfigJson.trim();
+      const minified = rawJson.startsWith('{') ? JSON.stringify(JSON.parse(rawJson)) : rawJson;
+      qrDataUrl.value = await QRCode.toDataURL(minified, {
+        margin: 2,
+        scale: 5,
+        errorCorrectionLevel: 'L'
+      });
+    } catch (err) {
+      console.error('Fallback QR generation failed:', err);
+    }
   }
 };
+
+
+
 
 watch(() => props.pairingConfigJson, generateQR, { immediate: true });
 
@@ -377,21 +396,25 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1rem;
 }
 .qr-code-simulator {
-  width: 360px;
-  height: 360px;
+  width: 440px;
+  height: 440px;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 1.5rem auto;
   background: #ffffff;
   border-radius: 12px;
-  padding: 6px;
+  padding: 8px;
 }
 .qr-image {
   width: 100%;
   height: 100%;
   image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
+
 
 .sas-block {
   display: flex;
