@@ -11,7 +11,8 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music } from "@lucide/vue";
+import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music, ShieldAlert } from "@lucide/vue";
+
 
 interface SystemInfo {
   is_flatpak: boolean;
@@ -536,7 +537,7 @@ const loadPairingConfig = async () => {
       hostPkHex: keyPair.value.mlkem_pk_hex,
       wireguardPkHex: keyPair.value.x25519_pk_hex,
     });
-    pairingConfigJson.value = JSON.stringify(config, null, 2);
+    pairingConfigJson.value = JSON.stringify(config);
     await refreshLogs();
   } catch (e) {
     console.error(e);
@@ -949,6 +950,7 @@ onUnmounted(() => {
   --text-secondary: #94a3b8;
   --accent-cyan: #06b6d4;
   --accent-indigo: #6366f1;
+  color-scheme: dark;
 }
 
 .flatpak-modal-overlay {
@@ -980,6 +982,7 @@ html.theme-daylight {
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --accent-cyan: #0284c7;
+  color-scheme: light;
 }
 html.theme-oled-black {
   --bg-dark: #000000;

@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
+import QRCode from 'qrcode';
+import { deflate } from 'pako';
 import { 
   Shield, 
   QrCode, 
@@ -59,6 +61,48 @@ const inputDevicePic = ref("");
 const copyStatusText = ref("");
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const isUltrasonicActive = ref(false);
+const qrDataUrl = ref("");
+
+const generateQR = async () => {
+  if (!props.pairingConfigJson) return;
+  try {
+    const rawJson = props.pairingConfigJson.trim();
+    const minified = rawJson.startsWith('{') ? JSON.stringify(JSON.parse(rawJson)) : rawJson;
+    
+    // Compress large ML-KEM-768 pairing payload with zlib deflate
+    const compressed = deflate(minified, { level: 9 });
+    const bytes = new Uint8Array(compressed);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+    console.log('QR payload: raw ' + minified.length + ' -> compressed ' + b64.length + ' chars');
+
+    qrDataUrl.value = await QRCode.toDataURL(b64, {
+      margin: 2,
+      scale: 6,
+      errorCorrectionLevel: 'L',
+      color: { dark: '#000000', light: '#ffffff' }
+    });
+  } catch (e) {
+    console.error('QR generation failed:', e);
+    try {
+      const rawJson = props.pairingConfigJson.trim();
+      const minified = rawJson.startsWith('{') ? JSON.stringify(JSON.parse(rawJson)) : rawJson;
+      qrDataUrl.value = await QRCode.toDataURL(minified, {
+        margin: 2,
+        scale: 5,
+        errorCorrectionLevel: 'L'
+      });
+    } catch (err) {
+      console.error('Fallback QR generation failed:', err);
+    }
+  }
+};
+
+
+
+
+watch(() => props.pairingConfigJson, generateQR, { immediate: true });
 
 const handleCopyLink = async () => {
   try {
@@ -112,12 +156,7 @@ const handleFileChange = (event: Event) => {
             <p class="desc">Scan this QR code with the companion mobile app to establish a secure cryptographic trust chain.</p>
             
             <div class="qr-code-simulator">
-              <div class="qr-corner top-left"></div>
-              <div class="qr-corner top-right"></div>
-              <div class="qr-corner bottom-left"></div>
-              <div class="qr-matrix">
-                <div v-for="i in 144" :key="i" class="qr-dot" :class="{ active: (i * 3 + 7) % 5 === 0 || (i * 7 + 13) % 8 === 0 }"></div>
-              </div>
+              <img v-if="qrDataUrl" :src="qrDataUrl" class="qr-image" alt="Pairing QR code" />
             </div>
             
             <div class="sas-block">
@@ -357,37 +396,25 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1rem;
 }
 .qr-code-simulator {
-  width: 140px;
-  height: 140px;
-  background: #ffffff;
-  padding: 8px;
-  border-radius: 10px;
-  position: relative;
+  width: 440px;
+  height: 440px;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin: 1.5rem auto;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 8px;
 }
-.qr-matrix {
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 2px;
+.qr-image {
   width: 100%;
   height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
-.qr-dot {
-  background: #cbd5e1;
-}
-.qr-dot.active {
-  background: #0f172a;
-}
-.qr-corner {
-  position: absolute;
-  width: 32px;
-  height: 32px;
-  border: 3px solid #0f172a;
-  background: transparent;
-}
-.qr-corner.top-left { top: 8px; left: 8px; border-right: none; border-bottom: none; }
-.qr-corner.top-right { top: 8px; right: 8px; border-left: none; border-bottom: none; }
-.qr-corner.bottom-left { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+
 
 .sas-block {
   display: flex;
