@@ -2,6 +2,8 @@ package org.kyberpipe.client.components
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.graphics.YuvImage
 import android.util.Log
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,10 +36,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
@@ -170,18 +173,12 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val options = remember {
-        BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-    }
-    val barcodeScanner = remember { BarcodeScanning.getClient(options) }
+    val reader = remember { MultiFormatReader() }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
             executor.shutdown()
-            barcodeScanner.close()
         }
     }
 
@@ -214,31 +211,36 @@ fun CameraPreview(
                     .build()
 
                 imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                    val mediaImage = imageProxy.image
-                    if (mediaImage != null) {
-                        val image = InputImage.fromMediaImage(
-                            mediaImage,
-                            imageProxy.imageInfo.rotationDegrees
-                        )
-                        barcodeScanner.process(image)
-                            .addOnSuccessListener { barcodes ->
-                                for (barcode in barcodes) {
-                                    val rawValue = barcode.rawValue
-                                    if (rawValue != null && rawValue.isNotEmpty()) {
-                                        onQrScanned(rawValue)
-                                        break
-                                    }
-                                }
+                    val planes = imageProxy.planes
+                    if (planes.isNotEmpty()) {
+                        val yPlane = planes[0]
+                        val buffer = yPlane.buffer
+                        val rowStride = yPlane.rowStride
+                        val width = imageProxy.width
+                        val height = imageProxy.height
+                        val yBytes = ByteArray(width * height)
+                        for (row in 0 until height) {
+                            buffer.position(row * rowStride)
+                            buffer.get(yBytes, row * width, width)
+                        }
+                        try {
+                            val source = PlanarYUVLuminanceSource(
+                                yBytes, width, height,
+                                0, 0, width, height,
+                                false
+                            )
+                            val bitmap = BinaryBitmap(HybridBinarizer(source))
+                            val result = reader.decodeWithState(bitmap)
+                            val text = result.text
+                            if (text != null && text.isNotEmpty()) {
+                                Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
+                                onQrScanned(text)
                             }
-                            .addOnFailureListener { e ->
-                                Log.e("QrCodeScanner", "ML Kit process failed: ${e.message}")
-                            }
-                            .addOnCompleteListener {
-                                imageProxy.close()
-                            }
-                    } else {
-                        imageProxy.close()
+                        } catch (_: Exception) {
+                            // No QR in this frame
+                        }
                     }
+                    imageProxy.close()
                 }
 
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
