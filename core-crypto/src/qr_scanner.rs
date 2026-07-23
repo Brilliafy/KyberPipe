@@ -133,11 +133,7 @@ mod tests {
     fn test_rotations() {
         let w = 4;
         let h = 3;
-        let luma = vec![
-            1, 2, 3, 4,
-            5, 6, 7, 8,
-            9, 10, 11, 12,
-        ];
+        let luma = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let r90 = rotate_90(&luma, w, h);
         assert_eq!(r90.len(), 12);
         let r180 = rotate_180(&luma, w, h);
