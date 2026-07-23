@@ -74,7 +74,7 @@ const generateQR = async () => {
     console.log('QR compressed: ' + compressed.length + ' bytes -> ' + b64.length + ' base64 chars');
     qrDataUrl.value = await QRCode.toDataURL(b64, {
       width: 400,
-      margin: 2,
+      margin: 4,
       errorCorrectionLevel: 'L',
       color: { dark: '#000000', light: '#ffffff' }
     });

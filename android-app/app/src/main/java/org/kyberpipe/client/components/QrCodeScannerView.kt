@@ -2,6 +2,11 @@ package org.kyberpipe.client.components
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,10 +39,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
@@ -177,39 +183,39 @@ fun CameraPreview(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val options = remember {
-        BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-    }
-    val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build() }
 
     LaunchedEffect(scanRequested) {
         if (!scanRequested) return@LaunchedEffect
-        Log.d("QrCodeScanner", "capturing photo...")
+        Log.d("QrCodeScanner", "capturing photo for ZXing decode...")
         val exec = Executors.newSingleThreadExecutor()
         imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
                 val img = proxy.image
                 if (img != null) {
                     Log.w("QrCodeScanner", "photo: ${proxy.width}x${proxy.height}")
-                    val inputImage = InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees)
-                    barcodeScanner.process(inputImage)
-                        .addOnSuccessListener { barcodes ->
-                            for (b in barcodes) {
-                                val v = b.rawValue
-                                if (v != null && v.isNotEmpty()) {
-                                    Log.w("QrCodeScanner", "PHOTO DECODED ${v.length} chars")
-                                    onQrScanned(v)
-                                    break
-                                }
-                            }
+                    // Convert YUV_420_888 to NV21 Bitmap for ZXing
+                    val nv21 = yuv420toNv21(img, proxy.width, proxy.height)
+                    val yuv = YuvImage(nv21, ImageFormat.NV21, proxy.width, proxy.height, null)
+                    val jpeg = ByteArrayOutputStream()
+                    yuv.compressToJpeg(Rect(0, 0, proxy.width, proxy.height), 100, jpeg)
+                    val bitmap = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size())
+                    jpeg.close()
+                    try {
+                        val w = bitmap.width; val h = bitmap.height
+                        val pixels = IntArray(w * h)
+                        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+                        val source = RGBLuminanceSource(w, h, pixels)
+                        val result = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
+                        val text = result.text
+                        if (text != null && text.isNotEmpty()) {
+                            Log.w("QrCodeScanner", "ZXing DECODED ${text.length} chars")
+                            onQrScanned(text)
                         }
-                        .addOnFailureListener { e ->
-                            Log.e("QrCodeScanner", "photo decode fail: ${e.message}")
-                        }
+                    } catch (e: Exception) {
+                        Log.e("QrCodeScanner", "ZXing fail: ${e.message}")
+                    }
                 }
                 proxy.close()
                 onScanComplete()
@@ -248,7 +254,6 @@ fun CameraPreview(
 
         onDispose {
             Log.d("QrCodeScanner", "dispose")
-            barcodeScanner.close()
         }
     }
 
@@ -256,4 +261,29 @@ fun CameraPreview(
         factory = { previewView },
         modifier = Modifier.fillMaxSize()
     )
+}
+
+private fun yuv420toNv21(image: android.media.Image, width: Int, height: Int): ByteArray {
+    val planes = image.planes
+    val yPlane = planes[0]
+    val uPlane = planes[1]
+    val vPlane = planes[2]
+    val yBuf = yPlane.buffer
+    val uBuf = uPlane.buffer
+    val vBuf = vPlane.buffer
+    val ySize = yBuf.remaining()
+    val uSize = uBuf.remaining()
+    val vSize = vBuf.remaining()
+    val nv21 = ByteArray(ySize + uSize + vSize)
+    yBuf.get(nv21, 0, ySize)
+    // Interleave U and V for NV21 (VU order)
+    var uvOffset = ySize
+    val uArr = ByteArray(uSize); uBuf.get(uArr)
+    val vArr = ByteArray(vSize); vBuf.get(vArr)
+    var ui = 0; var vi = 0
+    while (ui < uSize && vi < vSize) {
+        nv21[uvOffset++] = vArr[vi++] // V first
+        nv21[uvOffset++] = uArr[ui++] // U second
+    }
+    return nv21
 }
