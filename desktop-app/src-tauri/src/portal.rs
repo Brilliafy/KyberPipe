@@ -52,5 +52,6 @@ pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
             }
         }
         crate::commands::write_clipboard_fallback(text)
+
     }
 }

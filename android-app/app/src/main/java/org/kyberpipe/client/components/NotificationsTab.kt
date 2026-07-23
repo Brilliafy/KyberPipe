@@ -1,6 +1,8 @@
 package org.kyberpipe.client.components
 
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -18,7 +20,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.ui.platform.LocalContext
+import org.kyberpipe.client.utils.PermissionHelper
+import org.kyberpipe.client.utils.SettingsManager
 
 data class AndroidNotificationRecord(
     val id: String,
@@ -41,6 +46,57 @@ fun NotificationsTab(
 ) {
     var activeSubTab by remember { mutableStateOf("all") }
     val context = LocalContext.current
+    val settingsManager = remember { SettingsManager(context) }
+
+    var showPermissionDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        if (!settingsManager.notificationPermissionShown && !PermissionHelper.isNotificationListenerEnabled(context)) {
+            showPermissionDialog = true
+            settingsManager.notificationPermissionShown = true
+        }
+    }
+
+    if (showPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionDialog = false },
+            icon = { Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Notification Access Required") },
+            text = {
+                Column {
+                    Text(
+                        text = "KyberPipe needs notification read access to intercept and sync notifications from your apps to your paired desktop companion.",
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "This permission allows KyberPipe to read the title, text, and app info of incoming notifications. They are encrypted end-to-end before being sent to your paired device.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Tap \"Grant Access\" below, then find and toggle on \"KyberPipe\" in the system notification access list.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showPermissionDialog = false
+                    PermissionHelper.requestNotificationListenerPermission(context as android.app.Activity)
+                }) {
+                    Text("Grant Access")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionDialog = false }) {
+                    Text("Not Now")
+                }
+            }
+        )
+    }
 
     val filteredList = remember(activeSubTab, notifications) {
         val activeNotifs = notifications.filter { !it.isDismissed }
