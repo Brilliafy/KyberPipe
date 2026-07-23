@@ -135,8 +135,7 @@ fun OverviewTab(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
-                                modifier = Modifier.padding(16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                modifier = Modifier.padding(16.dp)
                             ) {
                                 Text(
                                     text = "Enter Pairing Code",
@@ -145,28 +144,11 @@ fun OverviewTab(
                                     color = colors.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
-                                OutlinedTextField(
-                                    value = pairingConfigInput,
-                                    onValueChange = onPairingConfigChange,
-                                    label = { Text("Paste 6-digit code or JSON", fontSize = 11.sp) },
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedTextColor = colors.onSurface,
-                                        unfocusedTextColor = colors.onSurface,
-                                        focusedBorderColor = colors.primary,
-                                        unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
-                                    ),
-                                    modifier = Modifier.fillMaxWidth(),
-                                    maxLines = 3,
-                                    singleLine = false
+                                PairingInputSection(
+                                    pairingConfigInput = pairingConfigInput,
+                                    onPairingConfigChange = onPairingConfigChange,
+                                    onTriggerHandshake = onTriggerHandshake
                                 )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Button(
-                                    onClick = onTriggerHandshake,
-                                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("Complete PQC Handshake & Connect")
-                                }
                             }
                         }
                     }
@@ -204,44 +186,14 @@ fun OverviewTab(
                                     Text("Start QR Scanner")
                                 }
                             } else {
-                                // Pulsing green scanner overlay simulator
-                                val infiniteTransition = rememberInfiniteTransition()
-                                val scale by infiniteTransition.animateFloat(
-                                    initialValue = 0.8f,
-                                    targetValue = 1.0f,
-                                    animationSpec = infiniteRepeatable(
-                                        animation = tween(1000, easing = LinearEasing),
-                                        repeatMode = RepeatMode.Reverse
-                                    )
+                                QrCodeScannerView(
+                                    onQrScanned = { raw ->
+                                        isScanning = false
+                                        onPairingConfigChange(raw)
+                                        onTriggerHandshake()
+                                    },
+                                    onClose = { isScanning = false }
                                 )
-
-                                LaunchedEffect(Unit) {
-                                    delay(2500)
-                                    onPairMockDevice("QR Scanner Node")
-                                }
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(160.dp)
-                                        .background(Color.Black, shape = RoundedCornerShape(8.dp))
-                                        .border(2.dp, colors.primary, shape = RoundedCornerShape(8.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size((100 * scale).dp)
-                                            .border(2.dp, Color.Green, shape = RoundedCornerShape(4.dp))
-                                    )
-                                    Text(
-                                        text = "Scanning PC screen...",
-                                        color = Color.White,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier
-                                            .align(Alignment.BottomCenter)
-                                            .padding(bottom = 8.dp)
-                                    )
-                                }
                             }
                         }
                     }

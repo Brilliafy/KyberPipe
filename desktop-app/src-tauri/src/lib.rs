@@ -115,8 +115,15 @@ fn scrub_ips(input: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     setup_panic_hook();
+    let state = std::sync::Arc::new(AppState::default());
+    let state_clone = state.clone();
+
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(state)
+        .setup(move |_app| {
+            crate::commands::start_local_sync_server(state_clone);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_system_info,
             generate_keypair,
@@ -161,6 +168,8 @@ pub fn run() {
             list_mock_files,
             open_local_file,
             check_flatpak_permissions,
+            trigger_desktop_media_action,
+            get_media_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
