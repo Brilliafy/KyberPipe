@@ -36,9 +36,14 @@ import kotlinx.coroutines.*
 import org.json.JSONObject
 import org.kyberpipe.client.components.*
 import org.kyberpipe.client.service.PipeService
+import org.kyberpipe.client.service.WifiDirectManager
+import org.kyberpipe.client.service.MdnsBeaconListener
+import org.kyberpipe.client.service.BeaconHost
 import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.sendPostRequestAsync
+import org.kyberpipe.client.utils.bindToWifiNetwork
+import org.kyberpipe.client.utils.onFirewallDropDetected
 import uniffi.core_crypto.*
 import java.io.ByteArrayInputStream
 import java.util.zip.InflaterInputStream
@@ -276,6 +281,9 @@ fun MainScreen(
     var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
     var pairingConfigInput by remember { mutableStateOf("") }
     var sasCodeDisplay by remember { mutableStateOf("") }
+    var sessionKey by remember { mutableStateOf("") }
+    var kemCiphertext by remember { mutableStateOf("") }
+    var p2pIp by remember { mutableStateOf("") }
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -292,6 +300,14 @@ fun MainScreen(
     }
 
     LaunchedEffect(Unit) {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        bindToWifiNetwork(connectivityManager)
+        onFirewallDropDetected = {
+            addLog("[Network] Firewall drop detected — desktop firewall blocking port 23520")
+            connectionStatus = "DISCONNECTED (Firewall blocked)"
+            connectionMethod = "None"
+            connectionColor = Color.Yellow
+        }
         notifStore.purgeOldRecords(settings.purgeDays, notificationsList)
     }
 
@@ -304,6 +320,53 @@ fun MainScreen(
             if (changed) {
                 addLog("[Sync] Notifications auto-synced with local store")
             }
+        }
+    }
+
+    // Wi-Fi Direct P2P Manager
+    val p2pManager = remember { WifiDirectManager(context) }
+    DisposableEffect(Unit) {
+        p2pManager.initialize(
+            onState = { state ->
+                p2pIp = state.groupOwnerIp
+                if (state.isConnected && state.groupOwnerIp.isNotEmpty()) {
+                    wifiDirectActive = true
+                    addLog("[P2P] Wi-Fi Direct connected via ${state.groupOwnerIp}")
+                }
+            },
+            onPeers = { macs ->
+                addLog("[P2P] Discovered ${macs.size} peers")
+            }
+        )
+        onDispose { p2pManager.destroy() }
+    }
+
+    // mDNS/LAN Beacon Listener
+    val beaconListener = remember { MdnsBeaconListener(coroutineScope) }
+    LaunchedEffect(Unit) {
+        beaconListener.start { host: BeaconHost ->
+            addLog("[mDNS] Discovered ${host.deviceName} @ ${host.localIp}")
+            if (pairingConfigInput.isEmpty() && host.localIp.isNotEmpty()) {
+                settings.pairedHostIp = host.localIp
+                p2pManager.findAndConnect(host.hostPkHex)
+            }
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { beaconListener.stop() }
+    }
+
+    // When pairing config changes, try Wi-Fi Direct connection if MAC is present
+    LaunchedEffect(pairingConfigInput) {
+        if (pairingConfigInput.isNotEmpty() && pairingConfigInput.startsWith("{")) {
+            try {
+                val json = JSONObject(pairingConfigInput)
+                val wifiDirectMac = json.optString("wifi_direct_mac", "")
+                if (wifiDirectMac.isNotEmpty()) {
+                    addLog("[P2P] Attempting Wi-Fi Direct connection to $wifiDirectMac")
+                    p2pManager.findAndConnect(wifiDirectMac)
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -384,18 +447,17 @@ fun MainScreen(
                         addLog("[Clipboard] Intercepted new primary clip: ${text.take(20)}...")
 
                         if (settings.isPaired) {
-                            val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                                try {
-                                    JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                                } catch (e: Exception) {
-                                    "10.0.2.2"
+                            val hostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
+                            if (hostIp.isNotEmpty()) {
+                                val jsonBody = if (sessionKey.isNotEmpty()) {
+                                    val encrypted = encryptPayloadWithKey(sessionKey, text)
+                                    JSONObject().put("encrypted", JSONObject()
+                                        .put("nonce_hex", encrypted.nonceHex)
+                                        .put("ciphertext_hex", encrypted.ciphertextHex)
+                                    ).toString()
+                                } else {
+                                    JSONObject().put("text", text).toString()
                                 }
-                            } else {
-                                "10.0.2.2"
-                            }
-                            val jsonBody = JSONObject().put("text", text).toString()
-                            sendPostRequestAsync("http://10.0.2.2:23520/api/clipboard", jsonBody)
-                            if (hostIp != "10.0.2.2") {
                                 sendPostRequestAsync("http://$hostIp:23520/api/clipboard", jsonBody)
                             }
                         }
@@ -437,47 +499,45 @@ fun MainScreen(
                 return@launch
             }
 
-            if (attemptCount >= maxAttempts) {
-                connectionStatus = "DISCONNECTED (Max attempts failed)"
+            val hostToTry = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
+            if (hostToTry == null) {
+                connectionStatus = "DISCONNECTED (No host IP)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
-                addLog("[Network] Error: Connection timed out. All connection paths exhausted.")
+                addLog("[Network] No host IP available")
                 return@launch
             }
 
-            attemptCount++
-            connectionStatus = "CONNECTING (Attempt $attemptCount/$maxAttempts)..."
+            connectionStatus = "CONNECTING..."
             connectionColor = Color.Yellow
-            addLog("[Network] Probing interfaces (Attempt $attemptCount/$maxAttempts)...")
-            delay(1500) // Simulate transport pathway validation
+            addLog("[Network] Testing connection to $hostToTry:23520")
 
-            try {
-                val order = settings.pathwayOrder.split(",")
-                var chosenMethod = "WireGuard WAN Tunnel"
-                for (path in order) {
-                    if (path == "wifi_direct" && wifiDirectActive) {
-                        chosenMethod = "Wi-Fi Direct P2P"
-                        break
-                    }
-                    if (path == "mdns_lan" && lanActive) {
-                        chosenMethod = "mDNS LAN"
-                        break
-                    }
-                    if (path == "wireguard_wan") {
-                        chosenMethod = "WireGuard WAN Tunnel"
-                        break
-                    }
+            val reachable = withContext(Dispatchers.IO) {
+                try {
+                    val url = java.net.URL("http://$hostToTry:23520/api/poll")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "GET"
+                    conn.connectTimeout = 2000
+                    conn.readTimeout = 2000
+                    val code = conn.responseCode
+                    conn.disconnect()
+                    code == 200
+                } catch (_: Exception) {
+                    false
                 }
+            }
+
+            if (reachable) {
                 connectionStatus = "ACTIVE"
-                connectionMethod = chosenMethod
+                connectionMethod = "LAN"
                 connectionColor = Color.Green
                 attemptCount = 0
-                addLog("[Network] Active: Tunnel established via $chosenMethod (PQC keys verified)")
-            } catch (e: Exception) {
-                connectionStatus = "DISCONNECTED"
+                addLog("[Network] Host reachable at $hostToTry:23520")
+            } else {
+                connectionStatus = "DISCONNECTED (Unreachable)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
-                addLog("[Network] Failover error: ${e.message}")
+                addLog("[Network] Host $hostToTry:23520 not reachable")
             }
         }
     }
@@ -490,31 +550,23 @@ fun MainScreen(
         while (true) {
             delay(2500)
             if (settings.isPaired) {
-                val targetHostIp = settings.pairedHostIp.ifEmpty { "10.0.2.2" }
+                val targetHostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
+                if (targetHostIp.isEmpty()) continue
 
                 val responseText = withContext(Dispatchers.IO) {
-                    val ipsToTry = mutableListOf(targetHostIp)
-                    // Always include the emulator alias as last-resort fallback
-                    if (targetHostIp != "10.0.2.2") {
-                        ipsToTry.add("10.0.2.2")
-                    }
-
                     var result: String? = null
-                    for (ip in ipsToTry) {
-                        try {
-                            val url = java.net.URL("http://$ip:23520/api/poll")
-                            val conn = url.openConnection() as java.net.HttpURLConnection
-                            conn.requestMethod = "GET"
-                            conn.connectTimeout = 1500
-                            conn.readTimeout = 1500
-                            val text = conn.inputStream.bufferedReader().use { it.readText() }
-                            conn.disconnect()
-                            if (text.isNotEmpty()) {
-                                result = text
-                                break
-                            }
-                        } catch (_: Exception) {
+                    try {
+                        val url = java.net.URL("http://$targetHostIp:23520/api/poll")
+                        val conn = url.openConnection() as java.net.HttpURLConnection
+                        conn.requestMethod = "GET"
+                        conn.connectTimeout = 1500
+                        conn.readTimeout = 1500
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        conn.disconnect()
+                        if (text.isNotEmpty()) {
+                            result = text
                         }
+                    } catch (_: Exception) {
                     }
                     result
                 }
@@ -543,7 +595,18 @@ fun MainScreen(
                                 else -> Color.Red
                             }
 
-                            val latestClip = json.optString("latest_clip", "")
+                            val latestClipEncrypted = json.optJSONObject("latest_clip_encrypted")
+                            val latestClip = if (latestClipEncrypted != null && sessionKey.isNotEmpty()) {
+                                try {
+                                    val nonce = latestClipEncrypted.getString("nonce_hex")
+                                    val ct = latestClipEncrypted.getString("ciphertext_hex")
+                                    decryptPayloadWithKey(sessionKey, nonce, ct)
+                                } catch (_: Exception) {
+                                    json.optString("latest_clip", "")
+                                }
+                            } else {
+                                json.optString("latest_clip", "")
+                            }
                             if (latestClip.isNotEmpty()) {
                                 val exists = clipboardList.any { it.text == latestClip }
                                 if (!exists) {
@@ -574,18 +637,10 @@ fun MainScreen(
                         Log.e("KyberpipePoll", "Parse poll response error: ${e.message}")
                     }
                 } else {
-                    // Local network poll failed — check if WireGuard WAN is the fallback
-                    if (wireguardActive) {
-                        // WireGuard is enabled: mark active over WAN (tunnel handles routing)
-                        connectionStatus = "ACTIVE"
-                        connectionMethod = "WireGuard WAN Tunnel"
-                        connectionColor = Color.Green
-                    } else {
-                        // All pathways exhausted
-                        connectionStatus = "DISCONNECTED (Unreachable)"
-                        connectionMethod = "None"
-                        connectionColor = Color.Red
-                    }
+                    // Poll failed — desktop not reachable
+                    connectionStatus = "DISCONNECTED (Unreachable)"
+                    connectionMethod = "None"
+                    connectionColor = Color.Red
                 }
             }
         }
@@ -594,19 +649,52 @@ fun MainScreen(
     // First Connection Modal (Dynamic profile nickname on connect)
     var showFirstConnectModal by remember { mutableStateOf(false) }
     var tempPcName by remember { mutableStateOf("") }
-    var tempHostIp by remember { mutableStateOf("10.0.2.2") }
+    var tempHostIp by remember { mutableStateOf("") }
 
     val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
-        val hostPkHex = json.getString("host_identity_pk_hex")
-        val wireguardPkHex = json.getString("wireguard_pk_hex")
-        tempHostIp = json.optString("local_ip", "10.0.2.2")
-        val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
-        val myPkHex = keyPair?.mlkemPkHex ?: ""
-        val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
-        sasCodeDisplay = computedSas
-        tempPcName = "Linux Desktop workstation"
-        showFirstConnectModal = true
-        addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
+        val hostPkHex = json.optString("pqc_pub", json.optString("host_identity_pk_hex", ""))
+        val wireguardPkHex = json.optString("x25519_pub", json.optString("wireguard_pk_hex", ""))
+        if (hostPkHex.isNotEmpty() && wireguardPkHex.isNotEmpty()) {
+            tempHostIp = json.optString("local_ip", json.optString("p2p_ip", ""))
+            p2pIp = json.optString("p2p_ip", "")
+            val method = json.optString("method", "")
+            if (method == "p2p") {
+                val ssid = json.optString("ssid", "")
+                val pass = json.optString("pass", "")
+                if (ssid.isNotEmpty()) {
+                    try {
+                        val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                        val wifiConfig = android.net.wifi.WifiConfiguration().apply {
+                            SSID = "\"$ssid\""
+                            preSharedKey = "\"$pass\""
+                            allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
+                        }
+                        val netId = wifiManager.addNetwork(wifiConfig)
+                        if (netId != -1) {
+                            wifiManager.disconnect()
+                            wifiManager.enableNetwork(netId, true)
+                            wifiManager.reconnect()
+                            addLog("[P2P] Connecting to P2P network: $ssid")
+                        }
+                    } catch (e: Exception) {
+                        addLog("[P2P] Failed to connect to P2P: ${e.message}")
+                    }
+                }
+            }
+            val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
+            val myPkHex = keyPair?.mlkemPkHex ?: ""
+            val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
+            sasCodeDisplay = computedSas
+            kemCiphertext = kemResponse.ciphertextHex
+            sessionKey = deriveSessionKey(kemResponse.sharedSecretHex, "6b79626572706970652d73796e632d7631")
+            settings.sessionKey = sessionKey
+            tempPcName = "Linux Desktop workstation"
+            showFirstConnectModal = true
+            addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
+        } else {
+            addLog("[Pairing] Invalid QR: missing PQC public keys")
+            Toast.makeText(context, "Invalid QR: missing cryptographic keys", Toast.LENGTH_LONG).show()
+        }
     }
 
 
@@ -717,25 +805,10 @@ fun MainScreen(
                                 tempPcName = nodeName
                                 showFirstConnectModal = true
                             },
-                            pairingConfigInput = pairingConfigInput,
-                            onPairingConfigChange = { newValue ->
-                                val clean = newValue.replace("-", "")
-                                val isDeleting = newValue.length < pairingConfigInput.length
-                                val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
-                                    if (isDeleting && clean.length == 3) {
-                                        clean.take(2)
-                                    } else if (clean.length >= 3) {
-                                        if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
-                                    } else {
-                                        clean
-                                    }
-                                } else {
-                                    newValue
-                                }
-                                pairingConfigInput = formatted
-                            },
-                            onTriggerHandshake = handlePairingHandshake
-                        )
+                    pairingConfigInput = pairingConfigInput,
+                    onPairingConfigChange = { pairingConfigInput = it },
+                    onTriggerHandshake = handlePairingHandshake
+                    )
                     }
                     TabItem.FILES -> {
                         FileManagerTab(
@@ -794,25 +867,16 @@ fun MainScreen(
                             settings = settings,
                             keyPair = keyPair,
                             pairingConfigInput = pairingConfigInput,
-                            onPairingConfigChange = { newValue ->
-                                val clean = newValue.replace("-", "")
-                                val isDeleting = newValue.length < pairingConfigInput.length
-                                val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
-                                    if (isDeleting && clean.length == 3) {
-                                        clean.take(2)
-                                    } else if (clean.length >= 3) {
-                                        if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
-                                    } else {
-                                        clean
-                                    }
-                                } else {
-                                    newValue
-                                }
-                                pairingConfigInput = formatted
-                            },
+                            onPairingConfigChange = { pairingConfigInput = it },
                             onTriggerHandshake = handlePairingHandshake,
                             onAvatarPickerClick = onAvatarPickerClick,
                             onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
+                            wifiDirectActive = wifiDirectActive,
+                            lanActive = lanActive,
+                            wireguardActive = wireguardActive,
+                            onWifiDirectToggled = { wifiDirectActive = it },
+                            onLanToggled = { lanActive = it },
+                            onWireguardToggled = { wireguardActive = it },
                             localLogs = localLogs,
                             onCopyStacktrace = onCopyStacktrace,
                             onExportDiagnosticLogs = onExportDiagnosticLogs,
@@ -849,8 +913,11 @@ fun MainScreen(
                             onValueChange = { tempPcName = it },
                             label = { Text("Visual Nickname") },
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                focusedLabelColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                cursorColor = MaterialTheme.colorScheme.onSurface
                             )
                         )
                     }
@@ -858,22 +925,21 @@ fun MainScreen(
                 confirmButton = {
                     Button(
                         onClick = {
-                            // Prefer real LAN IP from QR payload; emulator alias is last resort
-                            val realIp = tempHostIp.takeIf { it.isNotEmpty() && it != "127.0.0.1" }
+                            val realIp = p2pIp.takeIf { it.isNotEmpty() }
+                                ?: tempHostIp.takeIf { it.isNotEmpty() }
                                 ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
-                            val jsonBody = JSONObject().put("name", settings.deviceName).toString()
-
-                            // POST to real LAN IP first, then emulator alias as fallback
                             if (realIp != null) {
+                                val jsonBody = JSONObject()
+                                    .put("name", settings.deviceName)
+                                    .put("ciphertext_hex", kemCiphertext)
+                                    .put("client_pk_hex", keyPair?.mlkemPkHex ?: "")
+                                    .toString()
                                 sendPostRequestAsync("http://$realIp:23520/api/pair", jsonBody)
                             }
-                            // Always also try emulator alias in case we are running in AVD
-                            sendPostRequestAsync("http://10.0.2.2:23520/api/pair", jsonBody)
 
                             settings.pairedDeviceName = tempPcName
                             settings.isPaired = true
-                            // Store the real LAN IP; fall back to emulator alias only if nothing else known
-                            settings.pairedHostIp = realIp ?: "10.0.2.2"
+                            settings.pairedHostIp = realIp ?: ""
                             showFirstConnectModal = false
                             // Do NOT call evaluateConnection here — the polling loop
                             // will detect the PC's /api/poll response and update status.

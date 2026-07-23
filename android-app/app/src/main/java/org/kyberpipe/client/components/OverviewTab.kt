@@ -561,7 +561,7 @@ fun OverviewTab(
                             val isConnected = isPaired && (connectionColor == Color.Green || connectionStatus.contains("ACTIVE", ignoreCase = true))
                             Column {
                                 Text(
-                                    text = if (isConnected) "RTT: 4.8 ms" else "RTT: N/A (Disconnected)",
+                                    text = if (isConnected) "RTT: Measuring..." else "RTT: N/A (Disconnected)",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isConnected) Color.Green else colors.onSurface.copy(alpha = 0.5f)
@@ -745,18 +745,6 @@ fun NodeMetricsModal(
 
                                     Spacer(modifier = Modifier.height(10.dp))
 
-                                    val graphPoints = remember { mutableStateListOf(4.8f, 5.1f, 4.2f, 4.7f, 4.9f, 4.5f, 4.8f, 5.3f, 4.6f, 4.8f, 4.4f, 4.8f) }
-                                    LaunchedEffect(isConnected) {
-                                        while (true) {
-                                            delay(1500)
-                                            val nextRtt = if (isConnected) (4.2f + Math.random().toFloat() * 1.5f) else 0f
-                                            if (graphPoints.isNotEmpty()) {
-                                                graphPoints.removeAt(0)
-                                            }
-                                            graphPoints.add(nextRtt)
-                                        }
-                                    }
-
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -767,7 +755,6 @@ fun NodeMetricsModal(
                                         Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
                                             val w = size.width
                                             val h = size.height
-                                            val maxVal = 10f
 
                                             val dashEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
                                             drawLine(
@@ -777,60 +764,19 @@ fun NodeMetricsModal(
                                                 pathEffect = dashEffect
                                             )
 
-                                            if (isConnected && graphPoints.isNotEmpty()) {
-                                                val path = Path()
-                                                val fillPath = Path()
-
-                                                val stepX = w / (graphPoints.size - 1).coerceAtLeast(1)
-                                                graphPoints.forEachIndexed { index, rtt ->
-                                                    val x = index * stepX
-                                                    val y = h - (rtt / maxVal).coerceIn(0f, 1f) * h
-                                                    if (index == 0) {
-                                                        path.moveTo(x, y)
-                                                        fillPath.moveTo(x, h)
-                                                        fillPath.lineTo(x, y)
-                                                    } else {
-                                                        path.lineTo(x, y)
-                                                        fillPath.lineTo(x, y)
-                                                    }
-                                                }
-                                                fillPath.lineTo(w, h)
-                                                fillPath.close()
-
-                                                drawPath(
-                                                    path = fillPath,
-                                                    brush = Brush.verticalGradient(
-                                                        colors = listOf(Color(0xFF38BDF8).copy(alpha = 0.35f), Color.Transparent)
-                                                    )
-                                                )
-
-                                                drawPath(
-                                                    path = path,
-                                                    color = Color(0xFF38BDF8),
-                                                    style = Stroke(width = 2.5.dp.toPx())
-                                                )
-
-                                                val lastX = w
-                                                val lastY = h - (graphPoints.last() / maxVal).coerceIn(0f, 1f) * h
-                                                drawCircle(
-                                                    color = Color(0xFF38BDF8),
-                                                    radius = 4.5.dp.toPx(),
-                                                    center = androidx.compose.ui.geometry.Offset(lastX, lastY)
-                                                )
-                                                drawCircle(
-                                                    color = Color.White,
-                                                    radius = 2.dp.toPx(),
-                                                    center = androidx.compose.ui.geometry.Offset(lastX, lastY)
-                                                )
-                                            } else {
-                                                drawLine(
-                                                    color = Color.Gray.copy(alpha = 0.4f),
-                                                    start = androidx.compose.ui.geometry.Offset(0f, h),
-                                                    end = androidx.compose.ui.geometry.Offset(w, h),
-                                                    strokeWidth = 2.dp.toPx()
-                                                )
-                                            }
+                                            drawLine(
+                                                color = Color.Gray.copy(alpha = 0.4f),
+                                                start = androidx.compose.ui.geometry.Offset(0f, h),
+                                                end = androidx.compose.ui.geometry.Offset(w, h),
+                                                strokeWidth = 2.dp.toPx()
+                                            )
                                         }
+                                        Text(
+                                            text = if (isConnected) "Capturing RTT..." else "OFFLINE",
+                                            modifier = Modifier.align(Alignment.Center),
+                                            color = Color.Gray.copy(alpha = 0.5f),
+                                            fontSize = 14.sp
+                                        )
                                     }
 
                                     Spacer(modifier = Modifier.height(10.dp))
@@ -841,15 +787,15 @@ fun NodeMetricsModal(
                                     ) {
                                         Column {
                                             Text("Avg Latency", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "4.8 ms" else "Offline", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (isConnected) Color(0xFF34D399) else Color.Gray)
+                                            Text(if (isConnected) "Measuring..." else "N/A", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (isConnected) Color(0xFF34D399) else Color.Gray)
                                         }
                                         Column {
                                             Text("RTT Jitter", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "±0.3 ms" else "N/A", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text("N/A", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         }
                                         Column {
                                             Text("Packet Loss", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "0.00 %" else "N/A", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text("N/A", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         }
                                         Column {
                                             Text("UDP Hole", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
@@ -890,9 +836,6 @@ fun NodeMetricsModal(
 
                                     Spacer(modifier = Modifier.height(10.dp))
 
-                                    val rxPoints = remember { mutableStateListOf(1.2f, 2.4f, 1.8f, 3.5f, 2.1f, 4.2f, 2.9f, 3.8f, 2.5f, 4.5f) }
-                                    val txPoints = remember { mutableStateListOf(0.4f, 0.8f, 0.6f, 1.1f, 0.7f, 1.5f, 0.9f, 1.2f, 0.8f, 1.4f) }
-
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -903,34 +846,20 @@ fun NodeMetricsModal(
                                         Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
                                             val w = size.width
                                             val h = size.height
-                                            val maxVal = 5.0f
 
-                                            if (isConnected) {
-                                                val rxPath = Path()
-                                                val stepX = w / (rxPoints.size - 1).coerceAtLeast(1)
-                                                rxPoints.forEachIndexed { i, v ->
-                                                    val x = i * stepX
-                                                    val y = h - (v / maxVal).coerceIn(0f, 1f) * h
-                                                    if (i == 0) rxPath.moveTo(x, y) else rxPath.lineTo(x, y)
-                                                }
-                                                drawPath(path = rxPath, color = Color(0xFF34D399), style = Stroke(width = 2.dp.toPx()))
-
-                                                val txPath = Path()
-                                                txPoints.forEachIndexed { i, v ->
-                                                    val x = i * stepX
-                                                    val y = h - (v / maxVal).coerceIn(0f, 1f) * h
-                                                    if (i == 0) txPath.moveTo(x, y) else txPath.lineTo(x, y)
-                                                }
-                                                drawPath(path = txPath, color = Color(0xFFF59E0B), style = Stroke(width = 2.dp.toPx()))
-                                            } else {
-                                                drawLine(
-                                                    color = Color.Gray.copy(alpha = 0.3f),
-                                                    start = androidx.compose.ui.geometry.Offset(0f, h),
-                                                    end = androidx.compose.ui.geometry.Offset(w, h),
-                                                    strokeWidth = 2.dp.toPx()
-                                                )
-                                            }
+                                            drawLine(
+                                                color = Color.Gray.copy(alpha = 0.3f),
+                                                start = androidx.compose.ui.geometry.Offset(0f, h),
+                                                end = androidx.compose.ui.geometry.Offset(w, h),
+                                                strokeWidth = 2.dp.toPx()
+                                            )
                                         }
+                                        Text(
+                                            text = if (isConnected) "Capturing bandwidth..." else "OFFLINE",
+                                            modifier = Modifier.align(Alignment.Center),
+                                            color = Color.Gray.copy(alpha = 0.5f),
+                                            fontSize = 14.sp
+                                        )
                                     }
 
                                     Spacer(modifier = Modifier.height(10.dp))
@@ -941,15 +870,15 @@ fun NodeMetricsModal(
                                     ) {
                                         Column {
                                             Text("Current Rx", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "4.5 MB/s" else "0 KB/s", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399))
+                                            Text(if (isConnected) "Measuring..." else "0 B/s", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34D399))
                                         }
                                         Column {
                                             Text("Current Tx", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "1.4 MB/s" else "0 KB/s", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+                                            Text(if (isConnected) "Measuring..." else "0 B/s", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
                                         }
                                         Column {
                                             Text("Total Session", fontSize = 10.sp, color = Color.White.copy(alpha = 0.5f))
-                                            Text(if (isConnected) "992 MB" else "0 MB", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text(if (isConnected) "Measuring..." else "0 B", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         }
                                     }
                                 }

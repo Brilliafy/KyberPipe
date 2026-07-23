@@ -170,6 +170,14 @@ pub fn run() {
             check_flatpak_permissions,
             trigger_desktop_media_action,
             get_media_state,
+            check_firewall,
+            request_firewall_open,
+            scan_subnet_for_port,
+            send_reverse_request,
+            create_p2p_group,
+            register_mdns_service,
+            create_tor_onion,
+            generate_wormhole_code,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

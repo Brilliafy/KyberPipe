@@ -23,7 +23,7 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putString("paired_device_picture", value).apply()
 
     var pairedHostIp: String
-        get() = prefs.getString("paired_host_ip", "10.0.2.2") ?: "10.0.2.2"
+        get() = prefs.getString("paired_host_ip", "") ?: ""
         set(value) = prefs.edit().putString("paired_host_ip", value).apply()
 
     var ddnsHostname: String
@@ -87,4 +87,8 @@ class SettingsManager(context: Context) {
     var notificationPermissionShown: Boolean
         get() = prefs.getBoolean("notification_permission_shown", false)
         set(value) = prefs.edit().putBoolean("notification_permission_shown", value).apply()
+
+    var sessionKey: String
+        get() = prefs.getString("session_key", "") ?: ""
+        set(value) = prefs.edit().putString("session_key", value).apply()
 }
