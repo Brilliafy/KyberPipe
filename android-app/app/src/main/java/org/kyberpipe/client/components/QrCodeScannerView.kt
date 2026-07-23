@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import org.kyberpipe.client.QrNative
 import java.util.concurrent.Executors
 
@@ -185,23 +187,36 @@ fun CameraPreview(
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
                 val img = proxy.image
                 if (img != null) {
-                    val w = proxy.width; val h = proxy.height
-                    Log.w("QrCodeScanner", "photo: ${w}x${h}")
-                    val yPlane = img.planes[0]
-                    val yBuf = yPlane.buffer
-                    val yStride = yPlane.rowStride
-                    val stride = if (yStride >= w) yStride else w
-                    yBuf.rewind()
-                    val yRaw = ByteArray(stride * h)
-                    yBuf.get(yRaw, 0, minOf(yBuf.remaining(), stride * h))
-
+                    Log.d("QrDebug", "img fmt=${img.format} planes=${img.planes.size} sz=${proxy.width}x${proxy.height}")
                     try {
-                        Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
-                        Log.d("QrDebug", "img fmt=${img.format} planes=${img.planes.size}")
-                        // dump first 20 bytes to verify luminance vs JPEG
-                        val dump = yRaw.take(20).joinToString(" ") { String.format("%02x", it) }
-                        Log.d("QrDebug", "yRaw[0..19] = $dump")
-                        val resultText = QrNative.decodeQrCode(yRaw, w, h, stride, proxy.imageInfo.rotationDegrees)
+                        val rot = proxy.imageInfo.rotationDegrees
+                        val (gray, gw, gh) = if (img.format == 256) {
+                            val buf = img.planes[0].buffer
+                            val jpeg = ByteArray(buf.remaining())
+                            buf.get(jpeg)
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 2; inMutable = true }
+                            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)!!
+                            val bw = bmp.width; val bh = bmp.height
+                            val px = IntArray(bw * bh)
+                            bmp.getPixels(px, 0, bw, 0, 0, bw, bh)
+                            val g = ByteArray(bw * bh)
+                            for (i in px.indices) {
+                                val p = px[i]
+                                g[i] = ((0.299 * ((p shr 16) and 0xFF) + 0.587 * ((p shr 8) and 0xFF) + 0.114 * (p and 0xFF)).toInt()).toByte()
+                            }
+                            Log.w("QrCodeScanner", "JPEG decoded: ${bw}x${bh} grayscale")
+                            Triple(g, bw, bh)
+                        } else {
+                            val yPlane = img.planes[0]
+                            val yBuf = yPlane.buffer
+                            val yStride = yPlane.rowStride
+                            val stride = if (yStride >= proxy.width) yStride else proxy.width
+                            yBuf.rewind()
+                            val yRaw = ByteArray(stride * proxy.height)
+                            yBuf.get(yRaw, 0, minOf(yBuf.remaining(), stride * proxy.height))
+                            Triple(yRaw, proxy.width, proxy.height)
+                        }
+                        val resultText = QrNative.decodeQrCode(gray, gw, gh, gw, rot)
                         if (resultText != null && resultText.isNotEmpty()) {
                             Log.w("QrCodeScanner", "rqrr DECODED ${resultText.length} chars")
                             onQrScanned(resultText)
