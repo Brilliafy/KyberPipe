@@ -199,7 +199,7 @@ fun CameraPreview(
                     val yRaw = ByteArray(yBuf.remaining())
                     yBuf.get(yRaw)
                     try {
-                        // Y plane is unrotated sensor data. Never swap dimensions.
+                        Log.d("QrDebug", "rowStride=$yStride, rawWidth=$w, rawHeight=$h, rot=${proxy.imageInfo.rotationDegrees}")
                         var source: LuminanceSource = PlanarYUVLuminanceSource(
                             yRaw, yStride, h, 0, 0, w, h, false
                         )
