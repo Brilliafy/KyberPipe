@@ -3,7 +3,6 @@ package org.kyberpipe.client.components
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
-import android.graphics.YuvImage
 import android.util.Log
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,7 +35,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -173,7 +174,12 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val reader = remember { MultiFormatReader() }
+    val decodeHints = remember {
+        mapOf(
+            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+            DecodeHintType.ALSO_INVERTED to true
+        )
+    }
     val previewView = remember { PreviewView(context) }
 
     DisposableEffect(Unit) {
@@ -194,35 +200,35 @@ fun CameraPreview(
                 .build()
 
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                Log.v("QrCodeScanner", "Frame received: ${imageProxy.width}x${imageProxy.height}")
-                val planes = imageProxy.planes
-                if (planes.isNotEmpty()) {
-                    val yPlane = planes[0]
-                    val buffer = yPlane.buffer
-                    val rowStride = yPlane.rowStride
-                    val width = imageProxy.width
-                    val height = imageProxy.height
-                    val yBytes = ByteArray(width * height)
-                    for (row in 0 until height) {
-                        buffer.position(row * rowStride)
-                        buffer.get(yBytes, row * width, width)
+                if (imageProxy.format != ImageFormat.YUV_420_888) {
+                    imageProxy.close()
+                    return@setAnalyzer
+                }
+                val plane = imageProxy.planes[0]
+                val buf = plane.buffer
+                val data = ByteArray(buf.remaining())
+                buf.get(data)
+                buf.rewind()
+
+                val source = PlanarYUVLuminanceSource(
+                    data,
+                    plane.rowStride,
+                    imageProxy.height,
+                    0, 0,
+                    imageProxy.width,
+                    imageProxy.height,
+                    false
+                )
+                try {
+                    val bitmap = BinaryBitmap(HybridBinarizer(source))
+                    val result = MultiFormatReader().decode(bitmap, decodeHints)
+                    val text = result.text
+                    Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
+                    if (text.isNotEmpty()) {
+                        onQrScanned(text)
                     }
-                    try {
-                        val source = PlanarYUVLuminanceSource(
-                            yBytes, width, height,
-                            0, 0, width, height,
-                            false
-                        )
-                        val bitmap = BinaryBitmap(HybridBinarizer(source))
-                        val result = reader.decodeWithState(bitmap)
-                        val text = result.text
-                        Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
-                        if (text.isNotEmpty()) {
-                            onQrScanned(text)
-                        }
-                    } catch (_: Exception) {
-                        // No QR in this frame
-                    }
+                } catch (_: Exception) {
+                    // No QR in this frame
                 }
                 imageProxy.close()
             }
