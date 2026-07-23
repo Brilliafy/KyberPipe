@@ -70,7 +70,9 @@ const generateQR = async () => {
     const bytes = new Uint8Array(compressed);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    qrDataUrl.value = await QRCode.toDataURL(btoa(binary), {
+    const b64 = btoa(binary);
+    console.log('QR compressed: ' + compressed.length + ' bytes -> ' + b64.length + ' base64 chars');
+    qrDataUrl.value = await QRCode.toDataURL(b64, {
       width: 400,
       margin: 2,
       errorCorrectionLevel: 'L',

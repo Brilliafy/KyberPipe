@@ -11,7 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music } from "@lucide/vue";
+import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music, ShieldAlert } from "@lucide/vue";
 
 interface SystemInfo {
   is_flatpak: boolean;
