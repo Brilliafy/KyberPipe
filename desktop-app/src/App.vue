@@ -539,7 +539,12 @@ const loadPairingConfig = async () => {
     });
     const fullJson = JSON.stringify(config);
     pairingConfigJson.value = fullJson;
-    const qrInfo = await invoke<string>("store_pairing_config", { configJson: fullJson });
+    const qrInfo = await invoke<string>("store_pairing_config", {
+      configJson: fullJson,
+      wifiDirectActive: wifiDirectActive.value,
+      lanActive: lanActive.value,
+      wireguardActive: wireguardActive.value,
+    });
     qrPayload.value = qrInfo;
     await refreshLogs();
   } catch (e) {

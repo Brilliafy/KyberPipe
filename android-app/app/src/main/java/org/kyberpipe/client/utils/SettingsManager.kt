@@ -83,4 +83,8 @@ class SettingsManager(context: Context) {
     var purgeDays: Int
         get() = prefs.getInt("purge_days", 7)
         set(value) = prefs.edit().putInt("purge_days", value).apply()
+
+    var notificationPermissionShown: Boolean
+        get() = prefs.getBoolean("notification_permission_shown", false)
+        set(value) = prefs.edit().putBoolean("notification_permission_shown", value).apply()
 }

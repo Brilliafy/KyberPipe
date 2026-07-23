@@ -1218,25 +1218,52 @@ pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::sta
 #[tauri::command]
 pub fn store_pairing_config(
     config_json: String,
+    wifi_direct_active: bool,
+    lan_active: bool,
+    wireguard_active: bool,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
-    let host_ip = serde_json::from_str::<serde_json::Value>(&config_json)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(&config_json).ok();
+    let host_ip = parsed
+        .as_ref()
         .and_then(|v| {
             v.get("local_ip")
                 .and_then(|ip| ip.as_str().map(|s| s.to_string()))
         })
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let wifi_mac = serde_json::from_str::<serde_json::Value>(&config_json)
-        .ok()
+    let wifi_mac = parsed.as_ref().and_then(|v| {
+        v.get("wifi_direct_mac")
+            .and_then(|m| m.as_str().map(|s| s.to_string()))
+    });
+    let pub_endpoint = parsed
+        .as_ref()
         .and_then(|v| {
-            v.get("wifi_direct_mac")
-                .and_then(|m| m.as_str().map(|s| s.to_string()))
-        });
+            v.get("stun_endpoint")
+                .and_then(|s| s.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "stun.l.google.com:19302".to_string());
     *state.pairing_config.lock().unwrap() = Some(config_json);
+    let mut transports = Vec::new();
+    if wifi_direct_active {
+        transports.push("wfd");
+    }
+    if lan_active {
+        transports.push("lan");
+    }
+    if wireguard_active {
+        transports.push("wg");
+    }
+    if transports.is_empty() {
+        return Err(
+            "No connectivity pathways enabled. Enable at least one in Settings > Connectivity."
+                .to_string(),
+        );
+    }
     let mut info = serde_json::json!({
+        "t": transports,
         "h": host_ip,
-        "p": 23520
+        "p": 23520,
+        "e": pub_endpoint
     });
     if let Some(ref mac) = wifi_mac {
         info.as_object_mut()

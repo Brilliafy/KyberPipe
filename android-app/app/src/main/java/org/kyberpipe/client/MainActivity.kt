@@ -70,9 +70,6 @@ class MainActivity : ComponentActivity() {
             System.exit(10)
         }
 
-        // Prompt permissions on launch
-        requestInitialPermissions()
-
         // Handle initial intent
         handleIntent(intent)
 
