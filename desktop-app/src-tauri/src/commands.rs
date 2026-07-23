@@ -1032,25 +1032,16 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                 return;
             }
         };
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
         loop {
+
             let (mut socket, _) = match listener.accept().await {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-<<<<<<< HEAD
-            
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-=======
 
             let state_clone = state.clone();
-            tauri::async_runtime::spawn(async move {
->>>>>>> origin/main
+            tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let mut n = 0;
                 while n < buf.len() {
@@ -1065,11 +1056,7 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                         Err(_) => return,
                     }
                 }
-<<<<<<< HEAD
-                
-=======
 
->>>>>>> origin/main
                 let req_str = String::from_utf8_lossy(&buf[..n]);
                 let (response_status, response_body) = if req_str.contains("POST /api/pair") {
                     let mut name = "Android Phone".to_string();
@@ -1081,27 +1068,13 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                             }
                         }
                     }
-<<<<<<< HEAD
-                    
-=======
 
->>>>>>> origin/main
                     {
                         let mut s = state_clone.settings.lock().unwrap();
                         s.is_paired = true;
                         s.paired_device_name = Some(name.clone());
                     }
                     state_clone.save_settings();
-<<<<<<< HEAD
-                    
-                    *state_clone.connection_status.lock().unwrap() = "ACTIVE".to_string();
-                    *state_clone.connection_method.lock().unwrap() = "Wi-Fi Direct P2P".to_string();
-                    *state_clone.connection_color.lock().unwrap() = "green".to_string();
-                    
-                    state_clone.add_log(format!("[Pairing] Successfully verified remote Android companion: {name}"));
-                    state_clone.add_log("[Connection State] Changed to ACTIVE".to_string());
-                    
-=======
 
                     *state_clone.connection_status.lock().unwrap() = "ACTIVE".to_string();
                     *state_clone.connection_method.lock().unwrap() = "Wi-Fi Direct P2P".to_string();
@@ -1110,7 +1083,6 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                     state_clone.add_log(format!("[Pairing] Successfully verified remote Android companion: {name}"));
                     state_clone.add_log("[Connection State] Changed to ACTIVE".to_string());
 
->>>>>>> origin/main
                     ("200 OK", r#"{"status":"paired"}"#.to_string())
                 } else if req_str.contains("POST /api/clipboard") {
                     let mut text = String::new();
@@ -1122,20 +1094,6 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                             }
                         }
                     }
-<<<<<<< HEAD
-                    
-                    if !text.is_empty() {
-                        if !state_clone.dedup.is_suppressed(&text) {
-                            state_clone.dedup.record_text(&text);
-                            let _ = crate::portal::sync_clipboard_text(&text);
-                            state_clone.add_log(format!(
-                                "[Clipboard] Received from companion: \"{}\"",
-                                text.chars().take(30).collect::<String>()
-                            ));
-                        }
-                    }
-                    
-=======
 
                     if !text.is_empty() && !state_clone.dedup.is_suppressed(&text) {
                         state_clone.dedup.record_text(&text);
@@ -1146,7 +1104,6 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                         ));
                     }
 
->>>>>>> origin/main
                     ("200 OK", r#"{"status":"synced"}"#.to_string())
                 } else if req_str.contains("POST /api/media") {
                     if let Some(body_start) = req_str.find("\r\n\r\n") {
@@ -1156,11 +1113,7 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                             let artist = json.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                             let album_art = json.get("album_art").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                             let is_playing = json.get("is_playing").and_then(|v| v.as_bool()).unwrap_or_default();
-<<<<<<< HEAD
-                            
-=======
 
->>>>>>> origin/main
                             let mut actions = vec![];
                             if let Some(act_arr) = json.get("actions").and_then(|v| v.as_array()) {
                                 for act_val in act_arr {
@@ -1172,11 +1125,7 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                                     });
                                 }
                             }
-<<<<<<< HEAD
-                            
-=======
 
->>>>>>> origin/main
                             {
                                 let mut m = state_clone.media_state.lock().unwrap();
                                 m.title = title;
