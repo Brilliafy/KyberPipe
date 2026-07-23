@@ -400,21 +400,21 @@ pub fn evaluate_connection_hierarchy(
         ConnectionInfo {
             active_tier: 1,
             active_path_description: "Wi-Fi Direct P2P Link (Multiplexed QUIC)".to_string(),
-            latency_ms: 2.4,
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
             public_endpoint,
         }
     } else if lan_active {
         ConnectionInfo {
             active_tier: 2,
             active_path_description: "Local LAN AP Link (mDNS UDP Discovery)".to_string(),
-            latency_ms: 8.5,
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
             public_endpoint,
         }
     } else {
         ConnectionInfo {
             active_tier: 3,
             active_path_description: "WireGuard WAN Tunnel Overlay (Encrypted QUIC)".to_string(),
-            latency_ms: 45.2,
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
             public_endpoint,
         }
     }
@@ -445,7 +445,7 @@ pub fn generate_pairing_config(
     Ok(PairingConfig {
         host_identity_pk_hex: host_pk_hex,
         local_ip: get_system_local_ip(),
-        wifi_direct_mac: "4a:5b:6c:7d:8e:9f".to_string(),
+        wifi_direct_mac: String::new(), // Populated by Android Wi-Fi Direct stack on discovery
         wireguard_pk_hex,
         stun_endpoint: "stun.l.google.com:19302".to_string(),
         pairing_nonce_hex: hex::encode(nonce),
