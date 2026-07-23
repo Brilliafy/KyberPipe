@@ -266,24 +266,34 @@ fun CameraPreview(
 private fun yuv420toNv21(image: android.media.Image, width: Int, height: Int): ByteArray {
     val planes = image.planes
     val yPlane = planes[0]
-    val uPlane = planes[1]
-    val vPlane = planes[2]
     val yBuf = yPlane.buffer
-    val uBuf = uPlane.buffer
-    val vBuf = vPlane.buffer
-    val ySize = yBuf.remaining()
-    val uSize = uBuf.remaining()
-    val vSize = vBuf.remaining()
-    val nv21 = ByteArray(ySize + uSize + vSize)
-    yBuf.get(nv21, 0, ySize)
-    // Interleave U and V for NV21 (VU order)
-    var uvOffset = ySize
-    val uArr = ByteArray(uSize); uBuf.get(uArr)
-    val vArr = ByteArray(vSize); vBuf.get(vArr)
-    var ui = 0; var vi = 0
-    while (ui < uSize && vi < vSize) {
-        nv21[uvOffset++] = vArr[vi++] // V first
-        nv21[uvOffset++] = uArr[ui++] // U second
+    val yStride = yPlane.rowStride
+    // Tightly pack Y plane
+    val yTight = ByteArray(width * height)
+    for (row in 0 until height) {
+        yBuf.position(row * yStride)
+        yBuf.get(yTight, row * width, width)
+    }
+    if (planes.size <= 1) return yTight
+
+    // For multi-plane, build NV21 with interleaved VU
+    val uvCount = (width * height) / 4
+    val nv21 = ByteArray(yTight.size + uvCount * 2)
+    System.arraycopy(yTight, 0, nv21, 0, yTight.size)
+
+    if (planes.size >= 3) {
+        val uBuf = planes[1].buffer; val uArr = ByteArray(uBuf.remaining()); uBuf.get(uArr)
+        val vBuf = planes[2].buffer; val vArr = ByteArray(vBuf.remaining()); vBuf.get(vArr)
+        var off = yTight.size
+        val len = minOf(uArr.size, vArr.size, uvCount)
+        for (i in 0 until len) {
+            nv21[off++] = if (i < vArr.size) vArr[i] else 128.toByte()
+            nv21[off++] = if (i < uArr.size) uArr[i] else 128.toByte()
+        }
+    } else if (planes.size >= 2) {
+        val uvBuf = planes[1].buffer
+        val uvArr = ByteArray(uvBuf.remaining()); uvBuf.get(uvArr)
+        System.arraycopy(uvArr, 0, nv21, yTight.size, minOf(uvArr.size, uvCount * 2))
     }
     return nv21
 }
