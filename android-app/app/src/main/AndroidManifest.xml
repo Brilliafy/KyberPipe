@@ -26,7 +26,8 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar"
-        android:pageSizeCompat="enabled">
+        android:pageSizeCompat="enabled"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"

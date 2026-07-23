@@ -40,6 +40,8 @@ import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.sendPostRequestAsync
 import uniffi.core_crypto.*
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : ComponentActivity() {
 
@@ -609,19 +611,40 @@ fun MainScreen(
             addLog("[Pairing] Successfully verified host identity via SAS Code: $formattedSas")
         } else if (pairingConfigInput.trim().startsWith("{")) {
             try {
-                val json = JSONObject(pairingConfigInput)
-                val hostPkHex = json.getString("host_identity_pk_hex")
-                val wireguardPkHex = json.getString("wireguard_pk_hex")
-
-                val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
-                val myPkHex = keyPair?.mlkemPkHex ?: ""
-                val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
-                sasCodeDisplay = computedSas
-
-                // Set paired state
-                tempPcName = "Linux Desktop workstation"
-                showFirstConnectModal = true
-                addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+                val inputJson = JSONObject(pairingConfigInput)
+                // Short payload {h:ip,p:port} — fetch full config from desktop HTTP server
+                if (inputJson.has("h") && inputJson.has("p") && !inputJson.has("host_identity_pk_hex")) {
+                    val host = inputJson.getString("h")
+                    val port = inputJson.getInt("p")
+                    addLog("[Pairing] Fetching config from desktop $host:$port")
+                    val url = URL("http://$host:$port/api/pair-config")
+                    val conn = url.openConnection() as HttpURLConnection
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    val rawConfig = conn.inputStream.bufferedReader().readText()
+                    conn.disconnect()
+                    val json = JSONObject(rawConfig)
+                    val hostPkHex = json.getString("host_identity_pk_hex")
+                    val wireguardPkHex = json.getString("wireguard_pk_hex")
+                    val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
+                    val myPkHex = keyPair?.mlkemPkHex ?: ""
+                    val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
+                    sasCodeDisplay = computedSas
+                    tempPcName = "Linux Desktop workstation"
+                    showFirstConnectModal = true
+                    addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+                } else {
+                    // Full JSON — parse directly
+                    val hostPkHex = inputJson.getString("host_identity_pk_hex")
+                    val wireguardPkHex = inputJson.getString("wireguard_pk_hex")
+                    val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
+                    val myPkHex = keyPair?.mlkemPkHex ?: ""
+                    val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
+                    sasCodeDisplay = computedSas
+                    tempPcName = "Linux Desktop workstation"
+                    showFirstConnectModal = true
+                    addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+                }
             } catch (e: Exception) {
                 Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
                 addLog("[Pairing] Error: Handshake verification failed (${e.message})")

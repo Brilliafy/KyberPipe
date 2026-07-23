@@ -1040,7 +1040,7 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
             };
             
             let state_clone = state.clone();
-            tauri::async_runtime::spawn(async move {
+            tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let mut n = 0;
                 while n < buf.len() {
@@ -1178,6 +1178,12 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                     
                     let resp_str = serde_json::to_string(&resp).unwrap_or_default();
                     ("200 OK", resp_str)
+                } else if req_str.contains("GET /api/pair-config") {
+                    let config = state_clone.pairing_config.lock().unwrap().clone();
+                    match config {
+                        Some(json) => ("200 OK", json),
+                        None => ("404 NOT FOUND", r#"{"error":"no_config"}"#.to_string()),
+                    }
                 } else {
                     ("404 NOT FOUND", "{}".to_string())
                 };
@@ -1207,4 +1213,17 @@ pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::syn
 #[tauri::command]
 pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
     state.media_state.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn store_pairing_config(
+    config_json: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    *state.pairing_config.lock().unwrap() = Some(config_json);
+    let info = serde_json::json!({
+        "h": "192.168.1.150",
+        "p": 23520
+    });
+    Ok(serde_json::to_string(&info).unwrap_or_default())
 }

@@ -153,6 +153,7 @@ const lanActive = ref(false);
 const wireguardActive = ref(true);
 const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
+const qrPayload = ref("");
 
 // Latency for top-bar display
 const currentLatency = ref(0);
@@ -536,7 +537,10 @@ const loadPairingConfig = async () => {
       hostPkHex: keyPair.value.mlkem_pk_hex,
       wireguardPkHex: keyPair.value.x25519_pk_hex,
     });
-    pairingConfigJson.value = JSON.stringify(config, null, 2);
+    const fullJson = JSON.stringify(config);
+    pairingConfigJson.value = fullJson;
+    const qrInfo = await invoke<string>("store_pairing_config", { configJson: fullJson });
+    qrPayload.value = qrInfo;
     await refreshLogs();
   } catch (e) {
     console.error(e);
@@ -755,7 +759,7 @@ onUnmounted(() => {
             v-if="currentTab === 'dashboard'" 
             :isPaired="isPaired"
             :sasCode="sasCode" 
-            :pairingConfigJson="pairingConfigJson"
+            :pairingConfigJson="qrPayload"
             :clipboardItems="clipboardItems"
             :displayNotifications="displayNotifications"
             :currentLux="currentLux"

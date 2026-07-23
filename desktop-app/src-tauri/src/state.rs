@@ -58,14 +58,15 @@ pub struct AppState {
     pub sms_history: Mutex<Vec<SmsPacket>>,
     pub notification_history: Mutex<Vec<NotificationRecord>>,
     pub connection_status: Mutex<String>,
-    pub connection_method: Mutex<String>, // "Wi-Fi Direct", "mDNS LAN", "WireGuard WAN"
-    pub connection_color: Mutex<String>,  // "green", "yellow", "red"
+    pub connection_method: Mutex<String>,
+    pub connection_color: Mutex<String>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: String,
     #[allow(dead_code)]
     pub notifications_path: String,
     pub media_state: Mutex<MediaState>,
     pub pending_media_action: Mutex<Option<u32>>,
+    pub pairing_config: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -112,6 +113,7 @@ impl Default for AppState {
             notifications_path,
             media_state: Mutex::new(MediaState::default()),
             pending_media_action: Mutex::new(None),
+            pairing_config: Mutex::new(None),
         }
     }
 }
