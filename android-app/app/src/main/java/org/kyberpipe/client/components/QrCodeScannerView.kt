@@ -183,6 +183,7 @@ fun CameraPreview(
     val previewView = remember { PreviewView(context) }
 
     DisposableEffect(Unit) {
+        Log.d("QrCodeScanner", "DisposableEffect: setting up camera")
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         Log.d("QrCodeScanner", "CameraPreview: setting up camera")
@@ -199,7 +200,8 @@ fun CameraPreview(
                 .setTargetResolution(android.util.Size(1280, 720))
                 .build()
 
-            imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                Log.v("QrCodeScanner", "Frame ${imageProxy.width}x${imageProxy.height}")
                 if (imageProxy.format != ImageFormat.YUV_420_888) {
                     imageProxy.close()
                     return@setAnalyzer
@@ -223,11 +225,13 @@ fun CameraPreview(
                     val bitmap = BinaryBitmap(HybridBinarizer(source))
                     val result = MultiFormatReader().decode(bitmap, decodeHints)
                     val text = result.text
-                    Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
+                    Log.w("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
                     if (text.isNotEmpty()) {
                         onQrScanned(text)
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    Log.v("QrCodeScanner", "No QR: ${e::class.simpleName}")
+                }
                     // No QR in this frame
                 }
                 imageProxy.close()
