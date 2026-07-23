@@ -77,7 +77,8 @@ fun QrCodeScannerView(
         contentAlignment = Alignment.Center
     ) {
         if (hasCameraPermission) {
-            CameraPreview(onQrScanned = onQrScanned)
+            var scanReq by remember { mutableStateOf(false) }
+            CameraPreview(onQrScanned = onQrScanned, scanRequested = scanReq, onScanComplete = { scanReq = false })
             
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val squareSize = 160.dp.toPx()
@@ -138,7 +139,7 @@ fun QrCodeScannerView(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Button(
-                        onClick = { scanRequested = true },
+                        onClick = { scanReq = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.9f)),
                         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
                         modifier = Modifier.height(36.dp)
@@ -170,7 +171,9 @@ fun QrCodeScannerView(
 
 @Composable
 fun CameraPreview(
-    onQrScanned: (String) -> Unit
+    onQrScanned: (String) -> Unit,
+    scanRequested: Boolean,
+    onScanComplete: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -182,7 +185,6 @@ fun CameraPreview(
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
-    var scanRequested by remember { mutableStateOf(false) }
 
     // Tap-to-capture: grab a high-res bitmap from PreviewView and decode it
     LaunchedEffect(scanRequested) {
@@ -202,15 +204,19 @@ fun CameraPreview(
                                 break
                             }
                         }
+                        onScanComplete()
                     }
                     .addOnFailureListener { e ->
                         Log.e("QrCodeScanner", "capture decode fail: ${e.message}")
+                        onScanComplete()
                     }
             } catch (e: Exception) {
                 Log.e("QrCodeScanner", "capture error", e)
+                onScanComplete()
             }
+        } else {
+            onScanComplete()
         }
-        scanRequested = false
     }
 
     DisposableEffect(Unit) {
