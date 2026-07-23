@@ -38,7 +38,10 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
+import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.common.GlobalHistogramBinarizer
+import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
 
@@ -197,22 +200,42 @@ fun CameraPreview(
                     val yStride = yPlane.rowStride
                     val stride = if (yStride >= w) yStride else w
                     yBuf.rewind()
-                    val minBytes = stride * h
-                    val yRaw = ByteArray(minBytes)
-                    val toRead = minOf(yBuf.remaining(), minBytes)
-                    yBuf.get(yRaw, 0, toRead)
+                    val yRaw = ByteArray(stride * h)
+                    yBuf.get(yRaw, 0, minOf(yBuf.remaining(), stride * h))
+
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
-                        val source = PlanarYUVLuminanceSource(
-                            yRaw, stride, h, 0, 0, w, h, false
-                        )
+                        // Rotate byte array if 90/270 (portrait phone, landscape sensor)
+                        val rot = proxy.imageInfo.rotationDegrees
+                        val (rotated, rw, rh) = if (rot == 90) {
+                            val r = ByteArray(w * h)
+                            var i = 0
+                            for (x in 0 until w)
+                                for (y in h - 1 downTo 0)
+                                    r[i++] = yRaw[y * stride + x]
+                            Triple(r, h, w)
+                        } else if (rot == 270) {
+                            val r = ByteArray(w * h)
+                            var i = 0
+                            for (x in w - 1 downTo 0)
+                                for (y in 0 until h)
+                                    r[i++] = yRaw[y * stride + x]
+                            Triple(r, h, w)
+                        } else {
+                            Triple(yRaw, stride, h)
+                        }
+
+                        val source = PlanarYUVLuminanceSource(rotated, rw, rh, 0, 0, rw, rh, false)
                         val hints = mapOf(
                             DecodeHintType.TRY_HARDER to true,
                             DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
                         )
-                        val result = MultiFormatReader().apply { setHints(hints) }.decode(
-                            BinaryBitmap(HybridBinarizer(source))
-                        )
+                        val reader = MultiFormatReader().apply { setHints(hints) }
+                        val result = try {
+                            reader.decode(BinaryBitmap(HybridBinarizer(source)))
+                        } catch (_: NotFoundException) {
+                            reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)))
+                        }
                         val text = result.text
                         if (text != null && text.isNotEmpty()) {
                             Log.w("QrCodeScanner", "ZXing DECODED ${text.length} chars")
