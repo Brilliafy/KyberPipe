@@ -171,6 +171,7 @@ fun CameraPreview(
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
+    val frameCount = remember { mutableStateOf(0) }
 
     DisposableEffect(Unit) {
         Log.d("QrCodeScanner", "setting up camera")
@@ -189,9 +190,12 @@ fun CameraPreview(
                 .build()
 
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                val c = frameCount.value + 1
+                frameCount.value = c
+                if (c % 30 == 0) Log.d("QrCodeScanner", "frames=$c")
                 val img = imageProxy.image
                 if (img == null) {
-                    Log.w("QrCodeScanner", "null image, format=${imageProxy.format}")
+                    if (c % 30 == 0) Log.w("QrCodeScanner", "null image, format=${imageProxy.format}")
                     imageProxy.close()
                     return@setAnalyzer
                 }
@@ -208,7 +212,7 @@ fun CameraPreview(
                         }
                     }
                     .addOnFailureListener { e ->
-                        Log.e("QrCodeScanner", "mlkit fail: ${e.message}")
+                        if (c % 30 == 0) Log.e("QrCodeScanner", "mlkit: ${e.message}")
                     }
                     .addOnCompleteListener { imageProxy.close() }
             }
