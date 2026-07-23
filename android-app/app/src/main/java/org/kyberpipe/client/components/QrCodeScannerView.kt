@@ -38,7 +38,6 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 @Composable
@@ -170,13 +169,19 @@ fun CameraPreview(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
     val executor = remember { Executors.newSingleThreadExecutor() }
+    val options = remember {
+        BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+    }
+    val barcodeScanner = remember { BarcodeScanning.getClient(options) }
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
             executor.shutdown()
+            barcodeScanner.close()
         }
     }
 
@@ -191,62 +196,64 @@ fun CameraPreview(
             }
         },
         modifier = Modifier.fillMaxSize(),
-        update = {
-            val cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView?.surfaceProvider)
+        update = { view ->
+            val cameraProvider = try {
+                ProcessCameraProvider.getInstance(context).get()
+            } catch (e: Exception) {
+                Log.e("QrCodeScanner", "Failed to get camera provider", e)
+                null
             }
+            if (cameraProvider != null) {
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView?.surfaceProvider)
+                }
 
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(android.util.Size(1280, 720))
-                .build()
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setTargetResolution(android.util.Size(1280, 720))
+                    .build()
 
-            val options = BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build()
-            val barcodeScanner = BarcodeScanning.getClient(options)
-
-            imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                val mediaImage = imageProxy.image
-                if (mediaImage != null) {
-                    val image = InputImage.fromMediaImage(
-                        mediaImage,
-                        imageProxy.imageInfo.rotationDegrees
-                    )
-                    barcodeScanner.process(image)
-                        .addOnSuccessListener { barcodes ->
-                            for (barcode in barcodes) {
-                                val rawValue = barcode.rawValue
-                                if (rawValue != null && rawValue.isNotEmpty()) {
-                                    onQrScanned(rawValue)
-                                    break
+                imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                    val mediaImage = imageProxy.image
+                    if (mediaImage != null) {
+                        val image = InputImage.fromMediaImage(
+                            mediaImage,
+                            imageProxy.imageInfo.rotationDegrees
+                        )
+                        barcodeScanner.process(image)
+                            .addOnSuccessListener { barcodes ->
+                                for (barcode in barcodes) {
+                                    val rawValue = barcode.rawValue
+                                    if (rawValue != null && rawValue.isNotEmpty()) {
+                                        onQrScanned(rawValue)
+                                        break
+                                    }
                                 }
                             }
-                        }
-                        .addOnFailureListener { e ->
-                            Log.e("QrCodeScanner", "ML Kit process failed: ${e.message}")
-                        }
-                        .addOnCompleteListener {
-                            imageProxy.close()
-                        }
-                } else {
-                    imageProxy.close()
+                            .addOnFailureListener { e ->
+                                Log.e("QrCodeScanner", "ML Kit process failed: ${e.message}")
+                            }
+                            .addOnCompleteListener {
+                                imageProxy.close()
+                            }
+                    } else {
+                        imageProxy.close()
+                    }
                 }
-            }
 
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    imageAnalysis
-                )
-            } catch (exc: Exception) {
-                Log.e("QrCodeScanner", "Use case binding failed", exc)
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageAnalysis
+                    )
+                } catch (exc: Exception) {
+                    Log.e("QrCodeScanner", "Use case binding failed", exc)
+                }
             }
         }
     )
