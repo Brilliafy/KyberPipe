@@ -42,7 +42,6 @@ import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
-import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
 
 @Composable
