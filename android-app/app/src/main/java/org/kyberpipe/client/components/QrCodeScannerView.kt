@@ -196,12 +196,13 @@ fun CameraPreview(
                     val yPlane = img.planes[0]
                     val yBuf = yPlane.buffer
                     val yStride = yPlane.rowStride
+                    val stride = if (yStride >= w) yStride else w
                     val yRaw = ByteArray(yBuf.remaining())
                     yBuf.get(yRaw)
                     try {
-                        Log.d("QrDebug", "rowStride=$yStride, rawWidth=$w, rawHeight=$h, rot=${proxy.imageInfo.rotationDegrees}")
+                        Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
                         var source: LuminanceSource = PlanarYUVLuminanceSource(
-                            yRaw, yStride, h, 0, 0, w, h, false
+                            yRaw, stride, h, 0, 0, w, h, false
                         )
                         // Rotate source to match display orientation
                         val rot = proxy.imageInfo.rotationDegrees
