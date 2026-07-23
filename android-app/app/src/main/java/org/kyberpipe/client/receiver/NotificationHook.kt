@@ -6,17 +6,47 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import java.util.ArrayList
 
 class NotificationHook : NotificationListenerService() {
+
+    companion object {
+        var activeMediaSbn: StatusBarNotification? = null
+        
+        fun triggerMediaAction(actionIndex: Int) {
+            val sbn = activeMediaSbn ?: return
+            val actions = sbn.notification.actions
+            if (actions != null && actionIndex in actions.indices) {
+                try {
+                    actions[actionIndex].actionIntent.send()
+                    Log.d("KyberpipeMedia", "Successfully sent media action pending intent at index $actionIndex")
+                } catch (e: Exception) {
+                    Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
+                }
+            }
+        }
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
 
-        // Filter out ongoing system notifications
-        if (sbn.isOngoing) return
-
         val packageName = sbn.packageName ?: return
         val extras = sbn.notification?.extras ?: return
+
+        // Intercept Media Notifications
+        val isMedia = extras.containsKey("android.mediaSession")
+            || packageName == "com.spotify.music"
+            || packageName.contains("music")
+            || packageName.contains("player")
+            || packageName.contains("audio")
+
+        if (isMedia) {
+            handleMediaNotification(sbn)
+            return
+        }
+
+        // Filter out ongoing system notifications
+        if (sbn.isOngoing) return
 
         val title = extras.getCharSequence("android.title")?.toString() ?: ""
         var text = extras.getCharSequence("android.text")?.toString() ?: ""
@@ -84,6 +114,62 @@ class NotificationHook : NotificationListenerService() {
             sendBroadcast(intent)
         } catch (e: Exception) {
             Log.e("KyberpipeNotifHook", "Failed to format notification packet: ${e.message}")
+        }
+    }
+
+    private fun handleMediaNotification(sbn: StatusBarNotification) {
+        val extras = sbn.notification?.extras ?: return
+        val title = extras.getCharSequence("android.title")?.toString() ?: ""
+        val artist = extras.getCharSequence("android.text")?.toString() ?: ""
+        
+        var albumArtBase64 = ""
+        val bitmap = extras.getParcelable<android.graphics.Bitmap>("android.largeIcon")
+            ?: extras.getParcelable<android.graphics.Bitmap>("android.picture")
+        if (bitmap != null) {
+            try {
+                val outputStream = java.io.ByteArrayOutputStream()
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, outputStream)
+                val bytes = outputStream.toByteArray()
+                albumArtBase64 = "data:image/jpeg;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            } catch (e: Exception) {
+                Log.e("KyberpipeMedia", "Failed to compress album art bitmap: ${e.message}")
+            }
+        }
+
+        var isPlaying = false
+        val actionsList = ArrayList<org.json.JSONObject>()
+        val actions = sbn.notification.actions
+        if (actions != null) {
+            for (i in actions.indices) {
+                val act = actions[i]
+                val actTitle = act.title?.toString() ?: ""
+                if (actTitle.lowercase().contains("pause")) {
+                    isPlaying = true
+                }
+                val actJson = org.json.JSONObject()
+                    .put("title", actTitle)
+                    .put("index", i)
+                actionsList.add(actJson)
+            }
+        }
+
+        activeMediaSbn = sbn
+
+        val settings = org.kyberpipe.client.utils.SettingsManager(applicationContext)
+        if (settings.isPaired) {
+            val jsonMedia = org.json.JSONObject()
+                .put("title", title)
+                .put("artist", artist)
+                .put("album_art", albumArtBase64)
+                .put("is_playing", isPlaying)
+                .put("actions", org.json.JSONArray(actionsList))
+            
+            val jsonStr = jsonMedia.toString()
+            org.kyberpipe.client.utils.sendPostRequestAsync("http://10.0.2.2:23520/api/media", jsonStr)
+            val hostIp = settings.pairedHostIp
+            if (hostIp != "10.0.2.2" && hostIp.isNotEmpty()) {
+                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:23520/api/media", jsonStr)
+            }
         }
     }
 

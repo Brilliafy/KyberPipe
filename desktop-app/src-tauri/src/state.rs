@@ -23,6 +23,21 @@ pub struct AppSettings {
     pub wireguard_active: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct MediaAction {
+    pub title: String,
+    pub index: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct MediaState {
+    pub title: String,
+    pub artist: String,
+    pub album_art: String,
+    pub is_playing: bool,
+    pub actions: Vec<MediaAction>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct NotificationRecord {
     pub id: String,
@@ -49,6 +64,8 @@ pub struct AppState {
     pub settings_path: String,
     #[allow(dead_code)]
     pub notifications_path: String,
+    pub media_state: Mutex<MediaState>,
+    pub pending_media_action: Mutex<Option<u32>>,
 }
 
 impl Default for AppState {
@@ -93,6 +110,8 @@ impl Default for AppState {
             settings: Mutex::new(settings),
             settings_path,
             notifications_path,
+            media_state: Mutex::new(MediaState::default()),
+            pending_media_action: Mutex::new(None),
         }
     }
 }

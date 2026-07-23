@@ -50,9 +50,16 @@ const emit = defineEmits<{
   (e: "regenerateKeys"): void;
   (e: "saveSettings"): void;
   (e: "triggerSelfDestruct"): void;
+  (e: "deleteConnection"): void;
 }>();
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
+
+const confirmUnpair = () => {
+  if (confirm("Are you sure you want to delete the pairing connection with this companion device? All secure channels will be destroyed.")) {
+    emit("deleteConnection");
+  }
+};
 
 const triggerFilePicker = () => {
   if (fileInputRef.value) {
@@ -149,9 +156,17 @@ const handleFileChange = (event: Event) => {
         <div class="avatar-circle-readonly">
           <img :src="pairedDevicePicture || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2250%22 fill=%22%2306B6D4%22/><text x=%2250%22 y=%2260%22 font-size=%2235%22 fill=%22white%22 text-anchor=%22middle%22 font-weight=%22bold%22>PH</text></svg>'" alt="Paired Avatar" />
         </div>
-        <div class="profile-fields">
-          <h4>{{ pairedDeviceName }}</h4>
-          <p class="card-desc" style="margin: 0;">Connected via post-quantum KEM session</p>
+        <div class="profile-fields" style="flex: 1; display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
+          <div>
+            <h4>{{ pairedDeviceName }}</h4>
+            <p class="card-desc" style="margin: 0;">Connected via post-quantum KEM session</p>
+          </div>
+          <button 
+            style="background-color: #ef4444; color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.375rem; cursor: pointer; font-weight: bold; font-size: 0.85rem;"
+            @click="confirmUnpair"
+          >
+            Delete Connection
+          </button>
         </div>
       </div>
     </div>

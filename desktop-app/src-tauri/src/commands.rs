@@ -6,6 +6,8 @@ use core_crypto::packets::{SensorPacket, SmsPacket};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[derive(Serialize)]
 pub struct SystemInfo {
@@ -34,7 +36,7 @@ pub fn get_system_info() -> SystemInfo {
 }
 
 #[tauri::command]
-pub fn generate_keypair(state: State<'_, AppState>) -> Result<KeyPairDTO, String> {
+pub fn generate_keypair(state: State<'_, std::sync::Arc<AppState>>) -> Result<KeyPairDTO, String> {
     let pair = generate_pq_keypair().map_err(|e| e.to_string())?;
     let dto = KeyPairDTO {
         x25519_pk_hex: pair.x25519_pk_hex.clone(),
@@ -55,7 +57,7 @@ pub fn execute_boa_script(
     is_sandboxed: bool,
     lux: f64,
     feed_source_command: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> ScriptExecutionResult {
     let mut feed_value = String::new();
     if !feed_source_command.trim().is_empty() {
@@ -101,7 +103,7 @@ pub fn execute_boa_script(
 pub fn execute_fallback_script(
     script_path: String,
     lux: f64,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> ScriptExecutionResult {
     state.add_log(format!(
         "[Subprocess] Executing fallback script: {script_path} (lux = {lux})"
@@ -115,7 +117,10 @@ pub fn execute_fallback_script(
 }
 
 #[tauri::command]
-pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, String> {
+pub fn sync_clipboard(
+    text: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<bool, String> {
     if state.dedup.is_suppressed(&text) {
         state.add_log("[Clipboard] Suppressed duplicate or loop-back clipboard sync".to_string());
         return Ok(false);
@@ -133,7 +138,7 @@ pub fn sync_clipboard(text: String, state: State<'_, AppState>) -> Result<bool, 
 pub async fn send_desktop_notification(
     title: String,
     body: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
     state.add_log(format!("[Notification] Sending: {title}"));
     send_notification(&title, &body).await
@@ -143,7 +148,7 @@ pub async fn send_desktop_notification(
 pub fn push_sensor_reading(
     lux: f64,
     timestamp: u64,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Vec<SensorPacket> {
     let pkt = SensorPacket { lux, timestamp };
     if let Ok(mut hist) = state.sensor_history.lock() {
@@ -162,7 +167,7 @@ pub fn push_sms_packet(
     sender: String,
     body: String,
     timestamp: u64,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Vec<SmsPacket> {
     let pkt = SmsPacket {
         sender: sender.clone(),
@@ -187,7 +192,7 @@ pub fn push_notification_packet(
     text: String,
     app_package: String,
     timestamp: u64,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Vec<NotificationRecord> {
     let pkt = NotificationRecord {
         id: format!("{app_package}_{timestamp}"),
@@ -228,7 +233,7 @@ pub fn push_notification_packet(
 pub fn send_outbound_sms(
     recipient: String,
     body: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     state.add_log(format!("[Outbound SMS] Dispatching to {recipient}: {body}"));
     core_crypto::create_outbound_sms_packet(
@@ -247,7 +252,7 @@ pub fn trigger_notification_action(
     sbn_key: String,
     action_index: u32,
     action_title: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     state.add_log(format!(
         "[Notification Action] Triggered action '{action_title}' on {sbn_key}"
@@ -268,7 +273,7 @@ pub fn trigger_notification_action(
 pub fn send_hardware_command(
     command_type: String,
     payload_json: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     state.add_log(format!("[Hardware Command] Dispatching: {command_type}"));
     core_crypto::create_hardware_command_packet(
@@ -292,7 +297,7 @@ pub struct TelemetryMetrics {
 }
 
 #[tauri::command]
-pub fn get_telemetry_metrics(state: State<'_, AppState>) -> TelemetryMetrics {
+pub fn get_telemetry_metrics(state: State<'_, std::sync::Arc<AppState>>) -> TelemetryMetrics {
     let _logs = state.logs.lock().ok();
     TelemetryMetrics {
         rtt_ms: 2.4, // Wi-Fi Direct low-latency P2P benchmark
@@ -343,7 +348,7 @@ pub fn merge_mesh_crdt_state(
     incoming_value: String,
     incoming_node_id: String,
     incoming_timestamp: u64,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<bool, String> {
     let mut local_crdt = core_crypto::crypto::LwwRegisterCRDT::new(
         "Local Engine State".to_string(),
@@ -366,7 +371,7 @@ pub fn merge_mesh_crdt_state(
 
 #[tauri::command]
 pub async fn stream_binary_file(
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<tauri::ipc::Response, String> {
     let _logs = state.logs.lock().ok();
     // Streams raw payload bytes directly without Base64 encoding overhead
@@ -377,7 +382,7 @@ pub async fn stream_binary_file(
 #[tauri::command]
 pub fn toggle_neural_anomaly_engine(
     enabled: bool,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     let status_str = if enabled {
         "ENABLED (eBPF ONNX Engine Active)"
@@ -393,7 +398,10 @@ pub fn toggle_neural_anomaly_engine(
 }
 
 #[tauri::command]
-pub fn toggle_flight_recorder(enabled: bool, state: State<'_, AppState>) -> Result<String, String> {
+pub fn toggle_flight_recorder(
+    enabled: bool,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
     core_crypto::telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
     let status_str = if enabled {
         "ENABLED (sub-nanosecond qlog ring buffer active)"
@@ -412,7 +420,7 @@ pub fn dump_flight_recorder_events() -> Result<String, String> {
 #[tauri::command]
 pub fn init_sentry_desktop_telemetry(
     dsn: String,
-    state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     state.add_log(format!(
         "[Telemetry] Local logging active. Remote telemetry disabled. DSN: {}",
@@ -463,7 +471,9 @@ pub fn reconstruct_key_from_shamir_shares(
 }
 
 #[tauri::command]
-pub fn trigger_panic_self_destruct(state: State<'_, AppState>) -> Result<String, String> {
+pub fn trigger_panic_self_destruct(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
     core_crypto::trigger_panic_hardware_wipe().map_err(|e| e.to_string())?;
     let mut status = state.connection_status.lock().unwrap();
     *status = "SELF_DESTRUCTED_MEMORY_ZEROIZED".to_string();
@@ -474,7 +484,7 @@ pub fn trigger_panic_self_destruct(state: State<'_, AppState>) -> Result<String,
 }
 
 #[tauri::command]
-pub fn get_connection_status(state: State<'_, AppState>) -> String {
+pub fn get_connection_status(state: State<'_, std::sync::Arc<AppState>>) -> String {
     state
         .connection_status
         .lock()
@@ -483,14 +493,14 @@ pub fn get_connection_status(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn get_app_logs(state: State<'_, AppState>) -> Vec<String> {
+pub fn get_app_logs(state: State<'_, std::sync::Arc<AppState>>) -> Vec<String> {
     state.logs.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
 pub fn perform_stun_hole_punch(
     stun_host: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
     state.add_log(format!(
         "[STUN] Initiating UDP hole punch via STUN: {stun_host}"
@@ -510,7 +520,7 @@ pub fn evaluate_connection_status(
     wifi_direct_active: bool,
     lan_active: bool,
     public_endpoint: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::ConnectionInfo, String> {
     let info =
         core_crypto::evaluate_connection_hierarchy(wifi_direct_active, lan_active, public_endpoint);
@@ -530,14 +540,14 @@ pub fn evaluate_connection_status(
 pub fn get_pairing_config(
     host_pk_hex: String,
     wireguard_pk_hex: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::PairingConfig, String> {
     state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
     core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> crate::state::AppSettings {
+pub fn get_settings(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::AppSettings {
     let s = state.settings.lock().unwrap();
     s.clone()
 }
@@ -556,7 +566,7 @@ pub fn save_settings(
     theme_mode: Option<String>,
     pathway_order: Option<Vec<String>>,
     wireguard_active: bool,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
     state.add_log("[Settings] Updating preferences".to_string());
     if enable_upnp {
@@ -593,7 +603,9 @@ pub struct ConnectionStatusFull {
 }
 
 #[tauri::command]
-pub fn get_connection_status_full(state: State<'_, AppState>) -> ConnectionStatusFull {
+pub fn get_connection_status_full(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> ConnectionStatusFull {
     ConnectionStatusFull {
         status: state.connection_status.lock().unwrap().clone(),
         method: state.connection_method.lock().unwrap().clone(),
@@ -606,7 +618,7 @@ pub fn set_connection_status_full(
     status: String,
     method: String,
     color: String,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) {
     let current_status = {
         let mut s = state.connection_status.lock().unwrap();
@@ -634,7 +646,7 @@ pub fn set_connection_status_full(
 pub fn grant_file_access(
     is_desktop: bool,
     granted: bool,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> crate::state::AppSettings {
     {
         let mut s = state.settings.lock().unwrap();
@@ -749,7 +761,7 @@ pub struct LocalFileItem {
 #[tauri::command]
 pub fn list_mock_files(
     is_phone: bool,
-    state: State<'_, AppState>,
+    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<LocalFileItem>, String> {
     let s = state.settings.lock().unwrap();
     if is_phone {
@@ -875,4 +887,322 @@ pub fn check_flatpak_permissions() -> Result<bool, String> {
             })
             .unwrap_or(false);
     Ok(pulse_exists)
+}
+
+pub fn read_clipboard_fallback() -> Result<String, String> {
+    // Try wl-paste
+    if let Ok(output) = std::process::Command::new("wl-paste").arg("-n").output() {
+        if output.status.success() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                if !text.is_empty() {
+                    return Ok(text);
+                }
+            }
+        }
+    }
+    // Try xclip
+    if let Ok(output) = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-o"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                if !text.is_empty() {
+                    return Ok(text);
+                }
+            }
+        }
+    }
+    // Try xsel
+    if let Ok(output) = std::process::Command::new("xsel")
+        .args(["-o", "-b"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                if !text.is_empty() {
+                    return Ok(text);
+                }
+            }
+        }
+    }
+    // Try copyq
+    read_copyq_clipboard()
+}
+
+pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
+    let mut last_err = None;
+
+    // Try wl-copy
+    match std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if let Ok(status) = child.wait() {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(e) => last_err = Some(e.to_string()),
+    }
+
+    // Try xclip
+    match std::process::Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if let Ok(status) = child.wait() {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(e) => last_err = Some(e.to_string()),
+    }
+
+    // Try xsel
+    match std::process::Command::new("xsel")
+        .args(["-i", "-b"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if let Ok(status) = child.wait() {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(e) => last_err = Some(e.to_string()),
+    }
+
+    // Try copyq
+    write_copyq_clipboard(text).map_err(|e| {
+        format!("All clipboard helper fallbacks (wl-copy, xclip, xsel) failed. CopyQ error: {e}. Last spawn error: {:?}", last_err)
+    })
+}
+
+pub fn read_real_clipboard_internal() -> Result<String, String> {
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => match clipboard.get_text() {
+            Ok(text) => Ok(text),
+            Err(_) => {
+                if let Ok(text) = read_copyq_clipboard() {
+                    return Ok(text);
+                }
+                read_clipboard_fallback()
+            }
+        },
+        Err(_) => {
+            if let Ok(text) = read_copyq_clipboard() {
+                return Ok(text);
+            }
+            read_clipboard_fallback()
+        }
+    }
+}
+
+pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build sync server tokio runtime");
+        rt.block_on(async move {
+        let listener = match TcpListener::bind("0.0.0.0:23520").await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind sync server: {e}");
+                return;
+            }
+        };
+
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let state_clone = state.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let mut n = 0;
+                while n < buf.len() {
+                    match socket.read(&mut buf[n..]).await {
+                        Ok(0) => break,
+                        Ok(bytes) => {
+                            n += bytes;
+                            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                let (response_status, response_body) = if req_str.contains("POST /api/pair") {
+                    let mut name = "Android Phone".to_string();
+                    if let Some(body_start) = req_str.find("\r\n\r\n") {
+                        let body = &req_str[body_start + 4..];
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                            if let Some(n_val) = json.get("name").and_then(|v| v.as_str()) {
+                                name = n_val.to_string();
+                            }
+                        }
+                    }
+
+                    {
+                        let mut s = state_clone.settings.lock().unwrap();
+                        s.is_paired = true;
+                        s.paired_device_name = Some(name.clone());
+                    }
+                    state_clone.save_settings();
+
+                    *state_clone.connection_status.lock().unwrap() = "ACTIVE".to_string();
+                    *state_clone.connection_method.lock().unwrap() = "Wi-Fi Direct P2P".to_string();
+                    *state_clone.connection_color.lock().unwrap() = "green".to_string();
+
+                    state_clone.add_log(format!("[Pairing] Successfully verified remote Android companion: {name}"));
+                    state_clone.add_log("[Connection State] Changed to ACTIVE".to_string());
+
+                    ("200 OK", r#"{"status":"paired"}"#.to_string())
+                } else if req_str.contains("POST /api/clipboard") {
+                    let mut text = String::new();
+                    if let Some(body_start) = req_str.find("\r\n\r\n") {
+                        let body = &req_str[body_start + 4..];
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                            if let Some(t_val) = json.get("text").and_then(|v| v.as_str()) {
+                                text = t_val.to_string();
+                            }
+                        }
+                    }
+
+                    if !text.is_empty() && !state_clone.dedup.is_suppressed(&text) {
+                        state_clone.dedup.record_text(&text);
+                        let _ = crate::portal::sync_clipboard_text(&text);
+                        state_clone.add_log(format!(
+                            "[Clipboard] Received from companion: \"{}\"",
+                            text.chars().take(30).collect::<String>()
+                        ));
+                    }
+
+                    ("200 OK", r#"{"status":"synced"}"#.to_string())
+                } else if req_str.contains("POST /api/media") {
+                    if let Some(body_start) = req_str.find("\r\n\r\n") {
+                        let body = &req_str[body_start + 4..];
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                            let title = json.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                            let artist = json.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                            let album_art = json.get("album_art").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                            let is_playing = json.get("is_playing").and_then(|v| v.as_bool()).unwrap_or_default();
+
+                            let mut actions = vec![];
+                            if let Some(act_arr) = json.get("actions").and_then(|v| v.as_array()) {
+                                for act_val in act_arr {
+                                    let act_title = act_val.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                    let act_index = act_val.get("index").and_then(|v| v.as_u64()).unwrap_or_default() as u32;
+                                    actions.push(crate::state::MediaAction {
+                                        title: act_title,
+                                        index: act_index,
+                                    });
+                                }
+                            }
+
+                            {
+                                let mut m = state_clone.media_state.lock().unwrap();
+                                m.title = title;
+                                m.artist = artist;
+                                m.album_art = album_art;
+                                m.is_playing = is_playing;
+                                m.actions = actions;
+                            }
+                        }
+                    }
+                    ("200 OK", r#"{"status":"synced"}"#.to_string())
+                } else if req_str.contains("POST /api/unpair") {
+                    {
+                        let mut s = state_clone.settings.lock().unwrap();
+                        s.is_paired = false;
+                        s.paired_device_name = None;
+                        s.paired_device_picture = None;
+                    }
+                    state_clone.save_settings();
+                    *state_clone.connection_status.lock().unwrap() = "DISCONNECTED".to_string();
+                    *state_clone.connection_method.lock().unwrap() = "None".to_string();
+                    *state_clone.connection_color.lock().unwrap() = "red".to_string();
+
+                    state_clone.add_log("[Pairing] Disconnected/Unpaired from Android Companion".to_string());
+
+                    ("200 OK", r#"{"status":"unpaired"}"#.to_string())
+                } else if req_str.contains("GET /api/poll") {
+                    let is_paired = state_clone.settings.lock().unwrap().is_paired;
+                    let connection_status = state_clone.connection_status.lock().unwrap().clone();
+                    let connection_method = state_clone.connection_method.lock().unwrap().clone();
+                    let connection_color = state_clone.connection_color.lock().unwrap().clone();
+                    let latest_clip = read_real_clipboard_internal().unwrap_or_default();
+
+                    let pending_act = {
+                        let mut act = state_clone.pending_media_action.lock().unwrap();
+                        let prev = *act;
+                        *act = None;
+                        prev
+                    };
+
+                    let resp = serde_json::json!({
+                        "is_paired": is_paired,
+                        "connection_status": connection_status,
+                        "connection_method": connection_method,
+                        "connection_color": connection_color,
+                        "latest_clip": latest_clip,
+                        "pending_media_action": pending_act
+                    });
+
+                    let resp_str = serde_json::to_string(&resp).unwrap_or_default();
+                    ("200 OK", resp_str)
+                } else {
+                    ("404 NOT FOUND", "{}".to_string())
+                };
+
+                let response = format!(
+                    "HTTP/1.1 {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_status, response_body.len(), response_body
+                );
+
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            });
+        }
+    });
+    });
+}
+
+#[tauri::command]
+pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
+    let mut act = state.pending_media_action.lock().unwrap();
+    *act = Some(action_index);
+    state.add_log(format!(
+        "[Media] Desktop triggered action index: {action_index}"
+    ));
+}
+
+#[tauri::command]
+pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
+    state.media_state.lock().unwrap().clone()
 }

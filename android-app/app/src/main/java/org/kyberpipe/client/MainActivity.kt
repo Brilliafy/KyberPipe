@@ -15,6 +15,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.EaseInOutQuart
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -30,6 +38,7 @@ import org.kyberpipe.client.components.*
 import org.kyberpipe.client.service.PipeService
 import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
+import org.kyberpipe.client.utils.sendPostRequestAsync
 import uniffi.core_crypto.*
 
 class MainActivity : ComponentActivity() {
@@ -374,6 +383,23 @@ fun MainScreen(
                             )
                         )
                         addLog("[Clipboard] Intercepted new primary clip: ${text.take(20)}...")
+
+                        if (settings.isPaired) {
+                            val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
+                                try {
+                                    JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
+                                } catch (e: Exception) {
+                                    "10.0.2.2"
+                                }
+                            } else {
+                                "10.0.2.2"
+                            }
+                            val jsonBody = JSONObject().put("text", text).toString()
+                            sendPostRequestAsync("http://10.0.2.2:23520/api/clipboard", jsonBody)
+                            if (hostIp != "10.0.2.2") {
+                                sendPostRequestAsync("http://$hostIp:23520/api/clipboard", jsonBody)
+                            }
+                        }
                     }
                 }
             }
@@ -457,9 +483,114 @@ fun MainScreen(
         }
     }
 
-    // Trigger check on toggles change
     LaunchedEffect(wifiDirectActive, lanActive, settings.isPaired) {
         evaluateConnection()
+    }
+
+    LaunchedEffect(settings.isPaired) {
+        while (true) {
+            delay(2500)
+            if (settings.isPaired) {
+                val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
+                    try {
+                        JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
+                    } catch (e: Exception) {
+                        "10.0.2.2"
+                    }
+                } else {
+                    "10.0.2.2"
+                }
+
+                val responseText = withContext(Dispatchers.IO) {
+                    try {
+                        val url = java.net.URL("http://10.0.2.2:23520/api/poll")
+                        val conn = url.openConnection() as java.net.HttpURLConnection
+                        conn.requestMethod = "GET"
+                        conn.connectTimeout = 1500
+                        conn.readTimeout = 1500
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        conn.disconnect()
+                        text
+                    } catch (e: Exception) {
+                        if (hostIp != "10.0.2.2") {
+                            try {
+                                val url2 = java.net.URL("http://$hostIp:23520/api/poll")
+                                val conn2 = url2.openConnection() as java.net.HttpURLConnection
+                                conn2.requestMethod = "GET"
+                                conn2.connectTimeout = 1500
+                                conn2.readTimeout = 1500
+                                val text2 = conn2.inputStream.bufferedReader().use { it.readText() }
+                                conn2.disconnect()
+                                text2
+                            } catch (e2: Exception) {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+                    }
+                }
+
+                if (responseText != null) {
+                    try {
+                        val json = JSONObject(responseText)
+                        val pcIsPaired = json.optBoolean("is_paired", true)
+                        if (!pcIsPaired) {
+                            settings.isPaired = false
+                            settings.pairedDeviceName = ""
+                            evaluateConnection()
+                        } else {
+                            val status = json.optString("connection_status", "ACTIVE")
+                            val method = json.optString("connection_method", "Wi-Fi Direct P2P")
+                            val colorStr = json.optString("connection_color", "green")
+                            
+                            connectionStatus = status
+                            connectionMethod = method
+                            connectionColor = when (colorStr) {
+                                "green" -> Color.Green
+                                "yellow" -> Color.Yellow
+                                else -> Color.Red
+                            }
+
+                            val latestClip = json.optString("latest_clip", "")
+                            if (latestClip.isNotEmpty()) {
+                                val exists = clipboardList.any { it.text == latestClip }
+                                if (!exists) {
+                                    clipboardList.add(
+                                        0,
+                                        AndroidClipboardRecord(
+                                            id = "clip_${System.currentTimeMillis()}",
+                                            text = latestClip,
+                                            source = "remote",
+                                            timestamp = System.currentTimeMillis()
+                                        )
+                                    )
+                                    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", latestClip))
+                                    addLog("[Clipboard] Received new clip from PC: ${latestClip.take(20)}...")
+                                }
+                            }
+
+                            if (json.has("pending_media_action") && !json.isNull("pending_media_action")) {
+                                val pendingActIndex = json.optInt("pending_media_action", -1)
+                                if (pendingActIndex != -1) {
+                                    org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(pendingActIndex)
+                                    addLog("[Media] Triggered media action index $pendingActIndex from PC")
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("KyberpipePoll", "Parse poll response error: ${e.message}")
+                    }
+                } else {
+                    if (connectionStatus != "DISCONNECTED (No paired device)") {
+                        connectionStatus = "DISCONNECTED (Attempt failed)"
+                        connectionMethod = "None"
+                        connectionColor = Color.Red
+                    }
+                }
+            }
+        }
     }
 
     // First Connection Modal (Dynamic profile nickname on connect)
@@ -543,142 +674,155 @@ fun MainScreen(
                 .padding(padding)
                 .fillMaxSize()
         ) {
-            when (currentTab) {
-                TabItem.HOME -> {
-                    OverviewTab(
-                        connectionStatus = connectionStatus,
-                        connectionMethod = connectionMethod,
-                        connectionColor = connectionColor,
-                        ambientLux = ambientLux,
-                        isPaired = settings.isPaired,
-                        settings = settings,
-                        clipboardItems = clipboardList,
-                        notificationsItems = notificationsList,
-                        onRetryConnection = {
-                            attemptCount = 0
-                            evaluateConnection()
-                        },
-                        onNavigateToFiles = { currentTab = TabItem.FILES },
-                        onNavigateToClipboard = { currentTab = TabItem.CLIPBOARD },
-                        onNavigateToNotifications = { currentTab = TabItem.NOTIFICATIONS },
-                        onNavigateToSettings = { currentTab = TabItem.SETTINGS },
-                        onPairMockDevice = { nodeName ->
-                            tempPcName = nodeName
-                            showFirstConnectModal = true
-                        },
-                        pairingConfigInput = pairingConfigInput,
-                        onPairingConfigChange = { newValue ->
-                            val clean = newValue.replace("-", "")
-                            val isDeleting = newValue.length < pairingConfigInput.length
-                            val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
-                                if (isDeleting && clean.length == 3) {
-                                    clean.take(2)
-                                } else if (clean.length >= 3) {
-                                    if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+            AnimatedContent(
+                targetState = currentTab,
+                transitionSpec = {
+                    (fadeIn(animationSpec = tween(250, easing = EaseInOutQuart)) + 
+                     scaleIn(initialScale = 0.96f, animationSpec = tween(250, easing = EaseInOutQuart)))
+                        .togetherWith(
+                            fadeOut(animationSpec = tween(150, easing = EaseInOutQuart)) + 
+                            scaleOut(targetScale = 0.96f, animationSpec = tween(150, easing = EaseInOutQuart))
+                        )
+                },
+                label = "TabTransition"
+            ) { targetTab ->
+                when (targetTab) {
+                    TabItem.HOME -> {
+                        OverviewTab(
+                            connectionStatus = connectionStatus,
+                            connectionMethod = connectionMethod,
+                            connectionColor = connectionColor,
+                            ambientLux = ambientLux,
+                            isPaired = settings.isPaired,
+                            settings = settings,
+                            clipboardItems = clipboardList,
+                            notificationsItems = notificationsList,
+                            onRetryConnection = {
+                                attemptCount = 0
+                                evaluateConnection()
+                            },
+                            onNavigateToFiles = { currentTab = TabItem.FILES },
+                            onNavigateToClipboard = { currentTab = TabItem.CLIPBOARD },
+                            onNavigateToNotifications = { currentTab = TabItem.NOTIFICATIONS },
+                            onNavigateToSettings = { currentTab = TabItem.SETTINGS },
+                            onPairMockDevice = { nodeName ->
+                                tempPcName = nodeName
+                                showFirstConnectModal = true
+                            },
+                            pairingConfigInput = pairingConfigInput,
+                            onPairingConfigChange = { newValue ->
+                                val clean = newValue.replace("-", "")
+                                val isDeleting = newValue.length < pairingConfigInput.length
+                                val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
+                                    if (isDeleting && clean.length == 3) {
+                                        clean.take(2)
+                                    } else if (clean.length >= 3) {
+                                        if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+                                    } else {
+                                        clean
+                                    }
                                 } else {
-                                    clean
+                                    newValue
                                 }
-                            } else {
-                                newValue
+                                pairingConfigInput = formatted
+                            },
+                            onTriggerHandshake = handlePairingHandshake
+                        )
+                    }
+                    TabItem.FILES -> {
+                        FileManagerTab(
+                            isConnected = connectionColor == Color.Green,
+                            settings = settings,
+                            onPermissionRequest = { PermissionHelper.requestStoragePermissions(activity) },
+                            onGrantLocalAccessToggle = { settings.fileAccessGrantedPhone = it },
+                            onFileAction = { item ->
                             }
-                            pairingConfigInput = formatted
-                        },
-                        onTriggerHandshake = handlePairingHandshake
-                    )
-                }
-                TabItem.FILES -> {
-                    FileManagerTab(
-                        isConnected = connectionColor == Color.Green,
-                        settings = settings,
-                        onPermissionRequest = { PermissionHelper.requestStoragePermissions(activity) },
-                        onGrantLocalAccessToggle = { settings.fileAccessGrantedPhone = it },
-                        onFileAction = { item ->
-                        }
-                    )
-                }
-                TabItem.CLIPBOARD -> {
-                    ClipboardTab(
-                        clipboardItems = clipboardList,
-                        isConnected = connectionColor == Color.Green,
-                        onAddClipboard = { text ->
-                            clipboardList.add(
-                                0,
-                                AndroidClipboardRecord(
-                                    id = "clip_${System.currentTimeMillis()}",
-                                    text = text,
-                                    source = "local",
-                                    timestamp = System.currentTimeMillis()
+                        )
+                    }
+                    TabItem.CLIPBOARD -> {
+                        ClipboardTab(
+                            clipboardItems = clipboardList,
+                            isConnected = connectionColor == Color.Green,
+                            onAddClipboard = { text ->
+                                clipboardList.add(
+                                    0,
+                                    AndroidClipboardRecord(
+                                        id = "clip_${System.currentTimeMillis()}",
+                                        text = text,
+                                        source = "local",
+                                        timestamp = System.currentTimeMillis()
+                                    )
                                 )
-                            )
-                        },
-                        onCopyClipboard = { text ->
-                            val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
-                            Toast.makeText(context, "Copied to phone clipboard", Toast.LENGTH_SHORT).show()
-                        },
-                        onDeleteClipboard = { id ->
-                            clipboardList.removeAll { it.id == id }
-                        },
-                        onConnectRequest = { currentTab = TabItem.SETTINGS }
-                    )
-                }
-                TabItem.NOTIFICATIONS -> {
-                    NotificationsTab(
-                        notifications = notificationsList,
-                        isConnected = connectionColor == Color.Green,
-                        onDismiss = { id ->
-                            val idx = notificationsList.indexOfFirst { it.id == id }
-                            if (idx != -1) {
-                                val item = notificationsList[idx]
-                                notificationsList[idx] = item.copy(isDismissed = true, updatedAt = System.currentTimeMillis())
-                                notifStore.saveNotifications(notificationsList)
-                                addLog("[Notification] Dismissed $id. Sync queued.")
-                            }
-                        },
-                        onConnectRequest = { currentTab = TabItem.SETTINGS }
-                    )
-                }
-                TabItem.SETTINGS -> {
-                    SettingsTab(
-                        settings = settings,
-                        keyPair = keyPair,
-                        pairingConfigInput = pairingConfigInput,
-                        onPairingConfigChange = { newValue ->
-                            val clean = newValue.replace("-", "")
-                            val isDeleting = newValue.length < pairingConfigInput.length
-                            val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
-                                if (isDeleting && clean.length == 3) {
-                                    clean.take(2)
-                                } else if (clean.length >= 3) {
-                                    if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
-                                } else {
-                                    clean
+                            },
+                            onCopyClipboard = { text ->
+                                val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
+                                Toast.makeText(context, "Copied to phone clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            onDeleteClipboard = { id ->
+                                clipboardList.removeAll { it.id == id }
+                            },
+                            onConnectRequest = { currentTab = TabItem.SETTINGS }
+                        )
+                    }
+                    TabItem.NOTIFICATIONS -> {
+                        NotificationsTab(
+                            notifications = notificationsList,
+                            isConnected = connectionColor == Color.Green,
+                            onDismiss = { id ->
+                                val idx = notificationsList.indexOfFirst { it.id == id }
+                                if (idx != -1) {
+                                    val item = notificationsList[idx]
+                                    notificationsList[idx] = item.copy(isDismissed = true, updatedAt = System.currentTimeMillis())
+                                    notifStore.saveNotifications(notificationsList)
+                                    addLog("[Notification] Dismissed $id. Sync queued.")
                                 }
-                            } else {
-                                newValue
+                            },
+                            onConnectRequest = { currentTab = TabItem.SETTINGS }
+                        )
+                    }
+                    TabItem.SETTINGS -> {
+                        SettingsTab(
+                            settings = settings,
+                            keyPair = keyPair,
+                            pairingConfigInput = pairingConfigInput,
+                            onPairingConfigChange = { newValue ->
+                                val clean = newValue.replace("-", "")
+                                val isDeleting = newValue.length < pairingConfigInput.length
+                                val formatted = if (clean.matches(Regex("\\d*")) && clean.length <= 6) {
+                                    if (isDeleting && clean.length == 3) {
+                                        clean.take(2)
+                                    } else if (clean.length >= 3) {
+                                        if (clean.length == 3) "$clean-" else "${clean.take(3)}-${clean.drop(3)}"
+                                    } else {
+                                        clean
+                                    }
+                                } else {
+                                    newValue
+                                }
+                                pairingConfigInput = formatted
+                            },
+                            onTriggerHandshake = handlePairingHandshake,
+                            onAvatarPickerClick = onAvatarPickerClick,
+                            onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
+                            localLogs = localLogs,
+                            onCopyStacktrace = onCopyStacktrace,
+                            onExportDiagnosticLogs = onExportDiagnosticLogs,
+                            onExportCrashLog = onExportCrashLog,
+                            hasCrashLog = hasCrashLog,
+                            onPanicTriggered = {
+                                try {
+                                    triggerPanicHardwareWipe()
+                                    settings.isPaired = false
+                                    connectionStatus = "SELF_DESTRUCTED"
+                                    connectionColor = Color.Red
+                                    Toast.makeText(context, "Keys zeroized!", Toast.LENGTH_LONG).show()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
                             }
-                            pairingConfigInput = formatted
-                        },
-                        onTriggerHandshake = handlePairingHandshake,
-                        onAvatarPickerClick = onAvatarPickerClick,
-                        onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
-                        localLogs = localLogs,
-                        onCopyStacktrace = onCopyStacktrace,
-                        onExportDiagnosticLogs = onExportDiagnosticLogs,
-                        onExportCrashLog = onExportCrashLog,
-                        hasCrashLog = hasCrashLog,
-                        onPanicTriggered = {
-                            try {
-                                triggerPanicHardwareWipe()
-                                settings.isPaired = false
-                                connectionStatus = "SELF_DESTRUCTED"
-                                connectionColor = Color.Red
-                                Toast.makeText(context, "Keys zeroized!", Toast.LENGTH_LONG).show()
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
-                        }
-                    )
+                        )
+                    }
                 }
             }
         }
@@ -706,8 +850,24 @@ fun MainScreen(
                 confirmButton = {
                     Button(
                         onClick = {
+                            val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
+                                try {
+                                    JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
+                                } catch (e: Exception) {
+                                    "10.0.2.2"
+                                }
+                            } else {
+                                "10.0.2.2"
+                            }
+                            val jsonBody = JSONObject().put("name", settings.deviceName).toString()
+                            sendPostRequestAsync("http://10.0.2.2:23520/api/pair", jsonBody)
+                            if (hostIp != "10.0.2.2") {
+                                sendPostRequestAsync("http://$hostIp:23520/api/pair", jsonBody)
+                            }
+
                             settings.pairedDeviceName = tempPcName
                             settings.isPaired = true
+                            settings.pairedHostIp = hostIp
                             showFirstConnectModal = false
                             evaluateConnection()
                         }

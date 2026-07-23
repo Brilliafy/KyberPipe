@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Warning
 import org.kyberpipe.client.utils.SettingsManager
+import org.kyberpipe.client.utils.sendPostRequestAsync
 import uniffi.core_crypto.PqKeyPair
 import java.io.ByteArrayOutputStream
 
@@ -372,39 +373,110 @@ fun SettingsTab(
         }
 
         // Connection Handshake config pasting card
-        Card(
-            colors = CardDefaults.cardColors(containerColor = colors.surface),
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Establish Pairing Link",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.primary
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = pairingConfigInput,
-                    onValueChange = onPairingConfigChange,
-                    label = { Text("Paste PC Pairing Config JSON or Enter Code", fontSize = 11.sp) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = colors.onSurface,
-                        unfocusedTextColor = colors.onSurface,
-                        focusedBorderColor = colors.primary,
-                        unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                    maxLines = 4
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = onTriggerHandshake,
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Complete PQC Handshake & Connect")
+        if (settings.isPaired) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Paired PC Connection",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Device Name: ${settings.pairedDeviceName ?: "Linux Desktop Node"}",
+                        fontSize = 13.sp,
+                        color = colors.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Trust Status: Cryptographically Pinned",
+                        fontSize = 12.sp,
+                        color = colors.onSurface.copy(alpha = 0.6f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    var showUnpairConfirm by remember { mutableStateOf(false) }
+
+                    if (showUnpairConfirm) {
+                        Text(
+                            text = "Are you sure you want to delete this connection? Symmetric keys and data channels will be purged.",
+                            color = Color.Red,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
+                                        try {
+                                            org.json.JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
+                                        } catch (e: Exception) {
+                                            "10.0.2.2"
+                                        }
+                                    } else {
+                                        "10.0.2.2"
+                                    }
+                                    sendPostRequestAsync("http://10.0.2.2:23520/api/unpair", "{}")
+                                    if (hostIp != "10.0.2.2") {
+                                        sendPostRequestAsync("http://$hostIp:23520/api/unpair", "{}")
+                                    }
+
+                                    settings.isPaired = false
+                                    settings.pairedDeviceName = ""
+                                    onPairingConfigChange("")
+                                    showUnpairConfirm = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Delete Connection", color = Color.White)
+                            }
+                            OutlinedButton(
+                                onClick = { showUnpairConfirm = false },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                    } else {
+                        Button(
+                            onClick = { showUnpairConfirm = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = colors.error),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Delete Connection & Unpair", color = colors.onError)
+                        }
+                    }
+                }
+            }
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colors.surface),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Establish Pairing Link",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    PairingInputSection(
+                        pairingConfigInput = pairingConfigInput,
+                        onPairingConfigChange = onPairingConfigChange,
+                        onTriggerHandshake = onTriggerHandshake
+                    )
                 }
             }
         }
