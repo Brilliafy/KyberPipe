@@ -2,7 +2,10 @@ package org.kyberpipe.client.components
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -34,8 +37,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import org.kyberpipe.client.QrNative
 import java.util.concurrent.Executors
 
@@ -67,6 +68,9 @@ fun QrCodeScannerView(
         }
     }
 
+    var triggerScan by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -76,74 +80,91 @@ fun QrCodeScannerView(
         contentAlignment = Alignment.Center
     ) {
         if (hasCameraPermission) {
-            var scanReq by remember { mutableStateOf(false) }
-            CameraPreview(onQrScanned = onQrScanned, scanRequested = scanReq, onScanComplete = { scanReq = false })
-            
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val squareSize = 160.dp.toPx()
-                val left = (size.width - squareSize) / 2
-                val top = (size.height - squareSize) / 2
+            CameraPreview(
+                onQrScanned = onQrScanned,
+                scanRequested = triggerScan,
+                onScanComplete = { triggerScan = false },
+                onLoading = { isLoading = it }
+            )
 
-                drawRect(color = Color.Black.copy(alpha = 0.5f))
-
-                drawRoundRect(
-                    color = Color.Transparent,
-                    topLeft = Offset(left, top),
-                    size = Size(squareSize, squareSize),
-                    cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx()),
-                    blendMode = BlendMode.Clear
-                )
-
-                drawRoundRect(
-                    color = Color.Green,
-                    topLeft = Offset(left, top),
-                    size = Size(squareSize, squareSize),
-                    cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx()),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp),
-                contentAlignment = Alignment.TopEnd
-            ) {
-                Button(
-                    onClick = onClose,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black.copy(alpha = 0.6f)),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.height(32.dp)
+            if (isLoading) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    Text("Close", color = Color.White, fontSize = 11.sp)
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Processing...", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
-            }
+            } else {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val squareSize = 160.dp.toPx()
+                    val left = (size.width - squareSize) / 2
+                    val top = (size.height - squareSize) / 2
 
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 12.dp),
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "Tap screen for high-res capture",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    drawRect(color = Color.Black.copy(alpha = 0.5f))
+
+                    drawRoundRect(
+                        color = Color.Transparent,
+                        topLeft = Offset(left, top),
+                        size = Size(squareSize, squareSize),
+                        cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx()),
+                        blendMode = BlendMode.Clear
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+
+                    drawRoundRect(
+                        color = Color.Green,
+                        topLeft = Offset(left, top),
+                        size = Size(squareSize, squareSize),
+                        cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx()),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    contentAlignment = Alignment.TopEnd
+                ) {
                     Button(
-                        onClick = { scanReq = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.9f)),
-                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
-                        modifier = Modifier.height(36.dp)
+                        onClick = onClose,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Black.copy(alpha = 0.6f)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
                     ) {
-                        Text("Tap to Scan", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Close", color = Color.White, fontSize = 11.sp)
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = 12.dp),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "Place QR code in the frame",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(
+                            onClick = { triggerScan = true },
+                            enabled = !isLoading,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.9f)),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Tap to Scan", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -172,7 +193,8 @@ fun QrCodeScannerView(
 fun CameraPreview(
     onQrScanned: (String) -> Unit,
     scanRequested: Boolean,
-    onScanComplete: () -> Unit
+    onScanComplete: () -> Unit,
+    onLoading: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -181,7 +203,8 @@ fun CameraPreview(
 
     LaunchedEffect(scanRequested) {
         if (!scanRequested) return@LaunchedEffect
-        Log.d("QrCodeScanner", "capturing photo for rqrr decode...")
+        onLoading(true)
+        Log.d("QrCodeScanner", "capturing photo...")
         val exec = Executors.newSingleThreadExecutor()
         imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
@@ -194,11 +217,14 @@ fun CameraPreview(
                             val buf = img.planes[0].buffer
                             val jpeg = ByteArray(buf.remaining())
                             buf.get(jpeg)
-                            val opts = BitmapFactory.Options().apply { inSampleSize = 2; inMutable = true }
-                            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)!!
+                            val rawBmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)!!
+                            val sf = 4
+                            val bmp = Bitmap.createScaledBitmap(rawBmp, rawBmp.width / sf, rawBmp.height / sf, true)
+                            rawBmp.recycle()
                             val bw = bmp.width; val bh = bmp.height
                             val px = IntArray(bw * bh)
                             bmp.getPixels(px, 0, bw, 0, 0, bw, bh)
+                            bmp.recycle()
                             val g = ByteArray(bw * bh)
                             for (i in px.indices) {
                                 val p = px[i]
@@ -222,17 +248,22 @@ fun CameraPreview(
                             onQrScanned(resultText)
                         } else {
                             Log.e("QrCodeScanner", "rqrr null - no QR found")
+                            Toast.makeText(context, "No QR code found", Toast.LENGTH_SHORT).show()
                         }
                     } catch (e: Exception) {
                         Log.e("QrCodeScanner", "rqrr error: ${e.message}")
+                        Toast.makeText(context, "Scan error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
                 proxy.close()
+                onLoading(false)
                 onScanComplete()
                 exec.shutdown()
             }
             override fun onError(e: ImageCaptureException) {
                 Log.e("QrCodeScanner", "photo capture error", e)
+                Toast.makeText(context, "Camera error: ${e.message}", Toast.LENGTH_SHORT).show()
+                onLoading(false)
                 onScanComplete()
                 exec.shutdown()
             }
