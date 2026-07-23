@@ -37,6 +37,7 @@ import androidx.core.content.ContextCompat
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
+import com.google.zxing.LuminanceSource
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -198,17 +199,18 @@ fun CameraPreview(
                     val yRaw = ByteArray(yBuf.remaining())
                     yBuf.get(yRaw)
                     try {
-                        // Y plane data is in sensor orientation. Proxy dims may be rotated.
-                        val rotation = proxy.imageInfo.rotationDegrees
-                        val dataH: Int
-                        val cropW: Int
-                        val cropH: Int
-                        if (rotation == 90 || rotation == 270) {
-                            dataH = w; cropW = h; cropH = w
-                        } else {
-                            dataH = h; cropW = w; cropH = h
+                        // Y plane is unrotated sensor data. Never swap dimensions.
+                        var source: LuminanceSource = PlanarYUVLuminanceSource(
+                            yRaw, yStride, h, 0, 0, w, h, false
+                        )
+                        // Rotate source to match display orientation
+                        val rot = proxy.imageInfo.rotationDegrees
+                        source = when (rot) {
+                            90 -> source.rotateCounterClockwise().rotateCounterClockwise().rotateCounterClockwise()
+                            180 -> source.rotateCounterClockwise().rotateCounterClockwise()
+                            270 -> source.rotateCounterClockwise()
+                            else -> source
                         }
-                        val source = PlanarYUVLuminanceSource(yRaw, yStride, dataH, 0, 0, cropW, cropH, false)
                         val hints = mapOf(
                             DecodeHintType.TRY_HARDER to true,
                             DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
