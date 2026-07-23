@@ -621,6 +621,15 @@ fun MainScreen(
                     val rawConfig = conn.inputStream.bufferedReader().readText()
                     conn.disconnect()
                     val json = JSONObject(rawConfig)
+                    // Verify nonce commitment against QR (MITM protection)
+                    if (inputJson.has("n")) {
+                        val expectedNoncePrefix = inputJson.getString("n")
+                        val actualNonce = json.optString("pairing_nonce_hex", "")
+                        if (!actualNonce.startsWith(expectedNoncePrefix)) {
+                            throw SecurityException("Nonce mismatch — MITM detected. Config fetch tampered.")
+                        }
+                        addLog("[Pairing] Nonce verified (${expectedNoncePrefix}...)")
+                    }
                     val hostPkHex = json.getString("host_identity_pk_hex")
                     val wireguardPkHex = json.getString("wireguard_pk_hex")
                     val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)

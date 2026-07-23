@@ -1259,10 +1259,16 @@ pub fn store_pairing_config(
                 .to_string(),
         );
     }
+    let nonce_prefix = parsed
+        .as_ref()
+        .and_then(|v| v.get("pairing_nonce_hex").and_then(|n| n.as_str()))
+        .map(|n| n.chars().take(8).collect::<String>())
+        .unwrap_or_default();
     let mut info = serde_json::json!({
         "t": transports,
         "h": host_ip,
         "p": 23520,
+        "n": nonce_prefix,
         "e": pub_endpoint
     });
     if let Some(ref mac) = wifi_mac {
