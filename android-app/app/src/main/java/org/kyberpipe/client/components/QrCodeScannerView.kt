@@ -34,14 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.NotFoundException
-import com.google.zxing.PlanarYUVLuminanceSource
-import com.google.zxing.common.GlobalHistogramBinarizer
-import com.google.zxing.common.HybridBinarizer
+import org.kyberpipe.client.QrNative
 import java.util.concurrent.Executors
 
 @Composable
@@ -186,7 +179,7 @@ fun CameraPreview(
 
     LaunchedEffect(scanRequested) {
         if (!scanRequested) return@LaunchedEffect
-        Log.d("QrCodeScanner", "capturing photo for ZXing decode...")
+        Log.d("QrCodeScanner", "capturing photo for zxing-cpp decode...")
         val exec = Executors.newSingleThreadExecutor()
         imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
@@ -204,49 +197,13 @@ fun CameraPreview(
 
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
-                        val rot = proxy.imageInfo.rotationDegrees
-                        val scale = 2
-                        val (rotated, rw, rh) = if (rot == 90) {
-                            val outW = h / scale; val outH = w / scale
-                            val r = ByteArray(outW * outH); var i = 0
-                            for (x in 0 until w step scale)
-                                for (y in h - 1 downTo 0 step scale)
-                                    r[i++] = yRaw[y * stride + x]
-                            Triple(r, outW, outH)
-                        } else if (rot == 270) {
-                            val outW = h / scale; val outH = w / scale
-                            val r = ByteArray(outW * outH); var i = 0
-                            for (x in w - 1 downTo 0 step scale)
-                                for (y in 0 until h step scale)
-                                    r[i++] = yRaw[y * stride + x]
-                            Triple(r, outW, outH)
-                        } else {
-                            val outW = w / scale; val outH = h / scale
-                            val r = ByteArray(outW * outH); var i = 0
-                            for (y in 0 until h step scale)
-                                for (x in 0 until w step scale)
-                                    r[i++] = yRaw[y * stride + x]
-                            Triple(r, outW, outH)
-                        }
-
-                        val source = PlanarYUVLuminanceSource(rotated, rw, rh, 0, 0, rw, rh, false)
-                        val hints = mapOf(
-                            DecodeHintType.TRY_HARDER to true,
-                            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
-                        )
-                        val reader = MultiFormatReader().apply { setHints(hints) }
-                        val result = try {
-                            reader.decode(BinaryBitmap(HybridBinarizer(source)))
-                        } catch (_: NotFoundException) {
-                            reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)))
-                        }
-                        val text = result.text
-                        if (text != null && text.isNotEmpty()) {
-                            Log.w("QrCodeScanner", "ZXing DECODED ${text.length} chars")
-                            onQrScanned(text)
+                        val resultText = QrNative.decodeQrCode(yRaw, w, h, stride, proxy.imageInfo.rotationDegrees)
+                        if (resultText != null && resultText.isNotEmpty()) {
+                            Log.w("QrCodeScanner", "zxing-cpp DECODED ${resultText.length} chars")
+                            onQrScanned(resultText)
                         }
                     } catch (e: Exception) {
-                        Log.e("QrCodeScanner", "ZXing ${e::class.simpleName}: ${e.message}")
+                        Log.e("QrCodeScanner", "zxing-cpp error: ${e.message}")
                     }
                 }
                 proxy.close()

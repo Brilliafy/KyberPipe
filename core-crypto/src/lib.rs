@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod error;
 pub mod network;
 pub mod packets;
+pub mod qr_scanner;
 pub mod telemetry;
 
 use error::KyberError;

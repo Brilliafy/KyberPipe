@@ -43,5 +43,9 @@ thiserror = "2.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tracing = "0.1"
 rand = "0.8"
+# Pure-Rust QR/barcode decoding (ZXing port, no C++ compilation needed)
+rxing = "0.8"
+# JNI bindings for Android (manual JNI, not UniFFI, for the QR scanner function)
+jni = "0.21"
 # Cross-platform library layout helper to bridge Rust into Android Kotlin
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
