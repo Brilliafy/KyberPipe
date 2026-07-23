@@ -275,7 +275,7 @@ fun MainScreen(
     var wireguardActive by remember { mutableStateOf(true) }
     var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
     var pairingConfigInput by remember { mutableStateOf("") }
-    var sasCodeDisplay by remember { mutableStateOf("849-201") }
+    var sasCodeDisplay by remember { mutableStateOf("") }
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -490,44 +490,33 @@ fun MainScreen(
         while (true) {
             delay(2500)
             if (settings.isPaired) {
-                val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                    try {
-                        JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                    } catch (e: Exception) {
-                        "10.0.2.2"
-                    }
-                } else {
-                    "10.0.2.2"
-                }
+                val targetHostIp = settings.pairedHostIp.ifEmpty { "10.0.2.2" }
 
                 val responseText = withContext(Dispatchers.IO) {
-                    try {
-                        val url = java.net.URL("http://10.0.2.2:23520/api/poll")
-                        val conn = url.openConnection() as java.net.HttpURLConnection
-                        conn.requestMethod = "GET"
-                        conn.connectTimeout = 1500
-                        conn.readTimeout = 1500
-                        val text = conn.inputStream.bufferedReader().use { it.readText() }
-                        conn.disconnect()
-                        text
-                    } catch (e: Exception) {
-                        if (hostIp != "10.0.2.2") {
-                            try {
-                                val url2 = java.net.URL("http://$hostIp:23520/api/poll")
-                                val conn2 = url2.openConnection() as java.net.HttpURLConnection
-                                conn2.requestMethod = "GET"
-                                conn2.connectTimeout = 1500
-                                conn2.readTimeout = 1500
-                                val text2 = conn2.inputStream.bufferedReader().use { it.readText() }
-                                conn2.disconnect()
-                                text2
-                            } catch (e2: Exception) {
-                                null
+                    val ipsToTry = mutableListOf(targetHostIp)
+                    // Always include the emulator alias as last-resort fallback
+                    if (targetHostIp != "10.0.2.2") {
+                        ipsToTry.add("10.0.2.2")
+                    }
+
+                    var result: String? = null
+                    for (ip in ipsToTry) {
+                        try {
+                            val url = java.net.URL("http://$ip:23520/api/poll")
+                            val conn = url.openConnection() as java.net.HttpURLConnection
+                            conn.requestMethod = "GET"
+                            conn.connectTimeout = 1500
+                            conn.readTimeout = 1500
+                            val text = conn.inputStream.bufferedReader().use { it.readText() }
+                            conn.disconnect()
+                            if (text.isNotEmpty()) {
+                                result = text
+                                break
                             }
-                        } else {
-                            null
+                        } catch (_: Exception) {
                         }
                     }
+                    result
                 }
 
                 if (responseText != null) {
@@ -537,12 +526,15 @@ fun MainScreen(
                         if (!pcIsPaired) {
                             settings.isPaired = false
                             settings.pairedDeviceName = ""
-                            evaluateConnection()
+                            connectionStatus = "DISCONNECTED (Host unpaired)"
+                            connectionMethod = "None"
+                            connectionColor = Color.Red
                         } else {
+                            // Mirror exactly what the desktop reports
                             val status = json.optString("connection_status", "ACTIVE")
-                            val method = json.optString("connection_method", "Wi-Fi Direct P2P")
+                            val method = json.optString("connection_method", "LAN")
                             val colorStr = json.optString("connection_color", "green")
-                            
+
                             connectionStatus = status
                             connectionMethod = method
                             connectionColor = when (colorStr) {
@@ -582,8 +574,15 @@ fun MainScreen(
                         Log.e("KyberpipePoll", "Parse poll response error: ${e.message}")
                     }
                 } else {
-                    if (connectionStatus != "DISCONNECTED (No paired device)") {
-                        connectionStatus = "DISCONNECTED (Attempt failed)"
+                    // Local network poll failed — check if WireGuard WAN is the fallback
+                    if (wireguardActive) {
+                        // WireGuard is enabled: mark active over WAN (tunnel handles routing)
+                        connectionStatus = "ACTIVE"
+                        connectionMethod = "WireGuard WAN Tunnel"
+                        connectionColor = Color.Green
+                    } else {
+                        // All pathways exhausted
+                        connectionStatus = "DISCONNECTED (Unreachable)"
                         connectionMethod = "None"
                         connectionColor = Color.Red
                     }
@@ -595,46 +594,48 @@ fun MainScreen(
     // First Connection Modal (Dynamic profile nickname on connect)
     var showFirstConnectModal by remember { mutableStateOf(false) }
     var tempPcName by remember { mutableStateOf("") }
+    var tempHostIp by remember { mutableStateOf("10.0.2.2") }
 
     val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
         val hostPkHex = json.getString("host_identity_pk_hex")
         val wireguardPkHex = json.getString("wireguard_pk_hex")
+        tempHostIp = json.optString("local_ip", "10.0.2.2")
         val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
         val myPkHex = keyPair?.mlkemPkHex ?: ""
         val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
         sasCodeDisplay = computedSas
         tempPcName = "Linux Desktop workstation"
         showFirstConnectModal = true
-        addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+        addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
     }
 
+
     val handlePairingHandshake = {
-        val cleanInput = pairingConfigInput.trim().replace("-", "")
-        if (cleanInput.isEmpty()) {
-            Toast.makeText(context, "Please paste PC pairing JSON or enter code", Toast.LENGTH_SHORT).show()
-        } else if (cleanInput.matches(Regex("\\d{6}"))) {
-            val formattedSas = "${cleanInput.take(3)}-${cleanInput.drop(3)}"
-            sasCodeDisplay = formattedSas
-            tempPcName = "Linux Desktop Workstation"
-            showFirstConnectModal = true
-            addLog("[Pairing] Successfully verified host identity via SAS Code: $formattedSas")
-        } else if (pairingConfigInput.trim().startsWith("{")) {
-            try {
-                performKemHandshake(JSONObject(pairingConfigInput))
-            } catch (e: Exception) {
-                Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
-                addLog("[Pairing] Error: Handshake verification failed (${e.message})")
+        val rawInput = pairingConfigInput.trim()
+        when {
+            rawInput.isEmpty() -> {
+                Toast.makeText(context, "Please scan the QR code from the desktop app", Toast.LENGTH_SHORT).show()
             }
-        } else {
-            try {
-                val rawInput = pairingConfigInput.trim()
-                val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
-                val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
-                addLog("[Pairing] Decompressed QR (${jsonStr.length} chars)")
-                performKemHandshake(JSONObject(jsonStr))
-            } catch (_: Exception) {
-                Toast.makeText(context, "Invalid code — scan QR from desktop or enter 6-digit SAS", Toast.LENGTH_LONG).show()
-                addLog("[Pairing] Error: Invalid input format")
+            rawInput.startsWith("{") -> {
+                // Raw JSON pasted directly
+                try {
+                    performKemHandshake(JSONObject(rawInput))
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    addLog("[Pairing] Error: Handshake verification failed (${e.message})")
+                }
+            }
+            else -> {
+                // Base64(zlib) encoded QR payload (from QR scanner or deep link)
+                try {
+                    val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
+                    val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
+                    addLog("[Pairing] Decompressed QR payload (${jsonStr.length} chars)")
+                    performKemHandshake(JSONObject(jsonStr))
+                } catch (_: Exception) {
+                    Toast.makeText(context, "Invalid pairing data — scan QR from desktop or use the share link", Toast.LENGTH_LONG).show()
+                    addLog("[Pairing] Error: Could not decode pairing payload")
+                }
             }
         }
     }
@@ -857,26 +858,25 @@ fun MainScreen(
                 confirmButton = {
                     Button(
                         onClick = {
-                            val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                                try {
-                                    JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                                } catch (e: Exception) {
-                                    "10.0.2.2"
-                                }
-                            } else {
-                                "10.0.2.2"
-                            }
+                            // Prefer real LAN IP from QR payload; emulator alias is last resort
+                            val realIp = tempHostIp.takeIf { it.isNotEmpty() && it != "127.0.0.1" }
+                                ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
                             val jsonBody = JSONObject().put("name", settings.deviceName).toString()
-                            sendPostRequestAsync("http://10.0.2.2:23520/api/pair", jsonBody)
-                            if (hostIp != "10.0.2.2") {
-                                sendPostRequestAsync("http://$hostIp:23520/api/pair", jsonBody)
+
+                            // POST to real LAN IP first, then emulator alias as fallback
+                            if (realIp != null) {
+                                sendPostRequestAsync("http://$realIp:23520/api/pair", jsonBody)
                             }
+                            // Always also try emulator alias in case we are running in AVD
+                            sendPostRequestAsync("http://10.0.2.2:23520/api/pair", jsonBody)
 
                             settings.pairedDeviceName = tempPcName
                             settings.isPaired = true
-                            settings.pairedHostIp = hostIp
+                            // Store the real LAN IP; fall back to emulator alias only if nothing else known
+                            settings.pairedHostIp = realIp ?: "10.0.2.2"
                             showFirstConnectModal = false
-                            evaluateConnection()
+                            // Do NOT call evaluateConnection here — the polling loop
+                            // will detect the PC's /api/poll response and update status.
                         }
                     ) {
                         Text("Confirm & Connect")

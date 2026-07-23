@@ -1042,15 +1042,27 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
 
             let state_clone = state.clone();
             tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; 8192];
                 let mut n = 0;
                 while n < buf.len() {
                     match socket.read(&mut buf[n..]).await {
                         Ok(0) => break,
                         Ok(bytes) => {
                             n += bytes;
-                            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                                break;
+                            let req_header_str = String::from_utf8_lossy(&buf[..n]);
+                            if let Some(pos) = req_header_str.find("\r\n\r\n") {
+                                let body_len = n - (pos + 4);
+                                let mut content_length = 0;
+                                for line in req_header_str[..pos].lines() {
+                                    if line.to_lowercase().starts_with("content-length:") {
+                                        if let Ok(cl) = line["content-length:".len()..].trim().parse::<usize>() {
+                                            content_length = cl;
+                                        }
+                                    }
+                                }
+                                if body_len >= content_length {
+                                    break;
+                                }
                             }
                         }
                         Err(_) => return,
@@ -1186,8 +1198,9 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                 );
 
                 let _ = socket.write_all(response.as_bytes()).await;
-
                 let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+
             });
         }
     });
