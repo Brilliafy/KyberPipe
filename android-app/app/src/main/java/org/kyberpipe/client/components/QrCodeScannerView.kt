@@ -34,7 +34,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -190,19 +192,20 @@ fun CameraPreview(
                 if (img != null) {
                     val w = proxy.width; val h = proxy.height
                     Log.w("QrCodeScanner", "photo: ${w}x${h}")
-                    // Extract tightly-packed Y plane directly
                     val yPlane = img.planes[0]
                     val yBuf = yPlane.buffer
                     val yStride = yPlane.rowStride
-                    val yTight = ByteArray(w * h)
-                    for (row in 0 until h) {
-                        yBuf.position(row * yStride)
-                        yBuf.get(yTight, row * w, w)
-                    }
-                    // Decode with ZXing from luminance source directly
+                    val yRaw = ByteArray(yBuf.remaining())
+                    yBuf.get(yRaw)
                     try {
-                        val source = PlanarYUVLuminanceSource(yTight, w, h, 0, 0, w, h, false)
-                        val result = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
+                        val source = PlanarYUVLuminanceSource(yRaw, yStride, h, 0, 0, w, h, false)
+                        val hints = mapOf(
+                            DecodeHintType.TRY_HARDER to true,
+                            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
+                        )
+                        val result = MultiFormatReader().apply { setHints(hints) }.decode(
+                            BinaryBitmap(HybridBinarizer(source))
+                        )
                         val text = result.text
                         if (text != null && text.isNotEmpty()) {
                             Log.w("QrCodeScanner", "ZXing DECODED ${text.length} chars")
