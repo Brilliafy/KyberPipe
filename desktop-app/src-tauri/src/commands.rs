@@ -1220,10 +1220,28 @@ pub fn store_pairing_config(
     config_json: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
+    let host_ip = serde_json::from_str::<serde_json::Value>(&config_json)
+        .ok()
+        .and_then(|v| {
+            v.get("local_ip")
+                .and_then(|ip| ip.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let wifi_mac = serde_json::from_str::<serde_json::Value>(&config_json)
+        .ok()
+        .and_then(|v| {
+            v.get("wifi_direct_mac")
+                .and_then(|m| m.as_str().map(|s| s.to_string()))
+        });
     *state.pairing_config.lock().unwrap() = Some(config_json);
-    let info = serde_json::json!({
-        "h": "192.168.1.150",
+    let mut info = serde_json::json!({
+        "h": host_ip,
         "p": 23520
     });
+    if let Some(ref mac) = wifi_mac {
+        info.as_object_mut()
+            .unwrap()
+            .insert("m".to_string(), serde_json::Value::String(mac.clone()));
+    }
     Ok(serde_json::to_string(&info).unwrap_or_default())
 }
