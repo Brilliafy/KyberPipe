@@ -2,11 +2,6 @@ package org.kyberpipe.client.components
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,9 +36,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.MultiFormatReader
-import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
@@ -194,19 +188,20 @@ fun CameraPreview(
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
                 val img = proxy.image
                 if (img != null) {
-                    Log.w("QrCodeScanner", "photo: ${proxy.width}x${proxy.height}")
-                    // Convert YUV_420_888 to NV21 Bitmap for ZXing
-                    val nv21 = yuv420toNv21(img, proxy.width, proxy.height)
-                    val yuv = YuvImage(nv21, ImageFormat.NV21, proxy.width, proxy.height, null)
-                    val jpeg = ByteArrayOutputStream()
-                    yuv.compressToJpeg(Rect(0, 0, proxy.width, proxy.height), 100, jpeg)
-                    val bitmap = BitmapFactory.decodeByteArray(jpeg.toByteArray(), 0, jpeg.size())
-                    jpeg.close()
+                    val w = proxy.width; val h = proxy.height
+                    Log.w("QrCodeScanner", "photo: ${w}x${h}")
+                    // Extract tightly-packed Y plane directly
+                    val yPlane = img.planes[0]
+                    val yBuf = yPlane.buffer
+                    val yStride = yPlane.rowStride
+                    val yTight = ByteArray(w * h)
+                    for (row in 0 until h) {
+                        yBuf.position(row * yStride)
+                        yBuf.get(yTight, row * w, w)
+                    }
+                    // Decode with ZXing from luminance source directly
                     try {
-                        val w = bitmap.width; val h = bitmap.height
-                        val pixels = IntArray(w * h)
-                        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-                        val source = RGBLuminanceSource(w, h, pixels)
+                        val source = PlanarYUVLuminanceSource(yTight, w, h, 0, 0, w, h, false)
                         val result = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
                         val text = result.text
                         if (text != null && text.isNotEmpty()) {
@@ -214,7 +209,7 @@ fun CameraPreview(
                             onQrScanned(text)
                         }
                     } catch (e: Exception) {
-                        Log.e("QrCodeScanner", "ZXing fail: ${e.message}")
+                        Log.e("QrCodeScanner", "ZXing ${e::class.simpleName}: ${e.message}")
                     }
                 }
                 proxy.close()
@@ -261,39 +256,4 @@ fun CameraPreview(
         factory = { previewView },
         modifier = Modifier.fillMaxSize()
     )
-}
-
-private fun yuv420toNv21(image: android.media.Image, width: Int, height: Int): ByteArray {
-    val planes = image.planes
-    val yPlane = planes[0]
-    val yBuf = yPlane.buffer
-    val yStride = yPlane.rowStride
-    // Tightly pack Y plane
-    val yTight = ByteArray(width * height)
-    for (row in 0 until height) {
-        yBuf.position(row * yStride)
-        yBuf.get(yTight, row * width, width)
-    }
-    if (planes.size <= 1) return yTight
-
-    // For multi-plane, build NV21 with interleaved VU
-    val uvCount = (width * height) / 4
-    val nv21 = ByteArray(yTight.size + uvCount * 2)
-    System.arraycopy(yTight, 0, nv21, 0, yTight.size)
-
-    if (planes.size >= 3) {
-        val uBuf = planes[1].buffer; val uArr = ByteArray(uBuf.remaining()); uBuf.get(uArr)
-        val vBuf = planes[2].buffer; val vArr = ByteArray(vBuf.remaining()); vBuf.get(vArr)
-        var off = yTight.size
-        val len = minOf(uArr.size, vArr.size, uvCount)
-        for (i in 0 until len) {
-            nv21[off++] = if (i < vArr.size) vArr[i] else 128.toByte()
-            nv21[off++] = if (i < uArr.size) uArr[i] else 128.toByte()
-        }
-    } else if (planes.size >= 2) {
-        val uvBuf = planes[1].buffer
-        val uvArr = ByteArray(uvBuf.remaining()); uvBuf.get(uvArr)
-        System.arraycopy(uvArr, 0, nv21, yTight.size, minOf(uvArr.size, uvCount * 2))
-    }
-    return nv21
 }
