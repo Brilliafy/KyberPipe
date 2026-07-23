@@ -3,10 +3,37 @@ use std::io::{self, Write};
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jint, jstring};
 use jni::JNIEnv;
-use zxingcpp::{read, BarcodeFormat, ImageFormat, ImageView};
 
 fn debug(msg: &str) {
     let _ = writeln!(&mut io::stderr(), "[qr_scanner] {msg}");
+}
+
+fn rotate_90(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            out[x * h + (h - 1 - y)] = luma[y * w + x];
+        }
+    }
+    out
+}
+
+fn try_decode(luma: &[u8], w: usize, h: usize) -> Option<String> {
+    let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| luma[y * w + x]);
+    let grids = img.detect_grids();
+    debug(&format!("detect_grids: {} found", grids.len()));
+    for g in &grids {
+        match g.decode() {
+            Ok((_meta, content)) => {
+                if !content.is_empty() {
+                    debug(&format!("decoded {} chars", content.len()));
+                    return Some(content);
+                }
+            }
+            Err(e) => debug(&format!("grid decode error: {e:?}")),
+        }
+    }
+    None
 }
 
 #[no_mangle]
@@ -18,13 +45,16 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
     width: jint,
     height: jint,
     stride: jint,
-    _rotation: jint,
+    rotation: jint,
 ) -> jstring {
-    let w = width as u32;
-    let h = height as u32;
-    let row_stride = if stride <= 0 { w as i32 } else { stride };
+    let w = width as usize;
+    let h = height as usize;
+    let stride = if stride <= 0 { w } else { stride as usize };
 
-    debug(&format!("decodeQrCode: {}x{} stride={}", w, h, row_stride));
+    debug(&format!(
+        "decodeQrCode: {}x{} stride={} rot={}",
+        w, h, stride, rotation
+    ));
 
     let bytes = match env.convert_byte_array(&y_bytes) {
         Ok(b) => b,
@@ -36,57 +66,48 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
 
     debug(&format!("y_bytes len={}", bytes.len()));
 
-    let image = unsafe {
-        match ImageView::from_ptr(bytes.as_ptr(), w, h, ImageFormat::Lum, row_stride, 1) {
-            Ok(img) => img,
-            Err(e) => {
-                debug(&format!("ImageView::from_ptr FAILED: {e:?}"));
-                return std::ptr::null_mut();
-            }
+    // strip stride padding
+    let luma: Vec<u8> = if stride == w {
+        bytes
+    } else {
+        let mut clean = Vec::with_capacity(w * h);
+        for row in 0..h {
+            let start = row * stride;
+            clean.extend_from_slice(&bytes[start..start + w]);
         }
+        clean
     };
 
-    let reader = read()
-        .formats(&[BarcodeFormat::QRCode])
-        .try_harder(true)
-        .try_rotate(true);
-
-    let barcodes = match reader.from(&image) {
-        Ok(b) => b,
-        Err(e) => {
-            debug(&format!("reader.from FAILED: {e:?}"));
-            return std::ptr::null_mut();
-        }
+    let result = if rotation == 90 || rotation == 270 {
+        debug("trying rotated 90°");
+        let rotated = rotate_90(&luma, w, h);
+        try_decode(&rotated, h, w).or_else(|| {
+            debug("rotated failed, trying original");
+            try_decode(&luma, w, h)
+        })
+    } else if rotation == 180 {
+        debug("trying rotated 180°");
+        let r1 = rotate_90(&luma, w, h);
+        let r2 = rotate_90(&r1, h, w);
+        try_decode(&r2, w, h).or_else(|| {
+            debug("rotated failed, trying original");
+            try_decode(&luma, w, h)
+        })
+    } else {
+        try_decode(&luma, w, h)
     };
 
-    if barcodes.is_empty() {
-        debug("no barcodes found");
-        return std::ptr::null_mut();
-    }
-
-    for barcode in &barcodes {
-        debug(&format!(
-            "barcode: format={:?} valid={} text_len={}",
-            barcode.format(),
-            barcode.is_valid(),
-            barcode.text().len()
-        ));
-    }
-
-    if let Some(barcode) = barcodes.into_iter().next() {
-        if barcode.is_valid() {
-            let text = barcode.text();
-            debug(&format!("SUCCESS: {} chars", text.len()));
-            match env.new_string(text) {
-                Ok(output) => return output.into_raw(),
-                Err(_) => {
-                    debug("new_string FAILED");
-                    return std::ptr::null_mut();
-                }
+    match result {
+        Some(text) => match env.new_string(&text) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                debug("new_string FAILED");
+                std::ptr::null_mut()
             }
+        },
+        None => {
+            debug("all attempts failed");
+            std::ptr::null_mut()
         }
     }
-
-    debug("no valid barcode found");
-    std::ptr::null_mut()
 }

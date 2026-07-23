@@ -43,8 +43,8 @@ thiserror = "2.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tracing = "0.1"
 rand = "0.8"
-# zxing-cpp Rust bindings (C++ core pre-built manually via NDK cmake, linked via ZXING_CPP_LIB_DIR)
-zxing-cpp = "0.5"
+# Pure-Rust QR code decoder (detect + decode from greyscale bytes)
+rqrr = "0.10"
 # JNI bindings for Android (manual JNI, not UniFFI, for the QR scanner function)
 jni = "0.21"
 # Cross-platform library layout helper to bridge Rust into Android Kotlin
