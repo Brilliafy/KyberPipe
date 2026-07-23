@@ -174,89 +174,82 @@ fun CameraPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val reader = remember { MultiFormatReader() }
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    val previewView = remember { PreviewView(context) }
 
     DisposableEffect(Unit) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+
+        Log.d("QrCodeScanner", "CameraPreview: setting up camera")
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+            Log.d("QrCodeScanner", "CameraProvider acquired")
+
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(android.util.Size(1280, 720))
+                .build()
+
+            imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                Log.v("QrCodeScanner", "Frame received: ${imageProxy.width}x${imageProxy.height}")
+                val planes = imageProxy.planes
+                if (planes.isNotEmpty()) {
+                    val yPlane = planes[0]
+                    val buffer = yPlane.buffer
+                    val rowStride = yPlane.rowStride
+                    val width = imageProxy.width
+                    val height = imageProxy.height
+                    val yBytes = ByteArray(width * height)
+                    for (row in 0 until height) {
+                        buffer.position(row * rowStride)
+                        buffer.get(yBytes, row * width, width)
+                    }
+                    try {
+                        val source = PlanarYUVLuminanceSource(
+                            yBytes, width, height,
+                            0, 0, width, height,
+                            false
+                        )
+                        val bitmap = BinaryBitmap(HybridBinarizer(source))
+                        val result = reader.decodeWithState(bitmap)
+                        val text = result.text
+                        Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
+                        if (text.isNotEmpty()) {
+                            onQrScanned(text)
+                        }
+                    } catch (_: Exception) {
+                        // No QR in this frame
+                    }
+                }
+                imageProxy.close()
+            }
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    imageAnalysis
+                )
+                Log.d("QrCodeScanner", "Camera bound to lifecycle")
+            } catch (exc: Exception) {
+                Log.e("QrCodeScanner", "Use case binding failed", exc)
+            }
+        }, ContextCompat.getMainExecutor(context))
+
         onDispose {
+            Log.d("QrCodeScanner", "CameraPreview: disposing")
             executor.shutdown()
+            ProcessCameraProvider.getInstance(context).get().unbindAll()
         }
     }
 
     AndroidView(
-        factory = { ctx ->
-            PreviewView(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                previewView = this
-            }
-        },
-        modifier = Modifier.fillMaxSize(),
-        update = { view ->
-            val cameraProvider = try {
-                ProcessCameraProvider.getInstance(context).get()
-            } catch (e: Exception) {
-                Log.e("QrCodeScanner", "Failed to get camera provider", e)
-                null
-            }
-            if (cameraProvider != null) {
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView?.surfaceProvider)
-                }
-
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setTargetResolution(android.util.Size(1280, 720))
-                    .build()
-
-                imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                    val planes = imageProxy.planes
-                    if (planes.isNotEmpty()) {
-                        val yPlane = planes[0]
-                        val buffer = yPlane.buffer
-                        val rowStride = yPlane.rowStride
-                        val width = imageProxy.width
-                        val height = imageProxy.height
-                        val yBytes = ByteArray(width * height)
-                        for (row in 0 until height) {
-                            buffer.position(row * rowStride)
-                            buffer.get(yBytes, row * width, width)
-                        }
-                        try {
-                            val source = PlanarYUVLuminanceSource(
-                                yBytes, width, height,
-                                0, 0, width, height,
-                                false
-                            )
-                            val bitmap = BinaryBitmap(HybridBinarizer(source))
-                            val result = reader.decodeWithState(bitmap)
-                            val text = result.text
-                            if (text != null && text.isNotEmpty()) {
-                                Log.i("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
-                                onQrScanned(text)
-                            }
-                        } catch (_: Exception) {
-                            // No QR in this frame
-                        }
-                    }
-                    imageProxy.close()
-                }
-
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                } catch (exc: Exception) {
-                    Log.e("QrCodeScanner", "Use case binding failed", exc)
-                }
-            }
-        }
+        factory = { previewView },
+        modifier = Modifier.fillMaxSize()
     )
 }
