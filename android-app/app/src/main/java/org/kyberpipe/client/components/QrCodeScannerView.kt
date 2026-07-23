@@ -204,24 +204,29 @@ fun CameraPreview(
 
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
-                        // Rotate byte array if 90/270 (portrait phone, landscape sensor)
                         val rot = proxy.imageInfo.rotationDegrees
+                        val scale = 2
                         val (rotated, rw, rh) = if (rot == 90) {
-                            val r = ByteArray(w * h)
-                            var i = 0
-                            for (x in 0 until w)
-                                for (y in h - 1 downTo 0)
+                            val outW = h / scale; val outH = w / scale
+                            val r = ByteArray(outW * outH); var i = 0
+                            for (x in 0 until w step scale)
+                                for (y in h - 1 downTo 0 step scale)
                                     r[i++] = yRaw[y * stride + x]
-                            Triple(r, h, w)
+                            Triple(r, outW, outH)
                         } else if (rot == 270) {
-                            val r = ByteArray(w * h)
-                            var i = 0
-                            for (x in w - 1 downTo 0)
-                                for (y in 0 until h)
+                            val outW = h / scale; val outH = w / scale
+                            val r = ByteArray(outW * outH); var i = 0
+                            for (x in w - 1 downTo 0 step scale)
+                                for (y in 0 until h step scale)
                                     r[i++] = yRaw[y * stride + x]
-                            Triple(r, h, w)
+                            Triple(r, outW, outH)
                         } else {
-                            Triple(yRaw, stride, h)
+                            val outW = w / scale; val outH = h / scale
+                            val r = ByteArray(outW * outH); var i = 0
+                            for (y in 0 until h step scale)
+                                for (x in 0 until w step scale)
+                                    r[i++] = yRaw[y * stride + x]
+                            Triple(r, outW, outH)
                         }
 
                         val source = PlanarYUVLuminanceSource(rotated, rw, rh, 0, 0, rw, rh, false)
