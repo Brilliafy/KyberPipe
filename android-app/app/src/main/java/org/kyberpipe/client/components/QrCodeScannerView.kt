@@ -198,7 +198,17 @@ fun CameraPreview(
                     val yRaw = ByteArray(yBuf.remaining())
                     yBuf.get(yRaw)
                     try {
-                        val source = PlanarYUVLuminanceSource(yRaw, yStride, h, 0, 0, w, h, false)
+                        // Y plane data is in sensor orientation. Proxy dims may be rotated.
+                        val rotation = proxy.imageInfo.rotationDegrees
+                        val dataH: Int
+                        val cropW: Int
+                        val cropH: Int
+                        if (rotation == 90 || rotation == 270) {
+                            dataH = w; cropW = h; cropH = w
+                        } else {
+                            dataH = h; cropW = w; cropH = h
+                        }
+                        val source = PlanarYUVLuminanceSource(yRaw, yStride, dataH, 0, 0, cropW, cropH, false)
                         val hints = mapOf(
                             DecodeHintType.TRY_HARDER to true,
                             DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
