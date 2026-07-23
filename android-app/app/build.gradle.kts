@@ -42,7 +42,12 @@ android {
     }
     sourceSets {
         getByName("main") {
-            jniLibs.setSrcDirs(listOf("src/main/jniLibs"))
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     packaging {
@@ -88,3 +93,4 @@ dependencies {
     // ZXing fallback for dense QR codes
     implementation("com.google.zxing:core:3.5.3")
 }
+
