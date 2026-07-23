@@ -179,7 +179,7 @@ fun CameraPreview(
 
     LaunchedEffect(scanRequested) {
         if (!scanRequested) return@LaunchedEffect
-        Log.d("QrCodeScanner", "capturing photo for zxing-cpp decode...")
+        Log.d("QrCodeScanner", "capturing photo for rqrr decode...")
         val exec = Executors.newSingleThreadExecutor()
         imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
@@ -197,15 +197,19 @@ fun CameraPreview(
 
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
+                        Log.d("QrDebug", "img fmt=${img.format} planes=${img.planes.size}")
+                        // dump first 20 bytes to verify luminance vs JPEG
+                        val dump = yRaw.take(20).joinToString(" ") { String.format("%02x", it) }
+                        Log.d("QrDebug", "yRaw[0..19] = $dump")
                         val resultText = QrNative.decodeQrCode(yRaw, w, h, stride, proxy.imageInfo.rotationDegrees)
                         if (resultText != null && resultText.isNotEmpty()) {
-                            Log.w("QrCodeScanner", "zxing-cpp DECODED ${resultText.length} chars")
+                            Log.w("QrCodeScanner", "rqrr DECODED ${resultText.length} chars")
                             onQrScanned(resultText)
                         } else {
-                            Log.e("QrCodeScanner", "zxing-cpp null - no QR found")
+                            Log.e("QrCodeScanner", "rqrr null - no QR found")
                         }
                     } catch (e: Exception) {
-                        Log.e("QrCodeScanner", "zxing-cpp error: ${e.message}")
+                        Log.e("QrCodeScanner", "rqrr error: ${e.message}")
                     }
                 }
                 proxy.close()
