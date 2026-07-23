@@ -66,7 +66,7 @@ const generateQR = async () => {
   if (!props.pairingConfigJson) return;
   try {
     qrDataUrl.value = await QRCode.toDataURL(props.pairingConfigJson, {
-      width: 200,
+      width: 400,
       margin: 2,
       errorCorrectionLevel: 'L',
       color: { dark: '#000000', light: '#ffffff' }

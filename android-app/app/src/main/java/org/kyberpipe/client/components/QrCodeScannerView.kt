@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -197,9 +199,13 @@ fun CameraPreview(
 
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(android.util.Size(1280, 720))
                 .build()
 
-            val barcodeScanner = BarcodeScanning.getClient()
+            val options = BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+            val barcodeScanner = BarcodeScanning.getClient(options)
 
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
                 val mediaImage = imageProxy.image
