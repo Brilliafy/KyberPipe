@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -217,10 +219,8 @@ fun CameraPreview(
                             val buf = img.planes[0].buffer
                             val jpeg = ByteArray(buf.remaining())
                             buf.get(jpeg)
-                            val rawBmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)!!
-                            val sf = 4
-                            val bmp = Bitmap.createScaledBitmap(rawBmp, rawBmp.width / sf, rawBmp.height / sf, true)
-                            rawBmp.recycle()
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+                            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)!!
                             val bw = bmp.width; val bh = bmp.height
                             val px = IntArray(bw * bh)
                             bmp.getPixels(px, 0, bw, 0, 0, bw, bh)
@@ -243,16 +243,20 @@ fun CameraPreview(
                             Triple(yRaw, proxy.width, proxy.height)
                         }
                         val resultText = QrNative.decodeQrCode(gray, gw, gh, gw, rot)
-                        if (resultText != null && resultText.isNotEmpty()) {
-                            Log.w("QrCodeScanner", "rqrr DECODED ${resultText.length} chars")
-                            onQrScanned(resultText)
-                        } else {
-                            Log.e("QrCodeScanner", "rqrr null - no QR found")
-                            Toast.makeText(context, "No QR code found", Toast.LENGTH_SHORT).show()
+                        Handler(Looper.getMainLooper()).post {
+                            if (resultText != null && resultText.isNotEmpty()) {
+                                Log.w("QrCodeScanner", "rqrr DECODED ${resultText.length} chars")
+                                onQrScanned(resultText)
+                            } else {
+                                Log.e("QrCodeScanner", "rqrr null - no QR found")
+                                Toast.makeText(context, "No QR code found", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     } catch (e: Exception) {
-                        Log.e("QrCodeScanner", "rqrr error: ${e.message}")
-                        Toast.makeText(context, "Scan error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        Handler(Looper.getMainLooper()).post {
+                            Log.e("QrCodeScanner", "rqrr error: ${e.message}")
+                            Toast.makeText(context, "Scan error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 proxy.close()
@@ -262,7 +266,9 @@ fun CameraPreview(
             }
             override fun onError(e: ImageCaptureException) {
                 Log.e("QrCodeScanner", "photo capture error", e)
-                Toast.makeText(context, "Camera error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(context, "Camera error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
                 onLoading(false)
                 onScanComplete()
                 exec.shutdown()
