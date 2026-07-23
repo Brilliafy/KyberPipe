@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.util.Log
-import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -41,7 +40,6 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 @Composable
@@ -200,7 +198,7 @@ fun CameraPreview(
                 .setTargetResolution(android.util.Size(1280, 720))
                 .build()
 
-                imageAnalysis.setAnalyzer(executor) { imageProxy ->
+            imageAnalysis.setAnalyzer(executor) { imageProxy ->
                 Log.v("QrCodeScanner", "Frame ${imageProxy.width}x${imageProxy.height}")
                 if (imageProxy.format != ImageFormat.YUV_420_888) {
                     imageProxy.close()
@@ -213,26 +211,16 @@ fun CameraPreview(
                 buf.rewind()
 
                 val source = PlanarYUVLuminanceSource(
-                    data,
-                    plane.rowStride,
-                    imageProxy.height,
-                    0, 0,
-                    imageProxy.width,
-                    imageProxy.height,
-                    false
+                    data, plane.rowStride, imageProxy.height,
+                    0, 0, imageProxy.width, imageProxy.height, false
                 )
                 try {
                     val bitmap = BinaryBitmap(HybridBinarizer(source))
                     val result = MultiFormatReader().decode(bitmap, decodeHints)
-                    val text = result.text
-                    Log.w("QrCodeScanner", "ZXing decoded OK (${text.length} chars)")
-                    if (text.isNotEmpty()) {
-                        onQrScanned(text)
-                    }
+                    Log.w("QrCodeScanner", "ZXing decoded OK (${result.text.length} chars)")
+                    if (result.text.isNotEmpty()) onQrScanned(result.text)
                 } catch (e: Exception) {
                     Log.v("QrCodeScanner", "No QR: ${e::class.simpleName}")
-                }
-                    // No QR in this frame
                 }
                 imageProxy.close()
             }
