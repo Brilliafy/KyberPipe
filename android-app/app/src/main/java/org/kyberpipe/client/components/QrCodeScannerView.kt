@@ -201,6 +201,8 @@ fun CameraPreview(
                         if (resultText != null && resultText.isNotEmpty()) {
                             Log.w("QrCodeScanner", "zxing-cpp DECODED ${resultText.length} chars")
                             onQrScanned(resultText)
+                        } else {
+                            Log.e("QrCodeScanner", "zxing-cpp null - no QR found")
                         }
                     } catch (e: Exception) {
                         Log.e("QrCodeScanner", "zxing-cpp error: ${e.message}")
