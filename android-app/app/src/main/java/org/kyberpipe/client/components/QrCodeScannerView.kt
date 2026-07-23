@@ -3,11 +3,11 @@ package org.kyberpipe.client.components
 import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Log
-import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -177,7 +177,6 @@ fun CameraPreview(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val executor = remember { Executors.newSingleThreadExecutor() }
     val options = remember {
         BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -185,38 +184,43 @@ fun CameraPreview(
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(options) }
     val previewView = remember { PreviewView(context) }
+    val imageCapture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build() }
 
-    // Tap-to-capture: grab a high-res bitmap from PreviewView and decode it
     LaunchedEffect(scanRequested) {
         if (!scanRequested) return@LaunchedEffect
-        val bitmap = previewView.bitmap
-        if (bitmap != null) {
-            Log.d("QrCodeScanner", "Captured bitmap: ${bitmap.width}x${bitmap.height}")
-            try {
-                val inputImage = InputImage.fromBitmap(bitmap, 0)
-                barcodeScanner.process(inputImage)
-                    .addOnSuccessListener { barcodes ->
-                        for (b in barcodes) {
-                            val v = b.rawValue
-                            if (v != null && v.isNotEmpty()) {
-                                Log.w("QrCodeScanner", "CAPTURE DECODED ${v.length} chars")
-                                onQrScanned(v)
-                                break
+        Log.d("QrCodeScanner", "capturing photo...")
+        val exec = Executors.newSingleThreadExecutor()
+        imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
+                val img = proxy.image
+                if (img != null) {
+                    Log.w("QrCodeScanner", "photo: ${proxy.width}x${proxy.height}")
+                    val inputImage = InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees)
+                    barcodeScanner.process(inputImage)
+                        .addOnSuccessListener { barcodes ->
+                            for (b in barcodes) {
+                                val v = b.rawValue
+                                if (v != null && v.isNotEmpty()) {
+                                    Log.w("QrCodeScanner", "PHOTO DECODED ${v.length} chars")
+                                    onQrScanned(v)
+                                    break
+                                }
                             }
                         }
-                        onScanComplete()
-                    }
-                    .addOnFailureListener { e ->
-                        Log.e("QrCodeScanner", "capture decode fail: ${e.message}")
-                        onScanComplete()
-                    }
-            } catch (e: Exception) {
-                Log.e("QrCodeScanner", "capture error", e)
+                        .addOnFailureListener { e ->
+                            Log.e("QrCodeScanner", "photo decode fail: ${e.message}")
+                        }
+                }
+                proxy.close()
                 onScanComplete()
+                exec.shutdown()
             }
-        } else {
-            onScanComplete()
-        }
+            override fun onError(e: ImageCaptureException) {
+                Log.e("QrCodeScanner", "photo capture error", e)
+                onScanComplete()
+                exec.shutdown()
+            }
+        })
     }
 
     DisposableEffect(Unit) {
@@ -230,37 +234,13 @@ fun CameraPreview(
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(android.util.Size(1920, 1080))
-                .build()
-
-            imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                val img = imageProxy.image
-                if (img == null) { imageProxy.close(); return@setAnalyzer }
-                val inputImage = InputImage.fromMediaImage(img, imageProxy.imageInfo.rotationDegrees)
-                barcodeScanner.process(inputImage)
-                    .addOnSuccessListener { barcodes ->
-                        for (b in barcodes) {
-                            val v = b.rawValue
-                            if (v != null && v.isNotEmpty()) {
-                                Log.w("QrCodeScanner", "REALTIME DECODED ${v.length} chars")
-                                onQrScanned(v)
-                                break
-                            }
-                        }
-                    }
-                    .addOnFailureListener { /* normal — keep scanning */ }
-                    .addOnCompleteListener { imageProxy.close() }
-            }
-
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview, imageAnalysis
+                    preview, imageCapture
                 )
-                Log.d("QrCodeScanner", "bound")
+                Log.d("QrCodeScanner", "bound (preview + imageCapture)")
             } catch (e: Exception) {
                 Log.e("QrCodeScanner", "bind fail", e)
             }
@@ -268,7 +248,6 @@ fun CameraPreview(
 
         onDispose {
             Log.d("QrCodeScanner", "dispose")
-            executor.shutdown()
             barcodeScanner.close()
         }
     }
