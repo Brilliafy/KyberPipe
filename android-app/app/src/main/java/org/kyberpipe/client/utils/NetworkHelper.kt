@@ -24,14 +24,16 @@ fun sendPostRequestAsync(urlStr: String, jsonBody: String) {
             conn.outputStream.use { os ->
                 val input = jsonBody.toByteArray(charset("utf-8"))
                 os.write(input, 0, input.size)
+                os.flush()
             }
 
             val responseCode = conn.responseCode
             Log.d("KyberPipeNetwork", "POST to $urlStr returned status $responseCode")
             
-            // Read response body to release resources
-            val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
+            val stream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+            val bodyText = stream?.bufferedReader()?.use { it.readText() } ?: ""
             Log.d("KyberPipeNetwork", "Response body: $bodyText")
+
         } catch (e: Exception) {
             Log.e("KyberPipeNetwork", "Failed to send POST to $urlStr: ${e.message}")
         } finally {

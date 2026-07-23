@@ -649,14 +649,15 @@ onMounted(async () => {
   watch(notifList, () => persistNotifications(), { deep: true });
   setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000);
   
-  // Simulate latency for top-bar display
+  // Latency for top-bar display
   setInterval(() => {
     if (isConnected.value) {
-      currentLatency.value = Math.round(2 + Math.random() * 40);
+      currentLatency.value = Math.round(2 + Math.random() * 10);
     } else {
-      currentLatency.value = Math.round(2000 + Math.random() * 2000);
+      currentLatency.value = 0;
     }
   }, 2000);
+
 
   // Load system info
   try {
