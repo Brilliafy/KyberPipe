@@ -377,15 +377,15 @@ const handleFileChange = (event: Event) => {
   margin-bottom: 1rem;
 }
 .qr-code-simulator {
-  width: 280px;
-  height: 280px;
+  width: 360px;
+  height: 360px;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 1.5rem auto;
   background: #ffffff;
-  border-radius: 10px;
-  padding: 4px;
+  border-radius: 12px;
+  padding: 6px;
 }
 .qr-image {
   width: 100%;
