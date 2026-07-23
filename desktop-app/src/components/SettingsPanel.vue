@@ -87,28 +87,28 @@ const handleFileChange = (event: Event) => {
     <h2 class="section-title"><Settings style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="24" /> System Settings</h2>
     <p class="section-subtitle">Manage device profile identities, connectivity fallbacks, theme visual properties, and security authorizations.</p>
 
-    <!-- Theme Visual Properties Card -->
+    <!-- Theme Settings Card -->
     <div class="card theme-settings-card" style="margin-bottom: 1.5rem; padding: 1.5rem;">
-      <h3><Eye style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Theme Visual Properties</h3>
-      <p class="card-desc">Configure application color accents and light/dark theme preference toggles.</p>
+      <h3><Eye style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Theme</h3>
+      <p class="card-desc">Choose app appearance. System uses your OS setting.</p>
       
       <div class="form-group" style="max-width: 300px;">
-        <label for="theme-select">Visual Color Mode:</label>
+        <label for="theme-select">Color scheme:</label>
         <select 
           id="theme-select" 
           class="input-select" 
           :value="themeMode" 
           @change="emit('update:themeMode', ($event.target as HTMLSelectElement).value); emit('saveSettings')"
         >
-          <option value="light">Light Theme Mode</option>
-          <option value="dark">Dark Theme Mode</option>
-          <option value="auto">System Default (Auto-detect)</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="auto">System</option>
         </select>
       </div>
 
       <div class="theme-autodetect-row" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary);">
         <span v-if="themeMode === 'auto'">
-          Info: Autodetect from OS is currently enabled. Theme changes dynamically based on OS styling.
+          Follows OS light/dark preference.
         </span>
       </div>
     </div>
@@ -349,6 +349,7 @@ const handleFileChange = (event: Event) => {
   border-radius: 6px;
   font-size: 0.9rem;
   outline: none;
+  color-scheme: dark;
 }
 .input-text:focus, .input-select:focus {
   border-color: var(--accent-indigo);

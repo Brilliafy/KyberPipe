@@ -13,6 +13,12 @@ path = "src/uniffi_bindgen.rs"
 
 [dev-dependencies]
 proptest = "1.5"
+image = "0.25"
+qrcode = "0.14"
+rqrr = "0.10"
+zxing-cpp = "0.4"
+
+
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
@@ -43,5 +49,9 @@ thiserror = "2.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tracing = "0.1"
 rand = "0.8"
+# Pure-Rust QR code decoder (detect + decode from greyscale bytes)
+rqrr = "0.10"
+# JNI bindings for Android (manual JNI, not UniFFI, for the QR scanner function)
+jni = "0.21"
 # Cross-platform library layout helper to bridge Rust into Android Kotlin
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
