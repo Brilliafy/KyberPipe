@@ -37,7 +37,6 @@ import androidx.core.content.ContextCompat
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
-import com.google.zxing.LuminanceSource
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -201,17 +200,9 @@ fun CameraPreview(
                     yBuf.get(yRaw)
                     try {
                         Log.d("QrDebug", "stride=$yStride actual=$stride w=$w h=$h rot=${proxy.imageInfo.rotationDegrees}")
-                        var source: LuminanceSource = PlanarYUVLuminanceSource(
+                        val source = PlanarYUVLuminanceSource(
                             yRaw, stride, h, 0, 0, w, h, false
                         )
-                        // Rotate source to match display orientation
-                        val rot = proxy.imageInfo.rotationDegrees
-                        source = when (rot) {
-                            90 -> source.rotateCounterClockwise().rotateCounterClockwise().rotateCounterClockwise()
-                            180 -> source.rotateCounterClockwise().rotateCounterClockwise()
-                            270 -> source.rotateCounterClockwise()
-                            else -> source
-                        }
                         val hints = mapOf(
                             DecodeHintType.TRY_HARDER to true,
                             DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
