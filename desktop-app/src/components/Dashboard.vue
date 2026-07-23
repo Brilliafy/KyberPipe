@@ -106,8 +106,18 @@ watch(() => props.pairingConfigJson, generateQR, { immediate: true });
 
 const handleCopyLink = async () => {
   try {
-    const encodedData = encodeURIComponent(props.pairingConfigJson);
-    const deepLink = `https://brilliafy.github.io/kyberpipe/pair?data=${encodedData}`;
+    const rawJson = props.pairingConfigJson.trim();
+    const minified = rawJson.startsWith('{') ? JSON.stringify(JSON.parse(rawJson)) : rawJson;
+
+    // Must use same base64(zlib) encoding as the QR code so Android decodes it identically
+    const compressed = deflate(minified, { level: 9 });
+    const bytes = new Uint8Array(compressed);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+
+    // URL-encode the b64 so it survives being passed as a query parameter
+    const deepLink = `https://brilliafy.github.io/kyberpipe/pair?data=${encodeURIComponent(b64)}`;
     await navigator.clipboard.writeText(deepLink);
     copyStatusText.value = "Copied remote pairing link to clipboard!";
     setTimeout(() => { copyStatusText.value = ""; }, 3000);
@@ -160,8 +170,8 @@ const handleFileChange = (event: Event) => {
             </div>
             
             <div class="sas-block">
-              <span class="sas-label">Safe pairing SAS code:</span>
-              <strong class="sas-display">{{ sasCode }}</strong>
+              <span class="sas-label">SAS verification:</span>
+              <strong class="sas-display" style="font-size:0.78rem; opacity:0.65;">Displayed on Android after scan</strong>
             </div>
           </div>
 

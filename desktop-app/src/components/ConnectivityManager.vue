@@ -18,7 +18,10 @@ const props = defineProps<{
   enableUpnp: boolean;
   enableDdns: boolean;
   pathwayOrder: string[];
+  isConnected?: boolean;
+  isPaired?: boolean;
 }>();
+
 
 const emit = defineEmits<{
   (e: "update:wifiDirectActive", val: boolean): void;
@@ -143,7 +146,20 @@ const latencyHistory = ref<LatencyData[]>([]);
 let chartInterval: any = null;
 let lastPathway = "";
 
+const isLinkActive = computed(() => (props.isConnected ?? true) && (props.wifiDirectActive || props.lanActive || props.wireguardActive));
+
 const generateMockLatency = () => {
+  if (!isLinkActive.value) {
+    latencyHistory.value.push({
+      rtt: 0,
+      pathway: "Offline",
+      isSwitch: false
+    });
+    if (latencyHistory.value.length > 40) {
+      latencyHistory.value.shift();
+    }
+    return;
+  }
   let base = 45.2; // WireGuard fallback
   let path = "WireGuard WAN";
   if (props.wifiDirectActive) {
@@ -169,6 +185,7 @@ const generateMockLatency = () => {
     latencyHistory.value.shift();
   }
 };
+
 
 const drawChart = () => {
   const canvas = canvasRef.value;
@@ -428,19 +445,22 @@ onUnmounted(() => {
             <h4>Active Interface Statistics</h4>
             <div class="stat-row">
               <span>Current Link Type:</span>
-              <strong style="color: var(--accent-cyan);">
-                {{ wifiDirectActive ? 'Wi-Fi Direct P2P (Tier 1)' : (lanActive ? 'mDNS LAN (Tier 2)' : 'WireGuard WAN (Tier 3)') }}
+              <strong :style="{ color: isLinkActive ? 'var(--accent-cyan)' : '#ef4444' }">
+                {{ isLinkActive ? (wifiDirectActive ? 'Wi-Fi Direct P2P (Tier 1)' : (lanActive ? 'mDNS LAN (Tier 2)' : 'WireGuard WAN (Tier 3)')) : 'Disconnected (Offline)' }}
               </strong>
             </div>
             <div class="stat-row">
               <span>Average RTT Jitter:</span>
-              <span>±0.4 ms</span>
+              <span>{{ isLinkActive ? '±0.4 ms' : 'N/A (Disconnected)' }}</span>
             </div>
             <div class="stat-row">
               <span>Dynamic UDP Hole State:</span>
-              <span style="color: #22c55e;">OPEN / STABLE</span>
+              <span :style="{ color: isLinkActive ? '#22c55e' : '#94a3b8' }">
+                {{ isLinkActive ? 'OPEN / STABLE' : 'CLOSED / OFFLINE' }}
+              </span>
             </div>
           </div>
+
         </div>
       </div>
     </div>
