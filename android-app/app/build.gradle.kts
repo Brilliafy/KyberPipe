@@ -9,10 +9,11 @@ android {
     namespace = "org.kyberpipe.client"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "org.kyberpipe.client"
-        minSdk = 26
+        minSdk = 30
         targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
@@ -41,7 +42,12 @@ android {
     }
     sourceSets {
         getByName("main") {
-            jniLibs.setSrcDirs(listOf("src/main/jniLibs"))
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }
@@ -67,6 +73,16 @@ dependencies {
     // Biometric Step-Up Authorization
     implementation("androidx.biometric:biometric:1.1.0")
     // JNA binding runtime for UniFFI
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:5.16.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // CameraX
+    val cameraxVersion = "1.6.1"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // ML Kit Barcode Scanning
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }

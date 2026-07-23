@@ -22,6 +22,10 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("paired_device_picture", "") ?: ""
         set(value) = prefs.edit().putString("paired_device_picture", value).apply()
 
+    var pairedHostIp: String
+        get() = prefs.getString("paired_host_ip", "10.0.2.2") ?: "10.0.2.2"
+        set(value) = prefs.edit().putString("paired_host_ip", value).apply()
+
     var ddnsHostname: String
         get() = prefs.getString("ddns_hostname", "") ?: ""
         set(value) = prefs.edit().putString("ddns_hostname", value).apply()
