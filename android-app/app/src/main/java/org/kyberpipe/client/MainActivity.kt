@@ -40,6 +40,8 @@ import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.sendPostRequestAsync
 import uniffi.core_crypto.*
+import java.io.ByteArrayInputStream
+import java.util.zip.InflaterInputStream
 
 class MainActivity : ComponentActivity() {
 
@@ -594,6 +596,18 @@ fun MainScreen(
     var showFirstConnectModal by remember { mutableStateOf(false) }
     var tempPcName by remember { mutableStateOf("") }
 
+    val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
+        val hostPkHex = json.getString("host_identity_pk_hex")
+        val wireguardPkHex = json.getString("wireguard_pk_hex")
+        val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
+        val myPkHex = keyPair?.mlkemPkHex ?: ""
+        val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
+        sasCodeDisplay = computedSas
+        tempPcName = "Linux Desktop workstation"
+        showFirstConnectModal = true
+        addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+    }
+
     val handlePairingHandshake = {
         val cleanInput = pairingConfigInput.trim().replace("-", "")
         if (cleanInput.isEmpty()) {
@@ -606,23 +620,22 @@ fun MainScreen(
             addLog("[Pairing] Successfully verified host identity via SAS Code: $formattedSas")
         } else if (pairingConfigInput.trim().startsWith("{")) {
             try {
-                val json = JSONObject(pairingConfigInput)
-                val hostPkHex = json.getString("host_identity_pk_hex")
-                val wireguardPkHex = json.getString("wireguard_pk_hex")
-                val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
-                val myPkHex = keyPair?.mlkemPkHex ?: ""
-                val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
-                sasCodeDisplay = computedSas
-                tempPcName = "Linux Desktop workstation"
-                showFirstConnectModal = true
-                addLog("[Pairing] Successfully verified host identity. SAS Code: $computedSas")
+                performKemHandshake(JSONObject(pairingConfigInput))
             } catch (e: Exception) {
                 Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
                 addLog("[Pairing] Error: Handshake verification failed (${e.message})")
             }
         } else {
-            Toast.makeText(context, "Invalid pairing code (must be 6 digits) or JSON format", Toast.LENGTH_LONG).show()
-            addLog("[Pairing] Error: Invalid input format")
+            try {
+                val rawInput = pairingConfigInput.trim()
+                val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
+                val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
+                addLog("[Pairing] Decompressed QR (${jsonStr.length} chars)")
+                performKemHandshake(JSONObject(jsonStr))
+            } catch (_: Exception) {
+                Toast.makeText(context, "Invalid code — scan QR from desktop or enter 6-digit SAS", Toast.LENGTH_LONG).show()
+                addLog("[Pairing] Error: Invalid input format")
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import QRCode from 'qrcode';
+import { deflate } from 'pako';
 import { 
   Shield, 
   QrCode, 
@@ -65,7 +66,11 @@ const qrDataUrl = ref("");
 const generateQR = async () => {
   if (!props.pairingConfigJson) return;
   try {
-    qrDataUrl.value = await QRCode.toDataURL(props.pairingConfigJson, {
+    const compressed = deflate(props.pairingConfigJson);
+    const bytes = new Uint8Array(compressed);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    qrDataUrl.value = await QRCode.toDataURL(btoa(binary), {
       width: 400,
       margin: 2,
       errorCorrectionLevel: 'L',
