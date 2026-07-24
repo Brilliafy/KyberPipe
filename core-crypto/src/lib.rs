@@ -3,6 +3,7 @@ pub mod error;
 pub mod network;
 pub mod packets;
 pub mod qr_scanner;
+pub mod quic_app;
 pub mod telemetry;
 
 use error::KyberError;
@@ -11,15 +12,73 @@ use packets::{
     compute_sha256_hex, BinaryClipboardPacket, ClipboardPacket, HardwareCommandPacket,
     NotificationActionPacket, NotificationPacket, OutboundSmsPacket, SensorPacket, SmsPacket,
 };
+use std::sync::OnceLock;
 
 uniffi::setup_scaffolding!();
 
-#[derive(uniffi::Record)]
+static SYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn get_sync_runtime() -> &'static tokio::runtime::Runtime {
+    SYNC_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("Failed to build shared sync Tokio runtime")
+    })
+}
+
+/// Helper: execute a closure inside catch_unwind to prevent panics from crossing FFI boundaries.
+/// If the closure panics, returns a NetworkError with the panic message.
+
+/// Helper: block on a future using the shared runtime or ambient Handle.
+fn block_on_sync<F: std::future::Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            let mut fut = Some(fut);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let f = fut.take().unwrap();
+                tokio::task::block_in_place(|| handle.block_on(f))
+            }));
+            match result {
+                Ok(output) => output,
+                Err(_) => {
+                    // block_in_place failed—use sync runtime
+                    let f = fut.take().unwrap();
+                    get_sync_runtime().block_on(f)
+                }
+            }
+        }
+        Err(_) => get_sync_runtime().block_on(fut),
+    }
+}
+
+#[derive(Clone, uniffi::Record, serde::Serialize)]
 pub struct PqKeyPair {
     pub x25519_pk_hex: String,
     pub x25519_sk_hex: String,
     pub mlkem_pk_hex: String,
     pub mlkem_sk_hex: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct PqKeyPairRaw {
+    pub x25519_pk: Vec<u8>,
+    pub x25519_sk: Vec<u8>,
+    pub mlkem_pk: Vec<u8>,
+    pub mlkem_sk: Vec<u8>,
+}
+
+/// UniFFI export: Generate Hybrid keypair returning raw bytes (avoids hex overhead)
+#[uniffi::export]
+pub fn generate_pq_keypair_raw() -> Result<PqKeyPairRaw, KyberError> {
+    let pair = crypto::generate_hybrid_keypair();
+    Ok(PqKeyPairRaw {
+        x25519_pk: pair.x25519_pk.to_vec(),
+        x25519_sk: pair.x25519_sk.to_vec(),
+        mlkem_pk: pair.mlkem_pk.clone(),
+        mlkem_sk: pair.mlkem_sk.clone(),
+    })
 }
 
 #[derive(uniffi::Record)]
@@ -102,8 +161,8 @@ pub fn encapsulate_pq_secret(
 
     let res = crypto::encapsulate_hybrid(&x25519_arr, &mlkem_bytes)?;
     Ok(PqKemResponse {
-        ciphertext_hex: hex::encode(res.ciphertext_bytes),
-        shared_secret_hex: hex::encode(res.combined_shared_secret),
+        ciphertext_hex: hex::encode(&res.ciphertext_bytes),
+        shared_secret_hex: hex::encode(&res.combined_shared_secret),
     })
 }
 
@@ -382,31 +441,149 @@ pub fn compute_sha256(data: String) -> String {
 
 #[uniffi::export]
 pub fn perform_stun_hole_punch(stun_host: String) -> Result<String, KyberError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| KyberError::NetworkError(format!("Failed to build tokio runtime: {e}")))?;
-
-    let addr = rt.block_on(network::query_stun_server(&stun_host))?;
+    let addr = block_on_sync(network::query_stun_server(&stun_host))?;
     Ok(addr.to_string())
+}
+
+/// UniFFI export: Start a QUIC endpoint on the given port
+#[uniffi::export]
+pub fn quic_bind_server(port: u16) -> Result<(), KyberError> {
+    block_on_sync(quic_app::QuicAppManager::bind_server(port))?;
+    Ok(())
+}
+
+/// UniFFI export: Connect to a QUIC server
+#[uniffi::export]
+pub fn quic_connect(
+    host: String,
+    port: u16,
+    pinned_cert_hash_hex: String,
+) -> Result<bool, KyberError> {
+    let addr: std::net::SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|e| KyberError::NetworkError(format!("Invalid address: {e}")))?;
+    let pinned = if pinned_cert_hash_hex.is_empty() {
+        None
+    } else {
+        Some(pinned_cert_hash_hex)
+    };
+    let _conn = block_on_sync(quic_app::QuicAppManager::connect(addr, pinned, None))?;
+    Ok(true)
+}
+
+/// UniFFI export: Send a pairing frame over a QUIC connection
+#[uniffi::export]
+pub fn quic_send_pairing(_body_json: String) -> Result<String, KyberError> {
+    // For now, this is a placeholder. Full QUIC client integration
+    // requires connection state management which will be added in the
+    // QUIC migration phase.
+    Ok(r#"{"status":"not_implemented"}"#.to_string())
+}
+
+// ────────────────────────────────────────────────────────────
+// Double Ratchet FFI — stateful handle via global Mutex
+// ────────────────────────────────────────────────────────────
+
+/// Global ratchet session — persists across FFI calls to maintain state
+static RATCHET_SESSION: OnceLock<std::sync::Mutex<Option<Box<crypto::DoubleRatchetState>>>> =
+    OnceLock::new();
+
+fn get_ratchet() -> &'static std::sync::Mutex<Option<Box<crypto::DoubleRatchetState>>> {
+    RATCHET_SESSION.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Initialize a global Double Ratchet session from a hex-encoded shared secret.
+/// Call once to establish the session. Subsequent encrypt/decrypt calls use this state.
+#[uniffi::export]
+pub fn ratchet_init_session(master_shared_secret_hex: String, is_initiator: bool) -> String {
+    let ss = match hex::decode(&master_shared_secret_hex) {
+        Ok(b) => b,
+        Err(e) => return format!("ERROR: Invalid shared secret hex: {e}"),
+    };
+    match crypto::DoubleRatchetState::new(&ss, is_initiator) {
+        Ok(ratchet) => {
+            *get_ratchet().lock().unwrap() = Some(Box::new(ratchet));
+            "OK".to_string()
+        }
+        Err(e) => format!("ERROR: {e}"),
+    }
+}
+
+/// Encrypt a plaintext using the stored ratchet state.
+/// Must call ratchet_init_session first.
+#[uniffi::export]
+pub fn ratchet_encrypt_message(plaintext_hex: String) -> String {
+    let pt = match hex::decode(&plaintext_hex) {
+        Ok(b) => b,
+        Err(e) => return format!("{{\"error\":\"{e}\"}}"),
+    };
+    let mut guard = get_ratchet().lock().unwrap();
+    match guard.as_mut() {
+        Some(ratchet) => match ratchet.ratchet_encrypt(&pt) {
+            Ok(msg) => {
+                let mut json = format!(
+                    "{{\"nonce_hex\":\"{}\",\"ciphertext_hex\":\"{}\"",
+                    hex::encode(msg.nonce),
+                    hex::encode(msg.ciphertext),
+                );
+                if let Some(ref pk) = msg.rekey_x25519_pk {
+                    json.push_str(&format!(",\"rekey_x25519_pk_hex\":\"{}\"", hex::encode(pk)));
+                }
+                if let Some(ref mpk) = msg.rekey_mlkem_pk {
+                    json.push_str(&format!(",\"rekey_mlkem_pk_hex\":\"{}\"", hex::encode(mpk)));
+                }
+                if let Some(ref ct) = msg.rekey_ciphertext {
+                    json.push_str(&format!(
+                        ",\"rekey_ciphertext_hex\":\"{}\"",
+                        hex::encode(ct)
+                    ));
+                }
+                json.push('}');
+                json
+            }
+            Err(e) => format!("{{\"error\":\"{e}\"}}"),
+        },
+        None => "{\"error\":\"No active ratchet session. Call ratchet_init_session first.\"}"
+            .to_string(),
+    }
+}
+
+/// Decrypt a ciphertext using the stored ratchet state.
+#[uniffi::export]
+pub fn ratchet_decrypt_message(nonce_hex: String, ciphertext_hex: String) -> String {
+    let nonce = match hex::decode(&nonce_hex) {
+        Ok(b) if b.len() == 12 => {
+            let mut arr = [0u8; 12];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => return "{\"error\":\"Invalid nonce\"}".to_string(),
+    };
+    let ct = match hex::decode(&ciphertext_hex) {
+        Ok(b) => b,
+        Err(e) => return format!("{{\"error\":\"{e}\"}}"),
+    };
+    let mut guard = get_ratchet().lock().unwrap();
+    match guard.as_mut() {
+        Some(ratchet) => match ratchet.ratchet_decrypt(&nonce, &ct) {
+            Ok(pt) => format!("{{\"plaintext_hex\":\"{}\"}}", hex::encode(pt)),
+            Err(e) => format!("{{\"error\":\"{e}\"}}"),
+        },
+        None => "{\"error\":\"No active ratchet session. Call ratchet_init_session first.\"}"
+            .to_string(),
+    }
 }
 
 /// Listen for LAN mDNS beacons from desktop and return discovered hosts
 #[uniffi::export]
 pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| KyberError::NetworkError(format!("Failed to build tokio runtime: {e}")))?;
-
-    let results = rt
-        .block_on(network::listen_for_beacons(
-            network::P2P_BEACON_PORT,
-            timeout_secs,
-        ))?
-        .into_iter()
-        .map(|(pk, ip, name)| format!("{pk}:{ip}:{name}"))
-        .collect();
+    let results = block_on_sync(network::listen_for_beacons(
+        network::P2P_BEACON_PORT,
+        timeout_secs,
+    ))?
+    .into_iter()
+    .map(|(pk, ip, name)| format!("{pk}:{ip}:{name}"))
+    .collect();
     Ok(results)
 }
 

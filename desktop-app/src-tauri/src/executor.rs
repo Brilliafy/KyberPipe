@@ -150,44 +150,20 @@ pub fn run_fallback_subprocess(script_path: &str, lux: f64) -> ScriptExecutionRe
     }
 }
 
+/// run_unsandboxed_process removed: security vulnerability (RCE via sh -c).
+/// All script execution must go through the sandboxed Boa engine.
+/// See https://github.com/kyberpipe/security-audit#2 for details.
+#[deprecated(note = "Unsafe: use run_boa_sandboxed_script instead")]
+#[allow(dead_code)]
 pub fn run_unsandboxed_process(
-    script_code: &str,
-    lux: f64,
-    feed_data: &str,
+    _script_code: &str,
+    _lux: f64,
+    _feed_data: &str,
 ) -> ScriptExecutionResult {
-    info!(
-        "Executing unsandboxed code directly on host (lux = {}, feed = {})",
-        lux, feed_data
-    );
-
-    let output_result = Command::new("sh")
-        .arg("-c")
-        .arg(script_code)
-        .env("KYBERPIPE_LUX", lux.to_string())
-        .env("KYBERPIPE_FEED_DATA", feed_data)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
-
-    match output_result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let mut logs = Vec::new();
-            if !stderr.is_empty() {
-                logs.push(format!("STDERR: {stderr}"));
-            }
-            ScriptExecutionResult {
-                success: output.status.success(),
-                output: stdout,
-                logs,
-            }
-        }
-        Err(e) => ScriptExecutionResult {
-            success: false,
-            output: format!("Execution Error: {e}"),
-            logs: vec![],
-        },
+    ScriptExecutionResult {
+        success: false,
+        output: "ERROR: Unsandboxed script execution is disabled for security. Use sandboxed Boa engine.".to_string(),
+        logs: vec![],
     }
 }
 
@@ -197,11 +173,17 @@ pub fn execute_wasm_script(wasm_bytes: &[u8]) -> Result<String, String> {
         return Err("WASM byte array is empty".into());
     }
 
-    let engine = wasmtime::Engine::default();
+    let mut engine_config = wasmtime::Config::new();
+    engine_config.consume_fuel(true);
+    let engine = wasmtime::Engine::new(&engine_config)
+        .map_err(|e| format!("WASM engine creation failed: {e}"))?;
     let module = wasmtime::Module::new(&engine, wasm_bytes)
         .map_err(|e| format!("WASM AOT Validation Failed: {e}"))?;
 
     let mut store = wasmtime::Store::new(&engine, ());
+    store
+        .set_fuel(500_000)
+        .map_err(|e| format!("Failed to set WASM fuel: {e}"))?;
     let instance = wasmtime::Instance::new(&mut store, &module, &[])
         .map_err(|e| format!("WASM Instance Instantiation Failed: {e}"))?;
 

@@ -33,5 +33,6 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 magic-wormhole = { version = "0.8", optional = true }
 arti-client = { version = "0.44", optional = true }
 tokio-util = "0.7"
+directories = "5.0"
 
 

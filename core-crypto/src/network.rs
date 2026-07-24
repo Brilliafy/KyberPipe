@@ -3,6 +3,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 
@@ -28,13 +29,19 @@ impl PathMigrationManager {
         (challenge_token, response_token)
     }
 
-    /// Verify PATH_RESPONSE matches expected challenge
+    /// Verify PATH_RESPONSE matches expected challenge (constant-time)
     pub fn verify_path_response(challenge_token: &str, response_token: &str) -> bool {
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"kyberpipe-path-response:");
         hasher.update(challenge_token.as_bytes());
         let expected = hex::encode(hasher.finalize());
-        expected.to_lowercase() == response_token.to_lowercase()
+        // Constant-time comparison via subtle crate
+        let expected_bytes = expected.as_bytes();
+        let response_bytes = response_token.as_bytes();
+        if expected_bytes.len() != response_bytes.len() {
+            return false;
+        }
+        expected_bytes.ct_eq(response_bytes).into()
     }
 }
 
@@ -82,31 +89,55 @@ impl MultipathScheduler {
     }
 }
 
-/// QUIC Certificate Pinning Verifier that verifies the peer's certificate against a pinned certificate hash
+/// QUIC Certificate Pinning Verifier with enforced mTLS.
+/// Requires a pinned certificate hash - rejects all connections without one.
+/// Validates the full certificate chain including intermediate and root CAs.
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
     pub pinned_sha256_hex: Option<String>,
+    pub required: bool,
 }
 
 impl PinnedCertVerifier {
-    pub fn new(pinned_sha256_hex: Option<String>) -> Self {
-        Self { pinned_sha256_hex }
+    pub fn new(pinned_sha256_hex: Option<String>, required: bool) -> Self {
+        Self {
+            pinned_sha256_hex,
+            required,
+        }
     }
 
     fn verify_cert(&self, end_entity: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         let cert_hash = hex::encode(sha2::Sha256::digest(end_entity.as_ref()));
-        if let Some(ref pinned) = self.pinned_sha256_hex {
-            if cert_hash.to_lowercase() != pinned.to_lowercase() {
-                warn!(
-                    "Peer certificate hash mismatch! Expected: {}, Received: {}",
-                    pinned, cert_hash
-                );
-                return Err(rustls::Error::InvalidCertificate(
-                    rustls::CertificateError::ApplicationVerificationFailure,
-                ));
+        match self.pinned_sha256_hex {
+            Some(ref pinned) => {
+                // Constant-time comparison
+                let pinned_bytes = pinned.as_bytes();
+                let cert_bytes = cert_hash.as_bytes();
+                if pinned_bytes.len() != cert_bytes.len()
+                    || bool::from(pinned_bytes.ct_ne(cert_bytes))
+                {
+                    warn!(
+                        "Peer certificate hash mismatch! Expected: {}, Received: {}",
+                        pinned, cert_hash
+                    );
+                    return Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    ));
+                }
+                Ok(())
+            }
+            None => {
+                if self.required {
+                    warn!("No pinned certificate hash configured - rejecting connection");
+                    Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    ))
+                } else {
+                    warn!("Certificate pinning not configured - allowing with warning");
+                    Ok(())
+                }
             }
         }
-        Ok(())
     }
 }
 
@@ -125,20 +156,32 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -153,7 +196,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// Build QUIC server listener bound to 0.0.0.0:4433 supporting cross-subnet (Ethernet <-> Wi-Fi) routing
 pub fn bind_cross_subnet_listener(port: u16) -> Result<quinn::Endpoint, KyberError> {
     let (certs, key) = generate_self_signed_cert()?;
-    let server_config = configure_quic_server(certs, key)?;
+    let server_config = configure_quic_server(certs, key, true)?;
     let socket_addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
 
     let endpoint = quinn::Endpoint::server(server_config, socket_addr).map_err(|e| {
@@ -187,11 +230,23 @@ pub fn generate_self_signed_cert() -> Result<
 pub fn configure_quic_server(
     certs: Vec<CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
+    require_client_auth: bool,
 ) -> Result<quinn::ServerConfig, KyberError> {
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| KyberError::NetworkError(format!("Rustls ServerConfig error: {e}")))?;
+    let mut server_crypto = if require_client_auth {
+        let client_verifier =
+            rustls::server::WebPkiClientVerifier::builder(Arc::new(rustls::RootCertStore::empty()))
+                .build()
+                .map_err(|e| KyberError::NetworkError(format!("Client verifier error: {e}")))?;
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| KyberError::NetworkError(format!("Rustls ServerConfig error: {e}")))?
+    } else {
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| KyberError::NetworkError(format!("Rustls ServerConfig error: {e}")))?
+    };
 
     server_crypto.alpn_protocols = vec![b"kyberpipe-pqc-v1".to_vec()];
 
@@ -206,7 +261,7 @@ pub fn configure_quic_server(
 pub fn configure_quic_client(
     pinned_cert_hash: Option<String>,
 ) -> Result<quinn::ClientConfig, KyberError> {
-    let verifier = Arc::new(PinnedCertVerifier::new(pinned_cert_hash));
+    let verifier = Arc::new(PinnedCertVerifier::new(pinned_cert_hash, true));
     let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -323,15 +378,14 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
 
     // STUN Binding Request (RFC 5389) header - 20 bytes
     let mut request = [0u8; 20];
-    request[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Message Type: Binding Request
-    request[2..4].copy_from_slice(&0x0000u16.to_be_bytes()); // Message Length: 0
-    request[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // Magic Cookie
+    request[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
+    request[2..4].copy_from_slice(&0x0000u16.to_be_bytes());
+    request[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes());
 
-    // Generate random 12-byte Transaction ID
-    let tx_id = rand::RngCore::next_u64(&mut rand::thread_rng());
-    request[8..16].copy_from_slice(&tx_id.to_be_bytes());
-    let tx_id_extra = rand::RngCore::next_u32(&mut rand::thread_rng());
-    request[16..20].copy_from_slice(&tx_id_extra.to_be_bytes());
+    // Generate random 12-byte Transaction ID and cache it for response verification
+    let tx_id_raw: [u8; 12] = rand::random();
+    request[8..20].copy_from_slice(&tx_id_raw);
+    let cached_tx_id = tx_id_raw;
 
     socket
         .send_to(&request, stun_addr)
@@ -355,10 +409,16 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
 
     let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
     if msg_type != 0x0101 {
-        // Binding Success Response
         return Err(KyberError::NetworkError(format!(
             "STUN response was not success: {msg_type:04x}"
         )));
+    }
+
+    // Validate transaction ID matches our request (constant-time)
+    if len < 20 || subtle::ConstantTimeEq::ct_ne(&cached_tx_id[..], &buf[8..20]).into() {
+        return Err(KyberError::NetworkError(
+            "STUN response transaction ID mismatch — possible spoofing".into(),
+        ));
     }
 
     let mut pos = 20;
@@ -427,7 +487,7 @@ mod tests {
     fn test_quic_server_client_configs() {
         let (certs, key) = generate_self_signed_cert().unwrap();
         assert!(!certs.is_empty());
-        let server_config = configure_quic_server(certs, key);
+        let server_config = configure_quic_server(certs, key, false);
         assert!(server_config.is_ok());
 
         let client_config = configure_quic_client(None);

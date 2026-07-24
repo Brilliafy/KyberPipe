@@ -61,10 +61,15 @@ class NotificationHook : NotificationListenerService() {
         // MessagingStyle messages parsing (e.g. Signal, WhatsApp group conversations)
         var messagesLog = ""
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val messages = extras.get("android.messages")
+            val messages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                extras.getParcelableArray("android.messages")
+            } else {
+                @Suppress("DEPRECATION")
+                extras.get("android.messages") as? Array<*>
+            }
             if (messages is Array<*>) {
                 val sb = java.lang.StringBuilder()
-                for (msg in messages) {
+                for (msg in messages as Array<*>) {
                     if (msg is Bundle) {
                         val sender = msg.getCharSequence("sender")?.toString() ?: "Sender"
                         val msgText = msg.getCharSequence("text")?.toString() ?: ""
@@ -123,8 +128,15 @@ class NotificationHook : NotificationListenerService() {
         val artist = extras.getCharSequence("android.text")?.toString() ?: ""
         
         var albumArtBase64 = ""
-        val bitmap = extras.getParcelable<android.graphics.Bitmap>("android.largeIcon")
-            ?: extras.getParcelable<android.graphics.Bitmap>("android.picture")
+        val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            extras.getParcelable("android.largeIcon", android.graphics.Bitmap::class.java)
+                ?: extras.getParcelable("android.picture", android.graphics.Bitmap::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            extras.getParcelable<android.graphics.Bitmap>("android.largeIcon")
+                ?: @Suppress("DEPRECATION")
+            extras.getParcelable<android.graphics.Bitmap>("android.picture")
+        }
         if (bitmap != null) {
             try {
                 val outputStream = java.io.ByteArrayOutputStream()
@@ -181,7 +193,7 @@ class NotificationHook : NotificationListenerService() {
                 } else {
                     jsonStr
                 }
-                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:23520/api/media", payload)
+                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:9876/api/media", payload)
             }
         }
     }

@@ -1,6 +1,7 @@
 package org.kyberpipe.client.security
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -31,7 +32,14 @@ object KeyStoreManager {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-            .setUserAuthenticationRequired(false)
+            .setUserAuthenticationRequired(true)
+            .apply {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    @Suppress("DEPRECATION")
+                    setUserAuthenticationValidityDurationSeconds(300)
+                }
+            }
+            .setInvalidatedByBiometricEnrollment(true)
             .build()
 
         keyGenerator.init(spec)

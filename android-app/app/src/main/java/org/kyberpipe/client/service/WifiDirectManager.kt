@@ -48,9 +48,12 @@ class WifiDirectManager(private val context: Context) {
                     }
                 }
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                    val info = intent.getParcelableExtra<WifiP2pInfo>(
-                        WifiP2pManager.EXTRA_WIFI_P2P_INFO
-                    )
+                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_INFO, WifiP2pInfo::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
+                    }
                     if (info != null) {
                         val groupOwnerIp = info.groupOwnerAddress?.hostAddress ?: ""
                         currentState = currentState.copy(
@@ -65,9 +68,12 @@ class WifiDirectManager(private val context: Context) {
                     }
                 }
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
-                    val device = intent.getParcelableExtra<WifiP2pDevice>(
-                        WifiP2pManager.EXTRA_WIFI_P2P_DEVICE
-                    )
+                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE, WifiP2pDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
+                    }
                     if (device != null) {
                         currentState = currentState.copy(
                             peerMac = device.deviceAddress
@@ -169,11 +175,32 @@ class WifiDirectManager(private val context: Context) {
     }
 
     fun getWifiDirectIp(): String {
-        val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        val wifiInfo = wifiManager?.connectionInfo
-        return wifiInfo?.ipAddress?.let {
-            String.format("%d.%d.%d.%d", it and 0xff, it shr 8 and 0xff, it shr 16 and 0xff, it shr 24 and 0xff)
-        } ?: ""
+        // Use ConnectivityManager to get the actual IP address from the p2p interface
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return ""
+        }
+        val linkProps = connectivityManager.getLinkProperties(connectivityManager.activeNetwork) ?: return ""
+        // Find the IPv4 address specifically on the p2p or wifi interface
+        for (addr in linkProps.linkAddresses) {
+            val inetAddr = addr.address
+            if (inetAddr is java.net.Inet4Address) {
+                val ipStr = inetAddr.hostAddress ?: continue
+                // Return the first valid private IPv4 address (p2p or wifi subnet)
+                if (ipStr.startsWith("192.168.") || ipStr.startsWith("10.")) {
+                    return ipStr
+                }
+            }
+        }
+        // Fallback: try to find a route on p2p interface
+        for (route in linkProps.routes) {
+            val inetAddr = route.destination?.address ?: continue
+            if (inetAddr is java.net.Inet4Address && inetAddr.hostAddress?.startsWith("192.168.") == true) {
+                // The gateway IP (destination) may give us the subnet hint
+                return inetAddr.hostAddress ?: ""
+            }
+        }
+        return ""
     }
 
     fun destroy() {
