@@ -165,10 +165,23 @@ class NotificationHook : NotificationListenerService() {
                 .put("actions", org.json.JSONArray(actionsList))
             
             val jsonStr = jsonMedia.toString()
-            org.kyberpipe.client.utils.sendPostRequestAsync("http://10.0.2.2:23520/api/media", jsonStr)
             val hostIp = settings.pairedHostIp
-            if (hostIp != "10.0.2.2" && hostIp.isNotEmpty()) {
-                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:23520/api/media", jsonStr)
+            val sessionKey = settings.sessionKey
+            if (hostIp.isNotEmpty()) {
+                val payload = if (sessionKey.isNotEmpty()) {
+                    try {
+                        val encrypted = uniffi.core_crypto.encryptPayloadWithKey(sessionKey, jsonStr)
+                        org.json.JSONObject().put("encrypted", org.json.JSONObject()
+                            .put("nonce_hex", encrypted.nonceHex)
+                            .put("ciphertext_hex", encrypted.ciphertextHex)
+                        ).toString()
+                    } catch (_: Exception) {
+                        jsonStr
+                    }
+                } else {
+                    jsonStr
+                }
+                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:23520/api/media", payload)
             }
         }
     }

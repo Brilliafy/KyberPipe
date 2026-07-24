@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("⚡ Kyberpipe P2P Status Indicator");
             println!("Active Route: Multipath Aggregated (Wi-Fi Direct P2P + local Wi-Fi LAN)");
             println!("Post-Quantum KEM: NIST ML-KEM-768 Active");
-            println!("Average Latency (RTT): 2.4 ms");
+            println!("Average Latency (RTT): N/A (no active connection)");
             println!("Flight Data Recorder: Inactive (Zero Overhead Mode)");
         }
         Commands::Send { payload } => {

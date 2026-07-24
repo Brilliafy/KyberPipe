@@ -11,6 +11,7 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
+import QRCode from 'qrcode';
 import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music, ShieldAlert } from "@lucide/vue";
 
 
@@ -149,10 +150,6 @@ const getMediaIcon = (title: string) => {
   return Music;
 };
 
-const wifiDirectActive = ref(true);
-const lanActive = ref(false);
-const wireguardActive = ref(true);
-const resolvedPublicIp = ref("Not Queried");
 const pairingConfigJson = ref("");
 
 // Latency for top-bar display
@@ -165,8 +162,6 @@ const latencyColor = computed(() => {
   if (ms < 500) return '#f97316';
   return '#ef4444';
 });
-
-const hasWifiInterface = ref(true); // Will be determined by system info
 
 // Settings / Storage
 const deviceName = ref("My Linux Workstation");
@@ -193,8 +188,21 @@ const clipboardItems = ref<ClipboardRecord[]>([]);
 const notifList = ref<UnifiedNotification[]>([]);
 const optimisticStatus = ref<string | null>(null);
 const autoPurgeDays = ref(7);
+const localMethod = ref("");
+const remoteMethod = ref("");
+const localActive = ref(false);
+const remoteActive = ref(false);
+const localPriority = ref(true);
+const pairingQrData = ref("");
+const pairingQrUrl = ref("");
+const showPairingQr = ref(false);
+const showManualIpDialog = ref(false);
+const manualIpInput = ref("");
+const manualPortInput = ref("23520");
+const showSasVerification = ref(false);
+const sasWords = ref(["", "", "", ""]);
 
-const sasCode = ref("849-201");
+const sasCode = ref("");
 const neuralAnomalyEnabled = ref(false);
 const flightRecorderEnabled = ref(false);
 const themeMode = ref("auto");
@@ -234,7 +242,6 @@ const loadSettings = async () => {
     fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
     themeMode.value = settings.theme_mode || "auto";
     pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
-    wireguardActive.value = settings.wireguard_active !== undefined ? settings.wireguard_active : true;
   } catch (e) {
     console.error("Load settings error:", e);
   }
@@ -253,7 +260,6 @@ const saveSettings = async () => {
       isPaired: isPaired.value,
       themeMode: themeMode.value,
       pathwayOrder: pathwayOrder.value,
-      wireguardActive: wireguardActive.value
     });
   } catch (e) {
     console.error("Save settings error:", e);
@@ -429,22 +435,7 @@ const refreshLogs = async () => {
     console.error(e);
   }
 };
-
-const runStunHolePunch = async (host: string) => {
-  try {
-    resolvedPublicIp.value = "Querying STUN...";
-    const res = await invoke<string>("perform_stun_hole_punch", { stunHost: host });
-    resolvedPublicIp.value = res;
-    await refreshLogs();
-    await triggerConnectionAttempt();
-  } catch (e: any) {
-    resolvedPublicIp.value = "Failed: " + e;
-    await refreshLogs();
-  }
-};
-
 const attemptCount = ref(0);
-const maxAttempts = 5;
 
 const triggerConnectionAttempt = async () => {
   if (!isPaired.value) {
@@ -457,59 +448,16 @@ const triggerConnectionAttempt = async () => {
     return;
   }
 
-  if (attemptCount.value >= maxAttempts) {
-    await invoke("set_connection_status_full", {
-      status: "DISCONNECTED (Max attempts failed)",
-      method: "None",
-      color: "red"
-    });
-    await checkConnectionState();
-    return;
+  const res = await invoke<any>("get_connection_status_full");
+  if (res.color === "green") {
+    return;  // Already connected
   }
 
-  attemptCount.value++;
   await invoke("set_connection_status_full", {
-    status: `CONNECTING (Attempt ${attemptCount.value}/${maxAttempts})`,
+    status: "WAITING FOR COMPANION",
     method: "None",
     color: "yellow"
   });
-  await checkConnectionState();
-  await refreshLogs();
-
-  try {
-    let chosenMethod = "None";
-    for (const path of pathwayOrder.value) {
-      if (path === "wifi_direct" && wifiDirectActive.value) {
-        chosenMethod = "Wi-Fi Direct P2P";
-        break;
-      }
-      if (path === "mdns_lan" && lanActive.value) {
-        chosenMethod = "mDNS LAN";
-        break;
-      }
-      if (path === "wireguard_wan" && wireguardActive.value) {
-        chosenMethod = "WireGuard WAN Tunnel";
-        break;
-      }
-    }
-
-    if (chosenMethod === "None") {
-      throw new Error("No pathways enabled");
-    }
-
-    await invoke("set_connection_status_full", {
-      status: "ACTIVE",
-      method: chosenMethod,
-      color: "green"
-    });
-    attemptCount.value = 0;
-  } catch (e) {
-    await invoke("set_connection_status_full", {
-      status: "DISCONNECTED (Attempt failed)",
-      method: "None",
-      color: "red"
-    });
-  }
   await checkConnectionState();
   await refreshLogs();
 };
@@ -523,6 +471,37 @@ const checkConnectionState = async () => {
   } catch (e) {
     console.error(e);
   }
+};
+
+const firewallStatus = ref<{ firewalld_active: boolean; ufw_active: boolean; port_open: boolean; commands: string[] } | null>(null);
+const showFirewallModal = ref(false);
+const firewallBusy = ref(false);
+const firewallResult = ref("");
+
+const checkFirewall = async () => {
+  try {
+    const res = await invoke<any>("check_firewall");
+    firewallStatus.value = res;
+  } catch (e) {
+    console.error("Firewall check failed:", e);
+  }
+};
+
+const requestFirewallOpen = async () => {
+  firewallBusy.value = true;
+  firewallResult.value = "";
+  try {
+    const result = await invoke<string>("request_firewall_open");
+    if (result) {
+      firewallResult.value = result;
+      setTimeout(() => { showFirewallModal.value = false; }, 2000);
+    } else {
+      firewallResult.value = "Could not open firewall automatically. Use the commands below.";
+    }
+  } catch (e) {
+    firewallResult.value = "Failed: " + e;
+  }
+  firewallBusy.value = false;
 };
 
 const handleManualRetry = () => {
@@ -623,12 +602,109 @@ const handleDeleteConnection = async () => {
   isPaired.value = false;
   pairedDeviceName.value = "";
   pairedDevicePicture.value = "";
+  localMethod.value = "";
+  remoteMethod.value = "";
+  localActive.value = false;
+  remoteActive.value = false;
   await invoke("set_connection_status_full", {
     status: "DISCONNECTED",
     method: "None",
     color: "red"
   });
   await saveSettings();
+};
+
+const handlePairLocally = async (method: string) => {
+  localMethod.value = method;
+  localActive.value = true;
+  if (method === "wifi_direct") {
+    try {
+      const p2pInfo = await invoke<any>("create_p2p_group");
+      pairingQrData.value = JSON.stringify({
+        method: "p2p", ssid: p2pInfo.ssid, pass: p2pInfo.passphrase,
+        p2p_ip: p2pInfo.ip, wifi_direct_mac: p2pInfo.mac,
+        pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+        x25519_pub: keyPair.value?.x25519_pk_hex || ""
+      });
+      pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
+      showPairingQr.value = true;
+    } catch (e) {
+      console.error("P2P group creation failed:", e);
+    }
+  } else if (method === "mdns") {
+    pairingQrData.value = JSON.stringify({
+      method: "mdns", service: "_kyberpipe._tcp.local",
+      name: deviceName.value, pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+      x25519_pub: keyPair.value?.x25519_pk_hex || ""
+    });
+    pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
+    showPairingQr.value = true;
+  } else if (method === "manual_ip") {
+    showManualIpDialog.value = true;
+  }
+};
+
+const handlePairExternally = async (method: string) => {
+  remoteMethod.value = method;
+  remoteActive.value = true;
+  if (method === "wormhole") {
+    try {
+      const code = await invoke<string>("generate_wormhole_code");
+      pairingQrData.value = JSON.stringify({
+        method: "wormhole", code: code,
+        pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+        x25519_pub: keyPair.value?.x25519_pk_hex || ""
+      });
+      pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
+      showPairingQr.value = true;
+    } catch (e) {
+      console.error("Wormhole code generation failed:", e);
+    }
+  } else if (method === "tor") {
+    try {
+      const onion = await invoke<any>("create_tor_onion");
+      if (onion.onion_address) {
+        pairingQrData.value = JSON.stringify({
+          method: "tor", onion: onion.onion_address, auth_key: onion.auth_key,
+          pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+          x25519_pub: keyPair.value?.x25519_pk_hex || ""
+        });
+        pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
+        showPairingQr.value = true;
+      }
+    } catch (e) {
+      console.error("Tor onion creation failed:", e);
+    }
+  }
+};
+
+const submitManualPairing = async () => {
+  const ip = manualIpInput.value.trim();
+  if (!ip) return;
+  pairingQrData.value = JSON.stringify({
+    method: "manual_ip", host: ip, port: parseInt(manualPortInput.value) || 23520,
+    pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+    x25519_pub: keyPair.value?.x25519_pk_hex || ""
+  });
+  pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
+  showManualIpDialog.value = false;
+  showPairingQr.value = true;
+};
+
+const confirmSas = (confirmed: boolean) => {
+  if (confirmed) {
+    localActive.value = true;
+    localMethod.value = "manual_ip";
+  }
+  showSasVerification.value = false;
+};
+
+const handleFixFirewall = async () => {
+  try {
+    await invoke<string>("request_firewall_open");
+  } catch (e) {
+    console.error("Firewall fix failed:", e);
+  }
 };
 
 let clipPoller: any = null;
@@ -640,6 +716,7 @@ onMounted(async () => {
   await handleGenerateKeyPair();
   await checkConnectionState();
   await verifyFlatpakPermissions();
+  checkFirewall(); // Silent check, modal shows on connection failure
   
   // Load persisted notifications and purge old ones
   loadPersistedNotifications();
@@ -651,11 +728,7 @@ onMounted(async () => {
   
   // Latency for top-bar display
   setInterval(() => {
-    if (isConnected.value) {
-      currentLatency.value = Math.round(2 + Math.random() * 10);
-    } else {
-      currentLatency.value = 0;
-    }
+    currentLatency.value = 0;
   }, 2000);
 
 
@@ -664,6 +737,20 @@ onMounted(async () => {
     systemInfo.value = await invoke<SystemInfo>("get_system_info");
   } catch (e) {
     console.error(e);
+  }
+
+  // Register mDNS service for Zeroconf discovery
+  try {
+    const pqcPub = keyPair.value?.mlkem_pk_hex || "";
+    if (pqcPub) {
+      await invoke("register_mdns_service", {
+        serviceName: deviceName.value || "KyberPipe-Desktop",
+        port: 23520,
+        txtData: pqcPub
+      });
+    }
+  } catch (e) {
+    console.error("mDNS registration failed:", e);
   }
 
   // Real clipboard poller (1.5s interval)
@@ -775,23 +862,18 @@ onUnmounted(() => {
 
           <ConnectivityManager
             v-else-if="currentTab === 'connectivity'"
-            v-model:pathwayOrder="pathwayOrder"
-            :wifiDirectActive="wifiDirectActive"
-            :lanActive="lanActive"
-            :wireguardActive="wireguardActive"
-            :hasWifiInterface="hasWifiInterface"
-            :resolvedPublicIp="resolvedPublicIp"
-            :ddnsHostname="ddnsHostname"
-            :enableUpnp="enableUpnp"
-            :enableDdns="enableDdns"
-            @update:wifiDirectActive="wifiDirectActive = $event; triggerConnectionAttempt()"
-            @update:lanActive="lanActive = $event; triggerConnectionAttempt()"
-            @update:wireguardActive="wireguardActive = $event; triggerConnectionAttempt()"
-            @update:ddnsHostname="ddnsHostname = $event"
-            @update:enableUpnp="enableUpnp = $event"
-            @update:enableDdns="enableDdns = $event"
-            @runStunHolePunch="runStunHolePunch"
-            @saveSettings="saveSettings"
+            :isPaired="isPaired"
+            :pairedDeviceName="pairedDeviceName"
+            :localMethod="localMethod"
+            :remoteMethod="remoteMethod"
+            :localActive="localActive"
+            :remoteActive="remoteActive"
+            @pairLocally="handlePairLocally"
+            @pairExternally="handlePairExternally"
+            @removeDevice="handleDeleteConnection"
+            @swapPriority="localPriority = !localPriority"
+            @fixFirewall="handleFixFirewall"
+            @navigate="currentTab = $event as any"
           />
 
           <FileManager
@@ -938,8 +1020,84 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
-    </main>
-  </div>
+
+    <!-- Manual IP Input Dialog -->
+    <div class="flatpak-modal-overlay" v-if="showManualIpDialog" @click.self="showManualIpDialog = false">
+      <div class="flatpak-modal-card" style="max-width: 420px;">
+        <h3>Manual IP / DDNS</h3>
+        <p class="card-desc" style="margin: 0.5rem 0;">Enter the desktop's LAN IP or DDNS hostname and port.</p>
+        <div class="form-group" style="margin: 1rem 0;">
+          <label>IP Address or Hostname</label>
+          <input type="text" v-model="manualIpInput" class="input-text" placeholder="192.168.1.11 or desktop.example.com" />
+        </div>
+        <div class="form-group" style="margin-bottom: 1rem;">
+          <label>Port</label>
+          <input type="number" v-model="manualPortInput" class="input-text" placeholder="23520" />
+        </div>
+        <p class="card-desc">A QR will be generated for the Android app to scan.</p>
+        <div class="modal-actions" style="margin-top: 1rem;">
+          <button class="btn btn-secondary" @click="showManualIpDialog = false">Cancel</button>
+          <button class="btn btn-primary" @click="submitManualPairing">Generate QR</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SAS Verification Modal -->
+    <div class="flatpak-modal-overlay" v-if="showSasVerification" @click.self="showSasVerification = false">
+      <div class="flatpak-modal-card" style="max-width: 420px; text-align: center;">
+        <h3>Verify Security Code</h3>
+        <p class="card-desc" style="margin: 0.5rem 0;">Confirm these 4 words match what's shown on your Android device:</p>
+        <div style="display: flex; gap: 0.75rem; justify-content: center; margin: 1.5rem 0; flex-wrap: wrap;">
+          <span v-for="(word, i) in sasWords" :key="i" class="sas-word" style="background: var(--bg-dark); padding: 0.5rem 0.75rem; border-radius: 8px; font-weight: bold; color: var(--accent-cyan);">{{ word }}</span>
+        </div>
+        <p class="card-desc">If the words match, your connection is secure.</p>
+        <div class="modal-actions" style="margin-top: 1rem;">
+          <button class="btn btn-danger" @click="confirmSas(false); showSasVerification = false">Don't Match</button>
+          <button class="btn btn-primary" @click="confirmSas(true); showSasVerification = false">Words Match!</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pairing QR Code Modal -->
+    <div class="flatpak-modal-overlay" v-if="showPairingQr" @click.self="showPairingQr = false">
+      <div class="flatpak-modal-card" style="max-width: 480px; text-align: center;">
+        <h3>📱 Scan with Android</h3>
+        <p class="card-desc" style="margin: 0.5rem 0;">Open KyberPipe on your Android and scan this QR code to pair via <strong>{{ localMethod }}</strong>.</p>
+        <div style="background: white; border-radius: 12px; padding: 12px; margin: 1rem auto; width: 280px;">
+          <img v-if="pairingQrUrl" :src="pairingQrUrl" style="width: 100%; image-rendering: pixelated;" alt="Pairing QR" />
+        </div>
+        <p style="font-size: 0.7rem; color: var(--text-secondary); word-break: break-all; max-width: 100%;">{{ pairingQrData }}</p>
+        <div class="modal-actions" style="margin-top: 1rem;">
+          <button class="btn btn-primary" @click="showPairingQr = false">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Firewall Port Blocked Modal -->
+    <div class="flatpak-modal-overlay" v-if="showFirewallModal" @click.self="showFirewallModal = false">
+      <div class="flatpak-modal-card" style="max-width: 550px;">
+        <h3>🛡️ Allow Android to connect?</h3>
+        <p class="card-desc" style="margin: 0.75rem 0;">KyberPipe needs to open port <strong>23520/tcp</strong> on your firewall so your Android device can pair and sync with this desktop.</p>
+        <p class="card-desc" style="margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-secondary);">
+          If you skip this, Android won't be able to discover or connect to this desktop over the local network. Wi-Fi Direct and USB tethering will still work.
+        </p>
+        <div v-if="firewallResult" style="margin: 0.75rem 0; padding: 0.5rem; background: #1e293b; border-radius: 6px; font-size: 0.8rem;">
+          {{ firewallResult }}
+        </div>
+        <div v-if="!firewallResult && firewallStatus && firewallStatus.commands.length > 0" style="margin: 0.75rem 0;">
+          <p style="font-size:0.75rem; color:var(--text-secondary); margin-bottom: 0.5rem;">If the automatic method fails, run this in a terminal:</p>
+          <code style="display:block; background:#1e293b; padding:0.5rem; border-radius:4px; font-size:0.75rem; word-break:break-all;">{{ firewallStatus.commands[0] }}</code>
+        </div>
+        <div class="modal-actions" style="margin-top: 1rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button class="btn btn-secondary" @click="showFirewallModal = false">Skip</button>
+          <button class="btn btn-primary" :disabled="firewallBusy" @click="requestFirewallOpen">
+            {{ firewallBusy ? 'Opening...' : 'Allow connection' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
 </template>
 
 <style>
@@ -951,7 +1109,6 @@ onUnmounted(() => {
   --text-secondary: #94a3b8;
   --accent-cyan: #06b6d4;
   --accent-indigo: #6366f1;
-  color-scheme: dark;
 }
 
 .flatpak-modal-overlay {

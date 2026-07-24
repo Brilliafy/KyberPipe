@@ -300,11 +300,11 @@ pub struct TelemetryMetrics {
 pub fn get_telemetry_metrics(state: State<'_, std::sync::Arc<AppState>>) -> TelemetryMetrics {
     let _logs = state.logs.lock().ok();
     TelemetryMetrics {
-        rtt_ms: 2.4, // Wi-Fi Direct low-latency P2P benchmark
-        transport_path: "Wi-Fi Direct P2P Link (Multiplexed QUIC)".to_string(),
-        packets_sent: 1420,
-        packets_received: 1398,
-        last_script_execution_ms: 0.85, // Sandboxed Boa VM execution speed
+        rtt_ms: 0.0,
+        transport_path: "Disconnected".to_string(),
+        packets_sent: 0,
+        packets_received: 0,
+        last_script_execution_ms: 0.0,
     }
 }
 
@@ -1018,7 +1018,100 @@ pub fn read_real_clipboard_internal() -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+pub fn request_firewall_open() -> String {
+    // First try: launch the desktop GUI firewall manager (like Windows "Allow through firewall")
+    for gui_app in &[
+        "firewall-config",
+        "gnome-control-center",
+        "firewall-applet",
+        "xfce-firewall",
+    ] {
+        if let Ok(out) = std::process::Command::new("sh")
+            .args(["-c", &format!("which {} 2>/dev/null", gui_app)])
+            .output()
+        {
+            if !out.stdout.is_empty() {
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", &format!("{} &", gui_app)])
+                    .spawn();
+                return format!(
+                    "Opened {} GUI. Please add port 23520/tcp to the firewall.",
+                    gui_app
+                );
+            }
+        }
+    }
+
+    // Second try: Polkit via pkexec (native OS dialog)
+    if std::process::Command::new("firewall-cmd")
+        .arg("--state")
+        .output()
+        .is_ok()
+    {
+        if let Ok(out) = std::process::Command::new("sh")
+            .args(["-c", "pkexec firewall-cmd --add-port=23520/tcp --permanent && pkexec firewall-cmd --reload"])
+            .output()
+        {
+            if out.status.success() {
+                return "Port opened via firewalld/Polkit".to_string();
+            }
+        }
+    }
+    if std::process::Command::new("ufw")
+        .arg("status")
+        .output()
+        .is_ok()
+    {
+        if let Ok(out) = std::process::Command::new("sh")
+            .args(["-c", "pkexec ufw allow 23520/tcp"])
+            .output()
+        {
+            if out.status.success() {
+                return "Port opened via ufw/Polkit".to_string();
+            }
+        }
+    }
+
+    // Third try: D-Bus Polkit via busctl
+    if let Ok(out) = std::process::Command::new("busctl")
+        .args([
+            "call",
+            "org.fedoraproject.FirewallD1",
+            "/org/fedoraproject/FirewallD1",
+            "org.fedoraproject.FirewallD1",
+            "AddPort",
+            "s",
+            "public",
+            "s",
+            "tcp",
+            "u",
+            "23520",
+            "s",
+            "kyberpipe-sync",
+        ])
+        .output()
+    {
+        if out.status.success() {
+            let _ = std::process::Command::new("busctl")
+                .args([
+                    "call",
+                    "org.fedoraproject.FirewallD1",
+                    "/org/fedoraproject/FirewallD1",
+                    "org.fedoraproject.FirewallD1",
+                    "Reload",
+                ])
+                .output();
+            return "Port opened via D-Bus/Polkit".to_string();
+        }
+    }
+
+    String::new()
+}
+
 pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
+    core_crypto::try_start_p2p_group();
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1026,19 +1119,44 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
             .expect("Failed to build sync server tokio runtime");
         rt.block_on(async move {
         let listener = match TcpListener::bind("0.0.0.0:23520").await {
-            Ok(l) => l,
+            Ok(l) => {
+                eprintln!("[Sync Server] Listening on 0.0.0.0:23520");
+                l
+            }
             Err(e) => {
                 eprintln!("Failed to bind sync server: {e}");
                 return;
             }
         };
 
+        // Spawn mDNS/LAN beacon broadcast loop
+        let beacon_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let host_pk = {
+                    let kp = beacon_state.keypair.lock().unwrap();
+                    kp.as_ref().map(|p| p.mlkem_pk_hex.clone()).unwrap_or_default()
+                };
+                let device_name = {
+                    let s = beacon_state.settings.lock().unwrap();
+                    s.device_name.clone().unwrap_or_else(|| "Desktop".to_string())
+                };
+                let local_ip = core_crypto::get_local_ip();
+                if !host_pk.is_empty() && !local_ip.is_empty() {
+                    let payload = format!("{}:{}:{}", host_pk, local_ip, device_name);
+                    let _ = core_crypto::send_beacon_payload(payload).await;
+                }
+            }
+        });
+
         loop {
 
-            let (mut socket, _) = match listener.accept().await {
+            let (mut socket, addr) = match listener.accept().await {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            eprintln!("[Sync Server] Connection from {addr}");
 
             let state_clone = state.clone();
             tokio::spawn(async move {
@@ -1072,11 +1190,50 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                 let req_str = String::from_utf8_lossy(&buf[..n]);
                 let (response_status, response_body) = if req_str.contains("POST /api/pair") {
                     let mut name = "Android Phone".to_string();
+                    let mut ciphertext_hex = String::new();
+                    let mut client_pk_hex = String::new();
                     if let Some(body_start) = req_str.find("\r\n\r\n") {
                         let body = &req_str[body_start + 4..];
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
                             if let Some(n_val) = json.get("name").and_then(|v| v.as_str()) {
                                 name = n_val.to_string();
+                            }
+                            if let Some(c_val) = json.get("ciphertext_hex").and_then(|v| v.as_str()) {
+                                ciphertext_hex = c_val.to_string();
+                            }
+                            if let Some(pk_val) = json.get("client_pk_hex").and_then(|v| v.as_str()) {
+                                client_pk_hex = pk_val.to_string();
+                            }
+                        }
+                    }
+
+                    // Decapsulate shared secret from ciphertext to derive session key
+                    if !ciphertext_hex.is_empty() {
+                        if let Ok(kp) = state_clone.keypair.lock() {
+                            if let Some(ref pair) = *kp {
+                                if let Ok(shared_secret) = core_crypto::decapsulate_pq_secret(
+                                    ciphertext_hex.clone(),
+                                    pair.x25519_sk_hex.clone(),
+                                    pair.mlkem_sk_hex.clone(),
+                                ) {
+                                    let ss_for_sas = shared_secret.clone();
+                                    let salt = hex::encode("kyberpipe-sync-v1");
+                                    if let Ok(sk) = core_crypto::derive_session_key(shared_secret, salt) {
+                                        *state_clone.session_key.lock().unwrap() = sk;
+                                        state_clone.add_log("[Session] Derived encrypted session key from KEM handshake".to_string());
+                                    }
+                                    // Compute SAS code from shared secret for visual verification
+                                    if !client_pk_hex.is_empty() {
+                                        if let Ok(sas) = core_crypto::generate_sas_code(
+                                            pair.mlkem_pk_hex.clone(),
+                                            client_pk_hex,
+                                            ss_for_sas,
+                                        ) {
+                                            *state_clone.sas_code.lock().unwrap() = sas.clone();
+                                            state_clone.add_log(format!("[Session] SAS code: {sas}"));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1101,7 +1258,20 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                     if let Some(body_start) = req_str.find("\r\n\r\n") {
                         let body = &req_str[body_start + 4..];
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-                            if let Some(t_val) = json.get("text").and_then(|v| v.as_str()) {
+                            let session_key = state_clone.session_key.lock().unwrap().clone();
+                            if !session_key.is_empty() {
+                                if let Some(enc) = json.get("encrypted") {
+                                    let nonce = enc.get("nonce_hex").and_then(|v| v.as_str()).unwrap_or_default();
+                                    let ct = enc.get("ciphertext_hex").and_then(|v| v.as_str()).unwrap_or_default();
+                                    if !nonce.is_empty() && !ct.is_empty() {
+                                        if let Ok(decrypted) = core_crypto::decrypt_payload_with_key(
+                                            session_key, nonce.to_string(), ct.to_string(),
+                                        ) {
+                                            text = decrypted;
+                                        }
+                                    }
+                                }
+                            } else if let Some(t_val) = json.get("text").and_then(|v| v.as_str()) {
                                 text = t_val.to_string();
                             }
                         }
@@ -1118,34 +1288,51 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
 
                     ("200 OK", r#"{"status":"synced"}"#.to_string())
                 } else if req_str.contains("POST /api/media") {
+                    let mut body_str = String::new();
                     if let Some(body_start) = req_str.find("\r\n\r\n") {
-                        let body = &req_str[body_start + 4..];
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-                            let title = json.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                            let artist = json.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                            let album_art = json.get("album_art").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                            let is_playing = json.get("is_playing").and_then(|v| v.as_bool()).unwrap_or_default();
+                        body_str = req_str[body_start + 4..].to_string();
+                    }
+                    let body = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_str) {
+                        if json.get("encrypted").is_some() {
+                            let session_key = state_clone.session_key.lock().unwrap().clone();
+                            if !session_key.is_empty() {
+                                if let Some(enc) = json.get("encrypted") {
+                                    let nonce = enc.get("nonce_hex").and_then(|v| v.as_str()).unwrap_or_default();
+                                    let ct = enc.get("ciphertext_hex").and_then(|v| v.as_str()).unwrap_or_default();
+                                    if !nonce.is_empty() && !ct.is_empty() {
+                                        if let Ok(decrypted) = core_crypto::decrypt_payload_with_key(
+                                            session_key, nonce.to_string(), ct.to_string(),
+                                        ) { decrypted } else { body_str.clone() }
+                                    } else { body_str.clone() }
+                                } else { body_str.clone() }
+                            } else { body_str.clone() }
+                        } else { body_str.clone() }
+                    } else { body_str.clone() };
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let title = json.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let artist = json.get("artist").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let album_art = json.get("album_art").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let is_playing = json.get("is_playing").and_then(|v| v.as_bool()).unwrap_or_default();
 
-                            let mut actions = vec![];
-                            if let Some(act_arr) = json.get("actions").and_then(|v| v.as_array()) {
-                                for act_val in act_arr {
-                                    let act_title = act_val.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                                    let act_index = act_val.get("index").and_then(|v| v.as_u64()).unwrap_or_default() as u32;
-                                    actions.push(crate::state::MediaAction {
-                                        title: act_title,
-                                        index: act_index,
-                                    });
-                                }
+                        let mut actions = vec![];
+                        if let Some(act_arr) = json.get("actions").and_then(|v| v.as_array()) {
+                            for act_val in act_arr {
+                                let act_title = act_val.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                let act_index = act_val.get("index").and_then(|v| v.as_u64()).unwrap_or_default() as u32;
+                                actions.push(crate::state::MediaAction {
+                                    title: act_title,
+                                    index: act_index,
+                                });
                             }
+                        }
 
-                            {
-                                let mut m = state_clone.media_state.lock().unwrap();
-                                m.title = title;
-                                m.artist = artist;
-                                m.album_art = album_art;
-                                m.is_playing = is_playing;
-                                m.actions = actions;
-                            }
+                        {
+                            let mut m = state_clone.media_state.lock().unwrap();
+                            m.title = title;
+                            m.artist = artist;
+                            m.album_art = album_art;
+                            m.is_playing = is_playing;
+                            m.actions = actions;
                         }
                     }
                     ("200 OK", r#"{"status":"synced"}"#.to_string())
@@ -1170,6 +1357,24 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                     let connection_color = state_clone.connection_color.lock().unwrap().clone();
                     let latest_clip = read_real_clipboard_internal().unwrap_or_default();
 
+                    let latest_clip_encrypted = if !latest_clip.is_empty() {
+                        let session_key = state_clone.session_key.lock().unwrap().clone();
+                        if !session_key.is_empty() {
+                            if let Ok(payload) = core_crypto::encrypt_payload_with_key(session_key, latest_clip.clone()) {
+                                serde_json::json!({
+                                    "nonce_hex": payload.nonce_hex,
+                                    "ciphertext_hex": payload.ciphertext_hex
+                                })
+                            } else {
+                                serde_json::Value::Null
+                            }
+                        } else {
+                            serde_json::Value::Null
+                        }
+                    } else {
+                        serde_json::Value::Null
+                    };
+
                     let pending_act = {
                         let mut act = state_clone.pending_media_action.lock().unwrap();
                         let prev = *act;
@@ -1183,6 +1388,8 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
                         "connection_method": connection_method,
                         "connection_color": connection_color,
                         "latest_clip": latest_clip,
+                        "latest_clip_encrypted": latest_clip_encrypted,
+                        "sas_code": state_clone.sas_code.lock().unwrap().clone(),
                         "pending_media_action": pending_act
                     });
 
@@ -1199,7 +1406,6 @@ pub fn start_local_sync_server(state: std::sync::Arc<AppState>) {
 
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
 
             });
         }
@@ -1219,4 +1425,337 @@ pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::syn
 #[tauri::command]
 pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
     state.media_state.lock().unwrap().clone()
+}
+
+#[derive(Serialize)]
+pub struct FirewallStatus {
+    pub firewalld_active: bool,
+    pub ufw_active: bool,
+    pub port_open: bool,
+    pub client_isolation: bool,
+    pub commands: Vec<String>,
+}
+
+#[tauri::command]
+pub fn check_firewall(state: State<'_, std::sync::Arc<AppState>>) -> FirewallStatus {
+    let mut status = FirewallStatus {
+        firewalld_active: false,
+        ufw_active: false,
+        port_open: true,
+        client_isolation: false,
+        commands: vec![],
+    };
+
+    // Check if firewalld is active
+    if let Ok(out) = std::process::Command::new("firewall-cmd")
+        .arg("--state")
+        .output()
+    {
+        let active = String::from_utf8_lossy(&out.stdout).trim() == "running";
+        status.firewalld_active = active;
+        if active {
+            let check = std::process::Command::new("firewall-cmd")
+                .args(["--query-port", "23520/tcp"])
+                .output();
+            if let Ok(c) = check {
+                if !c.status.success() {
+                    status.port_open = false;
+                    status.commands.push("sudo firewall-cmd --add-port=23520/tcp --permanent && sudo firewall-cmd --reload".to_string());
+                }
+            }
+        }
+    }
+
+    // Check if ufw is active
+    if let Ok(out) = std::process::Command::new("ufw").arg("status").output() {
+        let output = String::from_utf8_lossy(&out.stdout);
+        if output.contains("active") {
+            status.ufw_active = true;
+            let check = std::process::Command::new("ufw")
+                .args(["status", "verbose"])
+                .output();
+            if let Ok(c) = check {
+                let ufw_out = String::from_utf8_lossy(&c.stdout);
+                if !ufw_out.contains("23520") {
+                    status.port_open = false;
+                    status.commands.push("sudo ufw allow 23520/tcp".to_string());
+                }
+            }
+        }
+    }
+
+    // Generic iptables check
+    if !status.firewalld_active && !status.ufw_active {
+        if let Ok(out) = std::process::Command::new("iptables")
+            .args(["-L", "INPUT", "-n"])
+            .output()
+        {
+            let ipt = String::from_utf8_lossy(&out.stdout);
+            if ipt.contains("DROP") || ipt.contains("REJECT") {
+                status
+                    .commands
+                    .push("sudo iptables -A INPUT -p tcp --dport 23520 -j ACCEPT".to_string());
+            }
+        }
+    }
+
+    if status.port_open {
+        status.commands.clear();
+    }
+
+    state.add_log(format!(
+        "[Firewall] Check: firewalld={} ufw={} port_open={}",
+        status.firewalld_active, status.ufw_active, status.port_open
+    ));
+    status
+}
+
+/// Scan the local /24 subnet for a device listening on the given port
+#[tauri::command]
+pub fn scan_subnet_for_port(port: u16) -> Vec<String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let local_ip = core_crypto::get_local_ip();
+    if local_ip.is_empty() {
+        return vec![];
+    }
+    let parts: Vec<&str> = local_ip.split('.').collect();
+    if parts.len() != 4 {
+        return vec![];
+    }
+    let prefix = format!("{}.{}.{}.", parts[0], parts[1], parts[2]);
+
+    let mut results = vec![];
+    let mut handles = vec![];
+
+    for i in 1..255 {
+        let ip = format!("{prefix}{i}");
+        handles.push(std::thread::spawn(move || {
+            if let Ok(mut addrs) = format!("{ip}:{port}").to_socket_addrs() {
+                if let Some(addr) = addrs.next() {
+                    if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                        return Some(ip);
+                    }
+                }
+            }
+            None
+        }));
+    }
+
+    for h in handles {
+        if let Ok(Some(ip)) = h.join() {
+            if ip != local_ip {
+                results.push(ip);
+            }
+        }
+    }
+
+    results
+}
+
+/// Send an HTTP request to a reverse-connected Android device
+#[tauri::command]
+pub fn send_reverse_request(host: String, port: u16, request: String) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    if let Ok(mut stream) = TcpStream::connect_timeout(
+        &format!("{host}:{port}")
+            .parse()
+            .unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 0))),
+        Duration::from_secs(3),
+    ) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = stream.write_all(request.as_bytes());
+        let _ = stream.flush();
+        let mut buf = vec![0u8; 4096];
+        if let Ok(n) = stream.read(&mut buf) {
+            return String::from_utf8_lossy(&buf[..n]).to_string();
+        }
+    }
+    String::new()
+}
+
+#[derive(Serialize)]
+pub struct P2pGroupInfo {
+    pub ssid: String,
+    pub passphrase: String,
+    pub ip: String,
+    pub mac: String,
+}
+
+#[tauri::command]
+pub fn create_p2p_group() -> P2pGroupInfo {
+    let info = P2pGroupInfo {
+        ssid: "DIRECT-KyberPipe".to_string(),
+        passphrase: "kp-0000".to_string(),
+        ip: "192.168.49.1".to_string(),
+        mac: core_crypto::get_wifi_direct_mac(),
+    };
+
+    let script = r#"busctl call fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1 fi.w1.wpa_supplicant1 CreateInterface a{sv} 2 s Ifname p2p-wlo1-0 s Driver default 2>/dev/null || true
+sleep 1
+IFACE_PATH=$(busctl call fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1 fi.w1.wpa_supplicant1 GetInterface s p2p-wlo1-0 2>/dev/null | tr -d 'o "' | xargs)
+if [ -n "$IFACE_PATH" ]; then
+  busctl call fi.w1.wpa_supplicant1 "$IFACE_PATH" fi.w1.wpa_supplicant1.Interface.WPS Start s "" 2>/dev/null
+fi
+"#.to_string();
+
+    let _ = std::process::Command::new("pkexec")
+        .args(["sh", "-c", &script])
+        .output();
+
+    info
+}
+
+#[tauri::command]
+pub fn register_mdns_service(service_name: String, port: u16, txt_data: String) -> bool {
+    // Register _kyberpipe._tcp mDNS service via Avahi D-Bus
+    let script = format!(
+        r#"set -e
+EG_PATH=$(busctl call org.freedesktop.Avahi / org.freedesktop.Avahi.Server EntryGroupNew 2>/dev/null | tr -d 'o "' | xargs)
+if [ -z "$EG_PATH" ]; then exit 1; fi
+busctl call org.freedesktop.Avahi "$EG_PATH" org.freedesktop.Avahi.EntryGroup AddService iiuusssqa(sv) -1 0 0 "{}" "_kyberpipe._tcp" "" "" {} 1 "pqc" s "{}" 2>/dev/null
+busctl call org.freedesktop.Avahi "$EG_PATH" org.freedesktop.Avahi.EntryGroup Commit 2>/dev/null
+echo "mDNS registered"
+"#,
+        service_name, port, txt_data
+    );
+
+    std::process::Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[derive(Serialize)]
+pub struct TorOnionInfo {
+    pub onion_address: String,
+    pub auth_key: String,
+}
+
+#[tauri::command]
+pub fn create_tor_onion() -> TorOnionInfo {
+    let mut info = TorOnionInfo {
+        onion_address: String::new(),
+        auth_key: String::new(),
+    };
+
+    // Create a temporary torrc with control port enabled
+    let tmpdir = std::env::temp_dir().join(format!(
+        "kyberpipe_tor_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    let _ = std::fs::create_dir_all(&tmpdir);
+    let data_dir = tmpdir.join("data");
+    let _ = std::fs::create_dir_all(&data_dir);
+    let torrc_path = tmpdir.join("torrc");
+    let control_port_path = tmpdir.join("control.sock");
+
+    let torrc_content = format!(
+        r#"DataDirectory {}
+ControlPort unix:{}:auto
+SOCKSPort 0
+ClientOnly 1
+"#,
+        data_dir.display(),
+        control_port_path.display()
+    );
+    let _ = std::fs::write(&torrc_path, torrc_content);
+
+    // Launch tor
+    let mut tor_child = match std::process::Command::new("tor")
+        .args(["-f", &torrc_path.to_string_lossy()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return info,
+    };
+
+    // Wait briefly for tor to start and create the control socket
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Connect to the control socket and create an ephemeral onion service
+    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&control_port_path) {
+        use std::io::{Read, Write};
+        let mut buf = [0u8; 4096];
+
+        // Authenticate (empty password since we didn't set one)
+        let _ = stream.write_all(b"AUTHENTICATE\r\n");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = stream.read(&mut buf);
+
+        // Create ephemeral onion service pointing to localhost:23520
+        let add_onion_cmd =
+            "ADD_ONION NEW:BEST Flags=DiscardPK,Detach Port=23520,127.0.0.1:23520\r\n".to_string();
+        let _ = stream.write_all(add_onion_cmd.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let response = String::from_utf8_lossy(&buf[..n]);
+
+        // Parse: 250-ServiceID=xyzabc...250 OK
+        for line in response.lines() {
+            if let Some(id) = line.strip_prefix("250-ServiceID=") {
+                info.onion_address = format!("{id}.onion");
+            }
+            if let Some(privkey) = line.strip_prefix("250-PrivateKey=") {
+                // Extract the x25519 public key from the private key response
+                if line.contains("x25519") {
+                    info.auth_key = privkey.to_string();
+                }
+            }
+        }
+
+        // Cleanup: shut down tor and remove the onion
+        let _ = stream.write_all(b"CLOSECIRCUIT 0\r\n");
+        let _ = stream.write_all(b"SIGNAL SHUTDOWN\r\n");
+    }
+
+    let _ = tor_child.kill();
+    let _ = tor_child.wait();
+
+    info
+}
+
+#[tauri::command]
+pub fn generate_wormhole_code() -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
+    let n1 = ts
+        .bytes()
+        .take(6)
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let n2 = ts
+        .bytes()
+        .skip(6)
+        .take(6)
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let n3 = ts
+        .bytes()
+        .skip(12)
+        .take(6)
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let words = [
+        "apple", "bridge", "crane", "dolphin", "eagle", "falcon", "garden", "harbor", "island",
+        "jaguar", "knight", "lemon", "mountain", "noble", "ocean", "puzzle", "queen", "river",
+        "silver", "tiger", "umbrella", "valley", "winter", "zenith", "anchor", "bloom", "crystal",
+        "dragon", "ember", "frost",
+    ];
+    format!(
+        "{}-{}-{}",
+        words[(n1 % 32) as usize],
+        words[(n2 % 32) as usize],
+        words[(n3 % 32) as usize]
+    )
 }
