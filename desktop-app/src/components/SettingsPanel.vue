@@ -349,7 +349,6 @@ const handleFileChange = (event: Event) => {
   border-radius: 6px;
   font-size: 0.9rem;
   outline: none;
-  color-scheme: dark;
 }
 .input-text:focus, .input-select:focus {
   border-color: var(--accent-indigo);

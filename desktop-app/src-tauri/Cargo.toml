@@ -28,5 +28,8 @@ keyring = "2.1"
 hex = "0.4"
 mimalloc = "0.1"
 tracing = "0.1"
+magic-wormhole = { version = "0.8", optional = true }
+arti-client = { version = "0.44", optional = true }
+tokio-util = "0.7"
 
 

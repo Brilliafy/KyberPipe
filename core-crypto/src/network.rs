@@ -225,9 +225,9 @@ pub fn configure_quic_client(
     Ok(client_config)
 }
 
-/// Send UDP P2P discovery beacon
+/// Send UDP P2P discovery beacon with flexible payload format
 pub async fn send_p2p_beacon(
-    peer_identity_hex: &str,
+    payload_str: &str,
     target_addr: Option<SocketAddr>,
 ) -> Result<(), KyberError> {
     let socket = UdpSocket::bind("0.0.0.0:0")
@@ -240,7 +240,7 @@ pub async fn send_p2p_beacon(
 
     let mut payload = Vec::from(BEACON_MAGIC);
     payload.extend_from_slice(b":");
-    payload.extend_from_slice(peer_identity_hex.as_bytes());
+    payload.extend_from_slice(payload_str.as_bytes());
 
     let dest =
         target_addr.unwrap_or_else(|| SocketAddr::from(([255, 255, 255, 255], P2P_BEACON_PORT)));
@@ -253,7 +253,61 @@ pub async fn send_p2p_beacon(
     Ok(())
 }
 
-/// Query a public STUN server for the external/reflexive SocketAddr (RFC 5389 compliant)
+/// Listen for UDP P2P discovery beacons and return parsed host info
+pub async fn listen_for_beacons(
+    bind_port: u16,
+    timeout_secs: u64,
+) -> Result<Vec<(String, String, String)>, KyberError> {
+    let socket = UdpSocket::bind(format!("0.0.0.0:{bind_port}"))
+        .await
+        .map_err(|e| KyberError::NetworkError(format!("Failed to bind beacon listener: {e}")))?;
+
+    socket
+        .set_broadcast(true)
+        .map_err(|e| KyberError::NetworkError(format!("Failed to set broadcast: {e}")))?;
+
+    let mut results = Vec::new();
+    let start = std::time::Instant::now();
+
+    while start.elapsed().as_secs() < timeout_secs {
+        let mut buf = [0u8; 1024];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok((len, addr))) => {
+                let raw = &buf[..len];
+                if raw.starts_with(BEACON_MAGIC) {
+                    let payload = &raw[BEACON_MAGIC.len() + 1..];
+                    if let Ok(s) = String::from_utf8(payload.to_vec()) {
+                        let parts: Vec<&str> = s.splitn(3, ':').collect();
+                        if parts.len() >= 2 {
+                            let host_pk = parts[0].to_string();
+                            let local_ip = parts.get(1).unwrap_or(&"").to_string();
+                            let device_name = parts.get(2).unwrap_or(&"Desktop").to_string();
+                            info!(
+                                "Beacon received from {}: host={} ip={}",
+                                addr,
+                                &host_pk[..16],
+                                local_ip
+                            );
+                            results.push((host_pk, local_ip, device_name));
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("Beacon receive error: {e}");
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+
+    Ok(results)
+}
 pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError> {
     let addrs = tokio::net::lookup_host(stun_host).await.map_err(|e| {
         KyberError::NetworkError(format!("STUN host lookup failed for {stun_host}: {e}"))

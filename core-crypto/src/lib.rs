@@ -53,6 +53,7 @@ pub struct PairingConfig {
     pub host_identity_pk_hex: String,
     pub local_ip: String,
     pub wifi_direct_mac: String,
+    pub p2p_ip: String,
     pub wireguard_pk_hex: String,
     pub stun_endpoint: String,
     pub pairing_nonce_hex: String,
@@ -390,6 +391,25 @@ pub fn perform_stun_hole_punch(stun_host: String) -> Result<String, KyberError> 
     Ok(addr.to_string())
 }
 
+/// Listen for LAN mDNS beacons from desktop and return discovered hosts
+#[uniffi::export]
+pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| KyberError::NetworkError(format!("Failed to build tokio runtime: {e}")))?;
+
+    let results = rt
+        .block_on(network::listen_for_beacons(
+            network::P2P_BEACON_PORT,
+            timeout_secs,
+        ))?
+        .into_iter()
+        .map(|(pk, ip, name)| format!("{pk}:{ip}:{name}"))
+        .collect();
+    Ok(results)
+}
+
 #[uniffi::export]
 pub fn evaluate_connection_hierarchy(
     wifi_direct_active: bool,
@@ -420,6 +440,18 @@ pub fn evaluate_connection_hierarchy(
     }
 }
 
+pub fn get_local_ip() -> String {
+    get_system_local_ip()
+}
+
+pub fn get_wifi_direct_mac() -> String {
+    get_primary_mac()
+}
+
+pub async fn send_beacon_payload(payload: String) -> Result<(), KyberError> {
+    network::send_p2p_beacon(&payload, None).await
+}
+
 fn get_system_local_ip() -> String {
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
         if socket.connect("8.8.8.8:80").is_ok() {
@@ -431,7 +463,87 @@ fn get_system_local_ip() -> String {
             }
         }
     }
-    "127.0.0.1".to_string()
+    String::new()
+}
+
+fn get_primary_mac() -> String {
+    let _local_ip = get_system_local_ip();
+    let default_iface = get_default_interface();
+    if default_iface.is_empty() {
+        return String::new();
+    }
+    let mac_path = format!("/sys/class/net/{default_iface}/address");
+    if let Ok(mac) = std::fs::read_to_string(&mac_path) {
+        let mac = mac.trim().to_string();
+        if mac.len() >= 17 && mac.chars().filter(|&c| c == ':').count() == 5 {
+            return mac;
+        }
+    }
+    String::new()
+}
+
+fn get_default_interface() -> String {
+    if let Ok(route) = std::fs::read_to_string("/proc/net/route") {
+        for line in route.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts.get(1) == Some(&"00000000") {
+                return parts[0].to_string();
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let iface = entry.file_name().to_string_lossy().to_string();
+            if iface == "lo" {
+                continue;
+            }
+            return iface;
+        }
+    }
+    String::new()
+}
+
+fn get_p2p_ip() -> String {
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let iface = entry.file_name().to_string_lossy().to_string();
+            if iface.starts_with("p2p-") || iface.starts_with("p2p_") {
+                let ip_path = format!("/sys/class/net/{iface}/address");
+                if std::fs::read_to_string(&ip_path).is_ok() {
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        if let Ok(addr) = "192.168.49.1:0".parse::<std::net::SocketAddr>() {
+                            if socket.connect(addr).is_ok() {
+                                if let Ok(local) = socket.local_addr() {
+                                    let ip = local.ip().to_string();
+                                    if ip.starts_with("192.168.49.") || ip.starts_with("192.168.") {
+                                        return ip;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn try_start_p2p_group() {
+    // First check if hardware supports P2P
+    if let Ok(out) = std::process::Command::new("iw").args(["list"]).output() {
+        let output = String::from_utf8_lossy(&out.stdout);
+        if !output.contains("P2P") {
+            return; // Hardware doesn't support Wi-Fi Direct
+        }
+    }
+    if let Ok(out) = std::process::Command::new("wpa_cli").arg("ping").output() {
+        if out.status.success() {
+            let _ = std::process::Command::new("wpa_cli")
+                .arg("p2p_group_add")
+                .output();
+        }
+    }
 }
 
 #[uniffi::export]
@@ -442,10 +554,14 @@ pub fn generate_pairing_config(
     let mut nonce = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
 
+    // Try to start Wi-Fi Direct P2P group (desktop as group owner)
+    try_start_p2p_group();
+
     Ok(PairingConfig {
         host_identity_pk_hex: host_pk_hex,
         local_ip: get_system_local_ip(),
-        wifi_direct_mac: String::new(), // Populated by Android Wi-Fi Direct stack on discovery
+        wifi_direct_mac: get_primary_mac(),
+        p2p_ip: get_p2p_ip(),
         wireguard_pk_hex,
         stun_endpoint: "stun.l.google.com:19302".to_string(),
         pairing_nonce_hex: hex::encode(nonce),
