@@ -75,7 +75,8 @@ impl Default for ConnectionState {
 
 pub struct AppState {
     pub keypair: Mutex<Option<PqKeyPair>>,
-    pub session_key: Mutex<String>,
+    pub session_key: Mutex<zeroize::Zeroizing<String>>,
+    pub pending_session_key: Mutex<zeroize::Zeroizing<String>>,
     pub sas_code: Mutex<String>,
     pub dedup: ClipboardDeduplicator,
     pub logs: Mutex<Vec<String>>,
@@ -134,7 +135,8 @@ impl Default for AppState {
 
         Self {
             keypair: Mutex::new(None),
-            session_key: Mutex::new(String::new()),
+            session_key: Mutex::new(zeroize::Zeroizing::new(String::new())),
+            pending_session_key: Mutex::new(zeroize::Zeroizing::new(String::new())),
             sas_code: Mutex::new(String::new()),
             dedup: ClipboardDeduplicator::new(),
             logs: Mutex::new(vec!["[Kyberpipe] Engine initialized".to_string()]),

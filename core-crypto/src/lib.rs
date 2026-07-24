@@ -12,6 +12,9 @@ use packets::{
     compute_sha256_hex, BinaryClipboardPacket, ClipboardPacket, HardwareCommandPacket,
     NotificationActionPacket, NotificationPacket, OutboundSmsPacket, SensorPacket, SmsPacket,
 };
+use quinn::Connection;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 uniffi::setup_scaffolding!();
@@ -28,9 +31,14 @@ fn get_sync_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+static QUIC_CONNECTION: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
+
+fn get_quic_connection() -> &'static Mutex<Option<Connection>> {
+    QUIC_CONNECTION.get_or_init(|| Mutex::new(None))
+}
+
 /// Helper: execute a closure inside catch_unwind to prevent panics from crossing FFI boundaries.
 /// If the closure panics, returns a NetworkError with the panic message.
-
 /// Helper: block on a future using the shared runtime or ambient Handle.
 fn block_on_sync<F: std::future::Future>(fut: F) -> F::Output {
     match tokio::runtime::Handle::try_current() {
@@ -211,6 +219,9 @@ pub fn derive_session_key(
     Ok(hex::encode(derived))
 }
 
+/// Global nonce counter for encrypt_payload_with_key — prevents nonce reuse
+static ENCRYPT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// UniFFI export: Encrypt plaintext string with 256-bit session key
 #[uniffi::export]
 pub fn encrypt_payload_with_key(
@@ -228,8 +239,8 @@ pub fn encrypt_payload_with_key(
     let mut key_arr = [0u8; 32];
     key_arr.copy_from_slice(&key_bytes);
 
-    let mut nonce_bytes = [0u8; 12];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+    let seq = ENCRYPT_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nonce_bytes = crypto::generate_nonce_from_seq(seq);
 
     let ciphertext = crypto::encrypt_chacha20(&key_arr, &nonce_bytes, data.as_bytes())?;
     Ok(EncryptedPayload {
@@ -467,17 +478,46 @@ pub fn quic_connect(
     } else {
         Some(pinned_cert_hash_hex)
     };
-    let _conn = block_on_sync(quic_app::QuicAppManager::connect(addr, pinned, None))?;
+    let conn = block_on_sync(quic_app::QuicAppManager::connect(addr, pinned, None))?;
+    *get_quic_connection().lock().unwrap() = Some(conn);
     Ok(true)
 }
 
-/// UniFFI export: Send a pairing frame over a QUIC connection
+/// UniFFI export: Send data over a QUIC stream and receive the response
 #[uniffi::export]
-pub fn quic_send_pairing(_body_json: String) -> Result<String, KyberError> {
-    // For now, this is a placeholder. Full QUIC client integration
-    // requires connection state management which will be added in the
-    // QUIC migration phase.
-    Ok(r#"{"status":"not_implemented"}"#.to_string())
+pub fn quic_send_and_recv(stream_type: u8, body_json: String) -> Result<String, KyberError> {
+    let conn = get_quic_connection()
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| KyberError::NetworkError("No active QUIC connection".into()))?;
+
+    let result = block_on_sync(async {
+        let (mut send, mut recv) =
+            quic_app::QuicAppManager::open_stream(&conn, stream_type).await?;
+
+        let body = body_json.into_bytes();
+        let frame = quic_app::QuicFrame { stream_type, body };
+        quic_app::QuicAppManager::send_frame(&mut send, &frame).await?;
+        send.finish()
+            .map_err(|e| KyberError::NetworkError(format!("QUIC stream finish failed: {e}")))?;
+
+        let response = quic_app::QuicAppManager::recv_frame(&mut recv).await?;
+        let text = String::from_utf8(response.body)
+            .map_err(|e| KyberError::NetworkError(format!("Response UTF-8 decode error: {e}")))?;
+        Ok::<_, KyberError>(text)
+    })?;
+
+    *get_quic_connection().lock().unwrap() = Some(conn);
+    Ok(result)
+}
+
+/// UniFFI export: Close and clear the active QUIC connection
+#[uniffi::export]
+pub fn quic_disconnect() {
+    if let Some(conn) = get_quic_connection().lock().unwrap().take() {
+        conn.close(0u8.into(), b"client disconnect");
+    }
 }
 
 // ────────────────────────────────────────────────────────────
