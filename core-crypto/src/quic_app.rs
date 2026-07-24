@@ -1,8 +1,12 @@
 use crate::error::KyberError;
 use crate::network;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Stream type identifiers for multiplexed QUIC application protocol
 pub const STREAM_PAIRING: u8 = 0x01;
@@ -59,7 +63,6 @@ impl QuicFrame {
 pub struct QuicAppManager;
 
 impl QuicAppManager {
-    /// Start a QUIC server endpoint that handles application-level streams
     pub async fn bind_server(port: u16) -> Result<Endpoint, KyberError> {
         let (certs, key) = network::generate_self_signed_cert()?;
         let server_config = network::configure_quic_server(certs, key, true)?;
@@ -70,7 +73,6 @@ impl QuicAppManager {
         Ok(endpoint)
     }
 
-    /// Connect to a remote QUIC server with pinned certificate verification
     pub async fn connect(
         server_addr: std::net::SocketAddr,
         pinned_cert_hash: Option<String>,
@@ -80,7 +82,6 @@ impl QuicAppManager {
         )>,
     ) -> Result<Connection, KyberError> {
         let client_config = network::configure_quic_client(pinned_cert_hash.clone())?;
-        // Set client certificate if provided (for mTLS)
         if let Some((certs, key)) = client_certs {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let mut config = rustls::ClientConfig::builder_with_provider(provider)
@@ -120,7 +121,6 @@ impl QuicAppManager {
         }
     }
 
-    /// Open a bi-directional stream of a given type on an existing connection
     pub async fn open_stream(
         conn: &Connection,
         _stream_type: u8,
@@ -132,7 +132,6 @@ impl QuicAppManager {
         Ok((send, recv))
     }
 
-    /// Send a frame on a send stream
     pub async fn send_frame(send: &mut SendStream, frame: &QuicFrame) -> Result<(), KyberError> {
         let data = frame.encode();
         send.write_all(&data)
@@ -141,7 +140,6 @@ impl QuicAppManager {
         Ok(())
     }
 
-    /// Receive a frame from a recv stream
     pub async fn recv_frame(recv: &mut RecvStream) -> Result<QuicFrame, KyberError> {
         let mut header = [0u8; 5];
         recv.read_exact(&mut header)
@@ -165,14 +163,13 @@ impl QuicAppManager {
         Ok(QuicFrame { stream_type, body })
     }
 
-    /// Accept an incoming connection and spawn stream handlers
     pub async fn accept_loop(
         endpoint: &Endpoint,
-        on_pairing: impl Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static,
-        on_clipboard: impl Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static,
-        on_media: impl Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static,
-        on_poll: impl Fn() -> Vec<u8> + Send + Sync + 'static,
-        on_unpair: impl Fn() + Send + Sync + 'static,
+        on_pairing: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
+        on_clipboard: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
+        on_media: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
+        on_poll: impl Fn() -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
+        on_unpair: impl Fn() -> BoxFuture<()> + Send + Sync + 'static,
     ) -> Result<(), KyberError> {
         let pairing_cb = Arc::new(on_pairing);
         let clipboard_cb = Arc::new(on_clipboard);
@@ -200,73 +197,64 @@ impl QuicAppManager {
                                 let media_cb = media_cb.clone();
                                 let poll_cb = poll_cb.clone();
                                 let unpair_cb = unpair_cb.clone();
-                                loop {
-                                    match connection.accept_bi().await {
-                                        Ok((mut send, mut recv)) => {
-                                            let pairing_cb = pairing_cb.clone();
-                                            let clipboard_cb = clipboard_cb.clone();
-                                            let media_cb = media_cb.clone();
-                                            let poll_cb = poll_cb.clone();
-                                            let unpair_cb = unpair_cb.clone();
-                                            // Spawn each stream in its own task to avoid HoL blocking
-                                            tokio::spawn(async move {
-                                                match Self::recv_frame(&mut recv).await {
-                                                    Ok(frame) => {
-                                                        let response = match frame.stream_type {
-                                                            STREAM_PAIRING => {
-                                                                let result = pairing_cb(frame.body);
-                                                                QuicFrame {
-                                                                    stream_type: STREAM_PAIRING,
-                                                                    body: result,
-                                                                }
-                                                            }
-                                                            STREAM_CLIPBOARD => {
-                                                                let result =
-                                                                    clipboard_cb(frame.body);
-                                                                QuicFrame {
-                                                                    stream_type: STREAM_CLIPBOARD,
-                                                                    body: result,
-                                                                }
-                                                            }
-                                                            STREAM_MEDIA => {
-                                                                let result = media_cb(frame.body);
-                                                                QuicFrame {
-                                                                    stream_type: STREAM_MEDIA,
-                                                                    body: result,
-                                                                }
-                                                            }
-                                                            STREAM_POLL => {
-                                                                let result = poll_cb();
-                                                                QuicFrame {
-                                                                    stream_type: STREAM_POLL,
-                                                                    body: result,
-                                                                }
-                                                            }
-                                                            STREAM_UNPAIR => {
-                                                                unpair_cb();
-                                                                QuicFrame {
-                                                                    stream_type: STREAM_UNPAIR,
-                                                                    body: vec![],
-                                                                }
-                                                            }
-                                                            _ => QuicFrame {
-                                                                stream_type: 0xFF,
-                                                                body: b"Unknown stream type"
-                                                                    .to_vec(),
-                                                            },
-                                                        };
-                                                        let _ =
-                                                            Self::send_frame(&mut send, &response)
-                                                                .await;
+                                while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                                    let pairing_cb = pairing_cb.clone();
+                                    let clipboard_cb = clipboard_cb.clone();
+                                    let media_cb = media_cb.clone();
+                                    let poll_cb = poll_cb.clone();
+                                    let unpair_cb = unpair_cb.clone();
+                                    tokio::spawn(async move {
+                                        match Self::recv_frame(&mut recv).await {
+                                            Ok(frame) => {
+                                                let response = match frame.stream_type {
+                                                    STREAM_PAIRING => {
+                                                        let result = pairing_cb(frame.body).await;
+                                                        QuicFrame {
+                                                            stream_type: STREAM_PAIRING,
+                                                            body: result,
+                                                        }
                                                     }
-                                                    Err(e) => warn!("QUIC recv frame error: {e}"),
-                                                }
-                                            });
+                                                    STREAM_CLIPBOARD => {
+                                                        let result = clipboard_cb(frame.body).await;
+                                                        QuicFrame {
+                                                            stream_type: STREAM_CLIPBOARD,
+                                                            body: result,
+                                                        }
+                                                    }
+                                                    STREAM_MEDIA => {
+                                                        let result = media_cb(frame.body).await;
+                                                        QuicFrame {
+                                                            stream_type: STREAM_MEDIA,
+                                                            body: result,
+                                                        }
+                                                    }
+                                                    STREAM_POLL => {
+                                                        let result = poll_cb().await;
+                                                        QuicFrame {
+                                                            stream_type: STREAM_POLL,
+                                                            body: result,
+                                                        }
+                                                    }
+                                                    STREAM_UNPAIR => {
+                                                        unpair_cb().await;
+                                                        QuicFrame {
+                                                            stream_type: STREAM_UNPAIR,
+                                                            body: vec![],
+                                                        }
+                                                    }
+                                                    _ => QuicFrame {
+                                                        stream_type: 0xFF,
+                                                        body: b"Unknown stream type".to_vec(),
+                                                    },
+                                                };
+                                                let _ =
+                                                    Self::send_frame(&mut send, &response).await;
+                                            }
+                                            Err(e) => {
+                                                warn!("QUIC recv frame error: {e}")
+                                            }
                                         }
-                                        Err(_e) => {
-                                            break;
-                                        }
-                                    }
+                                    });
                                 }
                             }
                             Err(e) => warn!("QUIC connection handshake failed: {e}"),

@@ -34,9 +34,14 @@ object KeyStoreManager {
             .setKeySize(256)
             .setUserAuthenticationRequired(true)
             .apply {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    setUserAuthenticationParameters(
+                        60,
+                        KeyProperties.AUTH_BIOMETRIC_STRONG
+                    )
+                } else {
                     @Suppress("DEPRECATION")
-                    setUserAuthenticationValidityDurationSeconds(300)
+                    setUserAuthenticationValidityDurationSeconds(60)
                 }
             }
             .setInvalidatedByBiometricEnrollment(true)

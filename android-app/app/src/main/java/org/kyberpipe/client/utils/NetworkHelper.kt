@@ -8,7 +8,6 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -38,7 +37,6 @@ fun bindToWifiNetwork(connectivityManager: ConnectivityManager) {
         }
     })
 
-    // Also try to bind the process to WiFi network for all connections
     val wifiNetwork = connectivityManager.allNetworks.find { net ->
         val caps = connectivityManager.getNetworkCapabilities(net)
         caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
