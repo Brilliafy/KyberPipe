@@ -255,7 +255,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -1662,6 +1662,7 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "pqcrypto-kyber",
+ "pqcrypto-mldsa",
  "pqcrypto-traits",
  "proptest",
  "qrcode",
@@ -2314,7 +2315,7 @@ checksum = "e338c793f9c79f33f4f9009fe16dd2d7c6bb308afcba56b386149ac507479dc7"
 dependencies = [
  "heck 0.5.0",
  "indexmap 2.14.0",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
@@ -2424,6 +2425,7 @@ dependencies = [
  "magic-wormhole",
  "mimalloc",
  "notify-rust",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "tauri",
@@ -2433,6 +2435,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "wasmtime",
+ "zeroize",
 ]
 
 [[package]]
@@ -6429,6 +6432,20 @@ dependencies = [
  "cc",
  "glob",
  "libc",
+ "pqcrypto-internals",
+ "pqcrypto-traits",
+]
+
+[[package]]
+name = "pqcrypto-mldsa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f812cd126a2582599478a434fea75937b4b05d234c64a49e0cea129e130528"
+dependencies = [
+ "cc",
+ "glob",
+ "libc",
+ "paste",
  "pqcrypto-internals",
  "pqcrypto-traits",
 ]
