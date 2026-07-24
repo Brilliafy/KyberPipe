@@ -29,7 +29,7 @@ class SmsReceiver : BroadcastReceiver() {
             val body = sms.messageBody ?: ""
             val timestamp = sms.timestampMillis
 
-            Log.i("KyberpipeSmsReceiver", "Intercepted SMS from $sender: $body")
+            Log.i("KyberpipeSmsReceiver", "Intercepted SMS from $sender (${body.length} chars)")
 
             try {
                 val jsonPacket = uniffi.core_crypto.createSmsPacket(sender, body, timestamp.toULong())

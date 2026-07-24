@@ -30,6 +30,8 @@ class PipeService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var heartbeatJob: Job? = null
 
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+
     override fun onCreate() {
         super.onCreate()
         Log.i("KyberpipeService", "Initializing PipeService foreground engine...")
@@ -58,40 +60,11 @@ class PipeService : Service() {
 
     private fun startAdaptiveHeartbeatLoop() {
         isKeepAliveActive = true
-        heartbeatJob = serviceScope.launch {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            var failureCount = 0
-            val maxFailures = 5
-            while (isActive && isKeepAliveActive) {
-                try {
-                    val isDozeMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        powerManager.isDeviceIdleMode
-                    } else false
-
-                    val intervalMs = if (isDozeMode) 120_000L else 15_000L
-                    Log.i("KyberpipeService", "QUIC Heartbeat Ping sent (DozeMode = $isDozeMode, Interval = ${intervalMs}ms)")
-
-                    if (isDozeMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        scheduleDozeWakeupAlarm(intervalMs)
-                    }
-
-                    failureCount = 0 // Reset on successful iteration
-                    delay(intervalMs)
-                } catch (e: Exception) {
-                    failureCount++
-                    Log.e("KyberpipeService", "Heartbeat iteration failed ($failureCount/$maxFailures): ${e.message}")
-                    if (failureCount >= maxFailures) {
-                        Log.e("KyberpipeService", "Heartbeat exceeded max failures. Restarting service.")
-                        stopSelf()
-                        break
-                    }
-                    delay(5000) // Backoff before retry
-                }
-            }
-        }
+        val intervalMs = 15_000L
+        scheduleAlarm(intervalMs)
     }
 
-    private fun scheduleDozeWakeupAlarm(intervalMs: Long) {
+    private fun scheduleAlarm(intervalMs: Long) {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(this, PipeService::class.java).apply {
             action = "ACTION_DOZE_PING"
@@ -102,6 +75,7 @@ class PipeService : Service() {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        alarmManager.cancel(pendingIntent)
         val triggerTime = System.currentTimeMillis() + intervalMs
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
@@ -120,12 +94,15 @@ class PipeService : Service() {
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "Kyberpipe:DozeHeartbeat"
             )
-            wakeLock.acquire(60_000L)
+            this.wakeLock = wakeLock
+            wakeLock.acquire(10_000L)
             // Defer release to coroutine scope — keeps CPU awake until I/O completes
             serviceScope.launch {
                 try {
                     Log.i("KyberpipeService", "Doze heartbeat: QUIC keepalive sent")
                     delay(5000) // Simulated QUIC ping I/O
+                } catch (e: Exception) {
+                    Log.e("KyberpipeService", "Heartbeat I/O failed: ${e.message}")
                 } finally {
                     if (wakeLock.isHeld) {
                         wakeLock.release()
@@ -140,6 +117,11 @@ class PipeService : Service() {
         super.onDestroy()
         isKeepAliveActive = false
         heartbeatJob?.cancel()
+        heartbeatJob = null
+        // Explicitly release WakeLock before scope cancel to prevent leaked wakelocks
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
         serviceScope.cancel()
         sensorDriver.stop()
         Log.i("KyberpipeService", "PipeService stopped.")

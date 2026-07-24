@@ -1,0 +1,159 @@
+use crate::state::{AppState, NotificationRecord};
+use core_crypto::packets::SmsPacket;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::State;
+
+#[tauri::command]
+pub async fn send_desktop_notification(
+    title: String,
+    body: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    state.add_log(format!("[Notification] Sending: {title}"));
+    crate::portal::send_notification(&title, &body).await
+}
+
+#[tauri::command]
+pub fn push_sms_packet(
+    sender: String,
+    body: String,
+    timestamp: u64,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Vec<SmsPacket> {
+    let pkt = SmsPacket {
+        sender: sender.clone(),
+        body,
+        timestamp,
+    };
+    state.add_log(format!("[SMS] Received from {sender}"));
+    if let Ok(mut hist) = state.sms_history.lock() {
+        if hist.len() >= 50 {
+            hist.remove(0);
+        }
+        hist.push(pkt);
+        hist.clone()
+    } else {
+        vec![]
+    }
+}
+
+#[tauri::command]
+pub async fn push_notification_packet(
+    title: String,
+    text: String,
+    app_package: String,
+    timestamp: u64,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<NotificationRecord>, String> {
+    let pkt = NotificationRecord {
+        id: format!("{app_package}_{timestamp}"),
+        title: title.clone(),
+        text: text.clone(),
+        app_package: app_package.clone(),
+        timestamp,
+        is_dismissed: false,
+        updated_at: timestamp,
+        type_field: "remote".to_string(),
+    };
+    let notif_title = title.clone();
+    let notif_text = text.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = notify_rust::Notification::new()
+            .summary(&notif_title)
+            .body(&notif_text)
+            .icon("dialog-information")
+            .show();
+    });
+
+    state.add_log(format!(
+        "[Notification Sync] {app_package}: {title} - {text}"
+    ));
+    if let Ok(mut hist) = state.notification_history.lock() {
+        if hist.len() >= 50 {
+            hist.remove(0);
+        }
+        hist.push(pkt);
+        Ok(hist.clone())
+    } else {
+        Ok(vec![])
+    }
+}
+
+#[tauri::command]
+pub fn send_outbound_sms(
+    recipient: String,
+    body: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    state.add_log(format!("[Outbound SMS] Dispatching to {recipient}: {body}"));
+    core_crypto::create_outbound_sms_packet(
+        recipient,
+        body,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn trigger_notification_action(
+    sbn_key: String,
+    action_index: u32,
+    action_title: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    state.add_log(format!(
+        "[Notification Action] Triggered action '{action_title}' on {sbn_key}"
+    ));
+    core_crypto::create_notification_action_packet(
+        sbn_key,
+        action_index,
+        action_title,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn send_hardware_command(
+    command_type: String,
+    payload_json: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    state.add_log(format!("[Hardware Command] Dispatching: {command_type}"));
+    core_crypto::create_hardware_command_packet(
+        command_type,
+        payload_json,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
+    let mut act = state
+        .pending_media_action
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *act = Some(action_index);
+    state.add_log(format!(
+        "[Media] Desktop triggered action index: {action_index}"
+    ));
+}
+
+#[tauri::command]
+pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
+    state
+        .media_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
