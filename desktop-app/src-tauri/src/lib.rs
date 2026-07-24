@@ -3,6 +3,7 @@ mod commands;
 mod executor;
 mod portal;
 mod state;
+mod sync_server;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -121,7 +122,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state)
         .setup(move |_app| {
-            crate::commands::start_local_sync_server(state_clone);
+            crate::sync_server::start_local_sync_server(state_clone);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

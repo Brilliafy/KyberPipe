@@ -100,7 +100,8 @@ impl KyberMessage {
     }
 }
 
-/// Sphinx Onion Packet for Multi-Hop Covert Mixnet Mesh Routing
+/// Sphinx Onion Packet stub — not yet implemented.
+/// Returns an error to prevent silent use of mock values.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SphinxOnionPacket {
     pub hop_address: String,
@@ -110,13 +111,13 @@ pub struct SphinxOnionPacket {
 }
 
 impl SphinxOnionPacket {
-    pub fn create_onion_layer(dest_address: String, inner_payload: &[u8]) -> Self {
-        Self {
-            hop_address: dest_address,
-            ephemeral_pubkey: vec![1, 2, 3, 4],
-            encrypted_routing_header: vec![5, 6, 7, 8],
-            inner_payload_ciphertext: inner_payload.to_vec(),
-        }
+    pub fn create_onion_layer(
+        _dest_address: String,
+        _inner_payload: &[u8],
+    ) -> Result<Self, KyberError> {
+        Err(KyberError::CryptoError(
+            "Sphinx onion routing not yet implemented — would use mock values".into(),
+        ))
     }
 }
 

@@ -421,7 +421,7 @@ fun SettingsTab(
                                 onClick = {
                                     val hostIp = settings.pairedHostIp
                                     if (hostIp.isNotEmpty()) {
-                                        sendPostRequestAsync("http://$hostIp:23520/api/unpair", "{}")
+                                        sendPostRequestAsync("http://$hostIp:9876/api/unpair", "{}")
                                     }
 
                                     settings.isPaired = false

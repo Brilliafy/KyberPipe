@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use std::sync::MutexGuard;
+
+#[allow(dead_code)]
+/// Poison-recovery helper: returns the guard even if the lock is poisoned
+pub fn lock_or_recover<T>(mtx: &Mutex<T>) -> MutexGuard<'_, T> {
+    mtx.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AppSettings {
@@ -50,6 +57,22 @@ pub struct NotificationRecord {
     pub type_field: String, // "local" | "remote"
 }
 
+pub struct ConnectionState {
+    pub status: String,
+    pub method: String,
+    pub color: String,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self {
+            status: "DISCONNECTED".to_string(),
+            method: "None".to_string(),
+            color: "red".to_string(),
+        }
+    }
+}
+
 pub struct AppState {
     pub keypair: Mutex<Option<PqKeyPair>>,
     pub session_key: Mutex<String>,
@@ -59,9 +82,7 @@ pub struct AppState {
     pub sensor_history: Mutex<Vec<SensorPacket>>,
     pub sms_history: Mutex<Vec<SmsPacket>>,
     pub notification_history: Mutex<Vec<NotificationRecord>>,
-    pub connection_status: Mutex<String>,
-    pub connection_method: Mutex<String>,
-    pub connection_color: Mutex<String>,
+    pub connection: Mutex<ConnectionState>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: String,
     #[allow(dead_code)]
@@ -72,7 +93,16 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        let settings_path = "settings.json".to_string();
+        // Use OS-standard app data directory for persistence
+        let data_dir =
+            if let Some(proj_dirs) = directories::ProjectDirs::from("io", "github", "KyberPipe") {
+                let dir = proj_dirs.data_dir().to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                dir
+            } else {
+                std::env::current_dir().unwrap_or_default()
+            };
+        let settings_path = data_dir.join("settings.json").to_string_lossy().to_string();
         let mut settings = AppSettings::default();
         let mut exists = false;
         if let Ok(mut file) = File::open(&settings_path) {
@@ -88,7 +118,10 @@ impl Default for AppState {
             settings.wireguard_active = true;
         }
 
-        let notifications_path = "notifications.json".to_string();
+        let notifications_path = data_dir
+            .join("notifications.json")
+            .to_string_lossy()
+            .to_string();
         let mut notifications = vec![];
         if let Ok(mut file) = File::open(&notifications_path) {
             let mut contents = String::new();
@@ -108,9 +141,7 @@ impl Default for AppState {
             sensor_history: Mutex::new(vec![]),
             sms_history: Mutex::new(vec![]),
             notification_history: Mutex::new(notifications),
-            connection_status: Mutex::new("DISCONNECTED".to_string()),
-            connection_method: Mutex::new("None".to_string()),
-            connection_color: Mutex::new("red".to_string()),
+            connection: Mutex::new(ConnectionState::default()),
             settings: Mutex::new(settings),
             settings_path,
             notifications_path,
@@ -127,6 +158,60 @@ impl AppState {
                 l.remove(0);
             }
             l.push(msg);
+        }
+    }
+
+    // Backward-compatible accessors for connection state (consolidated under one Mutex)
+    pub fn get_connection_status(&self) -> String {
+        self.connection
+            .lock()
+            .map(|c| c.status.clone())
+            .unwrap_or_default()
+    }
+    pub fn set_connection_status(&self, val: String) {
+        if let Ok(mut c) = self.connection.lock() {
+            c.status = val;
+        }
+    }
+    #[allow(dead_code)]
+    pub fn get_connection_method(&self) -> String {
+        self.connection
+            .lock()
+            .map(|c| c.method.clone())
+            .unwrap_or_default()
+    }
+    pub fn set_connection_method(&self, val: String) {
+        if let Ok(mut c) = self.connection.lock() {
+            c.method = val;
+        }
+    }
+    #[allow(dead_code)]
+    pub fn get_connection_color(&self) -> String {
+        self.connection
+            .lock()
+            .map(|c| c.color.clone())
+            .unwrap_or_default()
+    }
+    pub fn set_connection_color(&self, val: String) {
+        if let Ok(mut c) = self.connection.lock() {
+            c.color = val;
+        }
+    }
+    pub fn get_connection(&self) -> ConnectionState {
+        self.connection
+            .lock()
+            .map(|c| ConnectionState {
+                status: c.status.clone(),
+                method: c.method.clone(),
+                color: c.color.clone(),
+            })
+            .unwrap_or_default()
+    }
+    pub fn set_connection(&self, status: String, method: String, color: String) {
+        if let Ok(mut c) = self.connection.lock() {
+            c.status = status;
+            c.method = method;
+            c.color = color;
         }
     }
 
