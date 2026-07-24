@@ -444,9 +444,9 @@ fun MainScreen(
                                 timestamp = System.currentTimeMillis()
                             )
                         )
-                        addLog("[Clipboard] Intercepted new primary clip: ${text.take(20)}...")
+                        addLog("[Clipboard] Intercepted new primary clip (${text.length} chars)")
 
-                        if (settings.isPaired) {
+                                if (settings.isPaired) {
                             val hostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
                             if (hostIp.isNotEmpty() && sessionKey.isNotEmpty()) {
                                 val encrypted = encryptPayloadWithKey(sessionKey, text)
@@ -615,7 +615,7 @@ fun MainScreen(
                                     )
                                     val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                     clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", latestClip))
-                                    addLog("[Clipboard] Received new clip from PC: ${latestClip.take(20)}...")
+                                    addLog("[Clipboard] Received remote clip (${latestClip.length} chars)")
                                 }
                             }
 
