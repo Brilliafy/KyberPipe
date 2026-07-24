@@ -1,466 +1,231 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from "vue";
-import { 
-  Wifi, 
-  Network, 
-  Globe, 
-  Activity,
-  GripVertical
-} from '@lucide/vue';
+import { ref } from "vue";
+import { Shield, Wifi, Globe, Terminal, Trash2, Plus, RefreshCw } from '@lucide/vue';
 
 const props = defineProps<{
-  wifiDirectActive: boolean;
-  lanActive: boolean;
-  wireguardActive: boolean;
-  hasWifiInterface: boolean;
-  resolvedPublicIp: string;
-  ddnsHostname: string;
-  enableUpnp: boolean;
-  enableDdns: boolean;
-  pathwayOrder: string[];
-  isConnected?: boolean;
-  isPaired?: boolean;
+  isPaired: boolean;
+  pairedDeviceName: string;
+  localMethod: string;
+  remoteMethod: string;
+  localActive: boolean;
+  remoteActive: boolean;
 }>();
-
 
 const emit = defineEmits<{
-  (e: "update:wifiDirectActive", val: boolean): void;
-  (e: "update:lanActive", val: boolean): void;
-  (e: "update:wireguardActive", val: boolean): void;
-  (e: "update:ddnsHostname", val: string): void;
-  (e: "update:enableUpnp", val: boolean): void;
-  (e: "update:enableDdns", val: boolean): void;
-  (e: "update:pathwayOrder", val: string[]): void;
-  (e: "runStunHolePunch", stunHost: string): void;
-  (e: "saveSettings"): void;
+  (e: "pairLocally", method: string): void;
+  (e: "pairExternally", method: string): void;
+  (e: "removeDevice"): void;
+  (e: "swapPriority"): void;
+  (e: "fixFirewall"): void;
+  (e: "navigate", tab: string): void;
 }>();
 
-const stunHostInput = ref("stun.l.google.com:19302");
-const ddnsInput = ref(props.ddnsHostname);
-const showDrawer = ref(false);
+const showPairModal = ref(false);
+const showLocalOptions = ref(false);
+const showExternalOptions = ref(false);
+const selectedMethod = ref("");
+const hoveredOption = ref<string | null>(null);
 
-const dragIndex = ref<number | null>(null);
-const dragOverIndex = ref<number | null>(null);
-const handleDragStart = (event: DragEvent, index: number) => {
-  dragIndex.value = index;
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', String(index));
-  }
-};
-const handleDragOver = (event: DragEvent, index: number) => {
-  event.preventDefault();
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move';
-  }
-  dragOverIndex.value = index;
-};
-const handleDrop = (index: number) => {
-  if (dragIndex.value === null || dragIndex.value === index) {
-    dragIndex.value = null;
-    dragOverIndex.value = null;
-    return;
-  }
-  const newOrder = [...props.pathwayOrder];
-  const [removed] = newOrder.splice(dragIndex.value, 1);
-  newOrder.splice(index, 0, removed);
-  emit("update:pathwayOrder", newOrder);
-  emit("saveSettings");
-  dragIndex.value = null;
-  dragOverIndex.value = null;
-};
-const handleDragEnd = () => {
-  dragIndex.value = null;
-  dragOverIndex.value = null;
+const localMethods = [
+  { id: "wifi_direct", label: "Wi-Fi Direct", icon: "📡", desc: "Direct peer-to-peer radio. Fastest, no router needed." },
+  { id: "mdns", label: "mDNS Zeroconf", icon: "🔍", desc: "Auto-discovery on local network. QR contains PQC key." },
+  { id: "manual_ip", label: "Manual IP / DDNS", icon: "🌐", desc: "Enter IP or hostname manually. SAS verification." }
+];
+
+const externalMethods = [
+  { id: "wormhole", label: "Magic Wormhole", icon: "🐛", desc: "Relay-based WAN pairing. 3-word code + PQC key in QR." },
+  { id: "tor", label: "Tor Onion (arti)", icon: "🧅", desc: "Ephemeral .onion service. Zero-trust, no MITM." }
+];
+
+const handleLocalSelect = (method: string) => {
+  selectedMethod.value = method;
+  showPairModal.value = false;
+  emit("pairLocally", method);
 };
 
-const handleDdnsChange = () => {
-  emit("update:ddnsHostname", ddnsInput.value);
+const handleExternalSelect = (method: string) => {
+  selectedMethod.value = method;
+  showPairModal.value = false;
+  emit("pairExternally", method);
 };
-
-const handleToggle = (key: string, checked: boolean) => {
-  const activeCount = (props.wifiDirectActive ? 1 : 0) + 
-                      (props.lanActive ? 1 : 0) + 
-                      (props.wireguardActive ? 1 : 0);
-  if (!checked && activeCount <= 1) {
-    alert("At least one connection pathway must be enabled!");
-    return;
-  }
-  if (key === 'wifi_direct') {
-    emit('update:wifiDirectActive', checked);
-  } else if (key === 'mdns_lan') {
-    emit('update:lanActive', checked);
-  } else if (key === 'wireguard_wan') {
-    emit('update:wireguardActive', checked);
-  }
-  emit('saveSettings');
-};
-
-const isPathwayActive = (pKey: string) => {
-  if (pKey === 'wifi_direct') return props.wifiDirectActive;
-  if (pKey === 'mdns_lan') return props.lanActive;
-  if (pKey === 'wireguard_wan') return props.wireguardActive;
-  return false;
-};
-
-const activeKey = computed(() => {
-  for (const p of props.pathwayOrder) {
-    if (p === 'wifi_direct' && !props.hasWifiInterface) continue;
-    if (p === 'wifi_direct' && props.wifiDirectActive) return p;
-    if (p === 'mdns_lan' && props.lanActive) return p;
-    if (p === 'wireguard_wan' && props.wireguardActive) return p;
-  }
-  return '';
-});
-
-const effectivePathwayOrder = computed(() => {
-  return props.pathwayOrder.filter(p => p !== 'wifi_direct' || props.hasWifiInterface);
-});
-
-const PATHWAY_META: Record<string, { name: string; desc: string; latency: string }> = {
-  wifi_direct: {
-    name: "Wi-Fi Direct P2P Tunnel",
-    desc: "Direct peer-to-peer radio connection. Highest speed, lowest latency (2.4ms).",
-    latency: "2.4ms"
-  },
-  mdns_lan: {
-    name: "Local Network (mDNS LAN)",
-    desc: "Local discovery over shared Wi-Fi Access Point/LAN via UDP multicast beacon (8.5ms).",
-    latency: "8.5ms"
-  },
-  wireguard_wan: {
-    name: "WireGuard WAN Tunnel Overlay",
-    desc: "Seamless WAN backup using public STUN UDP hole-punching for off-grid remote sync (45.2ms).",
-    latency: "45.2ms"
-  }
-};
-
-// Canvas-based real-time RTT telemetry chart
-const canvasRef = ref<HTMLCanvasElement | null>(null);
-interface LatencyData {
-  rtt: number;
-  pathway: string;
-  isSwitch: boolean;
-}
-const latencyHistory = ref<LatencyData[]>([]);
-let chartInterval: any = null;
-let lastPathway = "";
-
-const isLinkActive = computed(() => (props.isConnected ?? true) && (props.wifiDirectActive || props.lanActive || props.wireguardActive));
-
-const generateMockLatency = () => {
-  if (!isLinkActive.value) {
-    latencyHistory.value.push({
-      rtt: 0,
-      pathway: "Offline",
-      isSwitch: false
-    });
-    if (latencyHistory.value.length > 40) {
-      latencyHistory.value.shift();
-    }
-    return;
-  }
-  let base = 45.2; // WireGuard fallback
-  let path = "WireGuard WAN";
-  if (props.wifiDirectActive) {
-    base = 2.4;
-    path = "Wi-Fi Direct";
-  } else if (props.lanActive) {
-    base = 8.5;
-    path = "mDNS LAN";
-  }
-
-  const jitter = (Math.random() - 0.5) * 0.8;
-  const currentRtt = Number((base + jitter).toFixed(1));
-  const isSwitch = lastPathway !== "" && lastPathway !== path;
-  lastPathway = path;
-
-  latencyHistory.value.push({
-    rtt: currentRtt,
-    pathway: path,
-    isSwitch
-  });
-
-  if (latencyHistory.value.length > 40) {
-    latencyHistory.value.shift();
-  }
-};
-
-
-const drawChart = () => {
-  const canvas = canvasRef.value;
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.clearRect(0, 0, width, height);
-
-  // Background grid
-  ctx.strokeStyle = "rgba(99, 102, 241, 0.15)";
-  ctx.lineWidth = 1;
-  for (let i = 1; i < 4; i++) {
-    const y = (height / 4) * i;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-
-    // Labels for latency levels
-    ctx.fillStyle = "rgba(148, 163, 184, 0.5)";
-    ctx.font = "8px monospace";
-    const labelVal = (50 - (i * 12.5)).toFixed(0) + "ms";
-    ctx.fillText(labelVal, 5, y - 2);
-  }
-
-  if (latencyHistory.value.length < 2) return;
-
-  // Draw line connecting RTTs
-  ctx.beginPath();
-  ctx.lineWidth = 2.5;
-  ctx.strokeStyle = "#06b6d4";
-
-  // Gradient fill below the line
-  const grad = ctx.createLinearGradient(0, 0, 0, height);
-  grad.addColorStop(0, "rgba(6, 182, 212, 0.25)");
-  grad.addColorStop(1, "rgba(6, 182, 212, 0.0)");
-
-  const stepX = width / 39;
-  const points: { x: number; y: number }[] = [];
-
-  latencyHistory.value.forEach((data, index) => {
-    const x = stepX * index;
-    // Map RTT 0-50ms to height coordinates
-    const y = height - (data.rtt / 50) * height;
-    points.push({ x, y });
-  });
-
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i++) {
-    ctx.lineTo(points[i].x, points[i].y);
-  }
-  ctx.stroke();
-
-  // Draw gradient fill
-  ctx.lineTo(points[points.length - 1].x, height);
-  ctx.lineTo(points[0].x, height);
-  ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Draw switch pathway vertical markers
-  latencyHistory.value.forEach((data, index) => {
-    if (data.isSwitch) {
-      const x = stepX * index;
-      ctx.strokeStyle = "#a855f7";
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Label indicator
-      ctx.fillStyle = "#a855f7";
-      ctx.font = "bold 8px sans-serif";
-      ctx.fillText("SW-PATH", x + 3, 15);
-    }
-  });
-
-  // Draw current point glow
-  const lastPoint = points[points.length - 1];
-  ctx.beginPath();
-  ctx.arc(lastPoint.x, lastPoint.y, 5, 0, Math.PI * 2);
-  ctx.fillStyle = "#22d3ee";
-  ctx.shadowColor = "#22d3ee";
-  ctx.shadowBlur = 10;
-  ctx.fill();
-  ctx.shadowBlur = 0; // Reset shadow
-};
-
-onMounted(() => {
-  chartInterval = setInterval(() => {
-    generateMockLatency();
-    drawChart();
-  }, 500);
-});
-
-onUnmounted(() => {
-  if (chartInterval) clearInterval(chartInterval);
-});
 </script>
 
 <template>
   <section class="panel">
     <div class="header-row">
       <div>
-        <h2 class="section-title">🌐 Connectivity Manager</h2>
-        <p class="section-subtitle">Configure post-quantum peer-to-peer transport pathways, STUN punch, UPnP ports, and DDNS hostnames.</p>
+        <h2 class="section-title">🔗 Connectivity</h2>
+        <p class="section-subtitle">Manage peer-to-peer connections with your companion device.</p>
       </div>
-      <button class="btn btn-accent" @click="showDrawer = true">
-        <Activity style="margin-right: 0.25rem;" :size="16" /> Network Diagnostics
-      </button>
     </div>
 
-    <div class="connectivity-grid">
-      <!-- Precedence Tiers -->
-      <div class="card connectivity-card">
-        <div class="card-header">
-          <h3>Connectivity hierarchy</h3>
+    <!-- NOT PAIRED: Setup prompt -->
+    <div v-if="!isPaired" class="connect-prompt">
+      <div class="connect-card" @click="showPairModal = true">
+        <div class="connect-card-icon">
+          <Shield :size="48" class="text-cyan" />
         </div>
-        <p class="card-desc">Drag priorities to rearrange connection precedence. Highest active pathway will be chosen automatically:</p>
+        <h3>Setup a Device</h3>
+        <p class="card-desc">Pair your Android companion with this desktop using a local or remote method.</p>
+        <button class="btn btn-primary" style="margin-top: 0.75rem;">Get Started</button>
+      </div>
+    </div>
 
-        <div class="interfaces-list">
-          <div 
-            v-for="(pKey, index) in effectivePathwayOrder" 
-            :key="pKey"
-            class="interface-item"
-            :class="{ 
-              active: activeKey === pKey,
-              inactive: !isPathwayActive(pKey) || (pKey === 'wifi_direct' && !hasWifiInterface),
-              disabled: pKey === 'wifi_direct' && !hasWifiInterface,
-              'drag-over': dragOverIndex === index
-            }"
-            :draggable="pKey !== 'wifi_direct' || hasWifiInterface"
-            @dragstart="handleDragStart($event, index)"
-            @dragover="handleDragOver($event, index)"
-            @drop="handleDrop(index)"
-            @dragend="handleDragEnd"
-          >
-            <div class="interface-header">
-              <div class="interface-title">
-                <span class="drag-handle" v-if="pKey !== 'wifi_direct' || hasWifiInterface">
-                  <GripVertical :size="14" />
-                </span>
-                <span class="tier-number">Priority {{ index + 1 }}</span>
-                <component 
-                  :is="pKey === 'wifi_direct' ? Wifi : (pKey === 'mdns_lan' ? Network : Globe)" 
-                  :size="14" 
-                  style="color: var(--accent-cyan);" 
-                />
-                <strong>{{ PATHWAY_META[pKey].name }}</strong>
-                <span v-if="pKey === 'wifi_direct' && !hasWifiInterface" class="no-wifi-badge">No Wi-Fi</span>
-              </div>
-              
-              <div class="toggle-switch" v-if="pKey !== 'wifi_direct' || hasWifiInterface">
-                <input 
-                  type="checkbox" 
-                  :id="'toggle-' + pKey" 
-                  :checked="isPathwayActive(pKey)" 
-                  @change="handleToggle(pKey, ($event.target as HTMLInputElement).checked)" 
-                />
-                <label :for="'toggle-' + pKey"></label>
-              </div>
-            </div>
-            <p class="interface-desc">{{ PATHWAY_META[pKey].desc }}</p>
+    <!-- PAIRED: Device info + management -->
+    <div v-else class="paired-view">
+      <div class="paired-header-card">
+        <div class="paired-info">
+          <div class="avatar-placeholder">{{ (props.pairedDeviceName || 'D')[0] }}</div>
+          <div>
+            <h3>{{ props.pairedDeviceName || 'Android Phone' }}</h3>
+            <p class="card-desc" style="margin: 0;">
+              <span v-if="localActive" class="badge-local">Local: {{ localMethod }}</span>
+              <span v-if="remoteActive" class="badge-remote">Remote: {{ remoteMethod }}</span>
+              <span v-if="!localActive && !remoteActive" class="badge-offline">Disconnected</span>
+            </p>
           </div>
+        </div>
+        <div class="paired-actions">
+          <button class="btn btn-danger-outline btn-sm" @click="emit('removeDevice')">
+            <Trash2 :size="14" /> Remove Device
+          </button>
         </div>
       </div>
 
-      <!-- Fallback Options: UPnP & DDNS -->
-      <div class="card fallback-card">
-        <h3>Fallback Options & Settings</h3>
-        <p class="card-desc">Configure static DNS hostname or automatic UPnP IGDP port forwarding maps for high-symmetric NAT setups.</p>
+      <div class="method-section">
+        <h4>Active Connections</h4>
+        <p class="card-desc">Local methods take precedence. Toggle to swap.</p>
 
-        <div class="fallback-inputs">
-          <div class="switch-row">
-            <label class="switch-label">
-              <input 
-                type="checkbox" 
-                :checked="enableUpnp" 
-                @change="emit('update:enableUpnp', ($event.target as HTMLInputElement).checked); emit('saveSettings')"
-              />
-              <span>Enable UPnP / NAT-PMP Mapping</span>
-            </label>
+        <div class="method-card" v-if="localActive">
+          <div class="method-card-header">
+            <Wifi :size="18" class="text-cyan" />
+            <span><strong>Local:</strong> {{ localMethod }}</span>
+            <span class="badge-local">Active</span>
           </div>
-
-          <div class="switch-row">
-            <label class="switch-label">
-              <input 
-                type="checkbox" 
-                :checked="enableDdns" 
-                @change="emit('update:enableDdns', ($event.target as HTMLInputElement).checked); emit('saveSettings')"
-              />
-              <span>Enable Static DDNS Hostname Lookup</span>
-            </label>
-          </div>
-
-          <div class="input-group" v-if="enableDdns">
-            <label for="ddns-hostname">DDNS Hostname:</label>
-            <input 
-              type="text" 
-              id="ddns-hostname"
-              class="input-text" 
-              v-model="ddnsInput" 
-              @blur="handleDdnsChange(); emit('saveSettings')"
-              placeholder="e.g. node1.ddns.net"
-            />
-          </div>
-        </div>
-
-        <!-- STUN tool inside Connectivity panel -->
-        <div class="stun-box" style="margin-top: 1.5rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
-          <h4>Decentralized STUN Endpoint Resolver</h4>
-          <p class="card-desc">Query public STUN servers for dynamic WAN reflexive ports.</p>
-          <div class="stun-action-box">
-            <input 
-              type="text" 
-              class="input-text" 
-              v-model="stunHostInput" 
-              placeholder="e.g. stun.l.google.com:19302"
-            />
-            <button class="btn btn-secondary btn-sm" @click="emit('runStunHolePunch', stunHostInput)">
-              Query STUN
+          <div class="method-card-actions">
+            <button class="btn btn-secondary-outline btn-xs" @click="emit('swapPriority')">
+              <RefreshCw :size="12" /> Prefer Remote
             </button>
           </div>
-          <div class="stun-result">
-            <span>Reflexive Public WAN IP:</span>
-            <code class="code-badge">{{ resolvedPublicIp }}</code>
+        </div>
+
+        <div class="method-card" v-if="!localActive" style="opacity: 0.5;">
+          <div class="method-card-header">
+            <Wifi :size="18" />
+            <span><strong>Local:</strong> None</span>
+            <span class="badge-offline">Inactive</span>
+          </div>
+          <div class="method-card-actions">
+            <button class="btn btn-secondary-outline btn-xs" @click="showPairModal = true">
+              <Plus :size="12" /> Add Local Method
+            </button>
+          </div>
+        </div>
+
+        <div class="method-card" v-if="remoteActive">
+          <div class="method-card-header">
+            <Globe :size="18" class="text-indigo" />
+            <span><strong>Remote:</strong> {{ remoteMethod }}</span>
+            <span class="badge-remote">Active</span>
+          </div>
+        </div>
+
+        <div class="method-card" v-if="!remoteActive" style="opacity: 0.5;">
+          <div class="method-card-header">
+            <Globe :size="18" />
+            <span><strong>Remote:</strong> None</span>
+            <span class="badge-offline">Inactive</span>
+          </div>
+          <div class="method-card-actions">
+            <button class="btn btn-secondary-outline btn-xs" @click="showPairModal = true">
+              <Plus :size="12" /> Add Remote Method
+            </button>
           </div>
         </div>
       </div>
+
+      <div class="fix-firewall-section" v-if="!localActive">
+        <button class="btn btn-accent btn-sm" @click="emit('fixFirewall')">
+          <Terminal :size="14" /> Fix Firewall (Polkit)
+        </button>
+        <p class="card-desc" style="margin-top: 0.5rem;">Triggers OS password dialog to allow LAN traffic.</p>
+      </div>
     </div>
 
-    <!-- Network Diagnostics slide-over Drawer -->
-    <div class="drawer-overlay" v-if="showDrawer" @click.self="showDrawer = false">
-      <div class="drawer-panel">
-        <div class="drawer-header">
-          <h3>⚡ Telemetry & Diagnostics</h3>
-          <button class="close-btn" @click="showDrawer = false">&times;</button>
+    <!-- Pairing Modal -->
+    <div class="modal-overlay" v-if="showPairModal" @click.self="showPairModal = false">
+      <div class="modal-content" style="max-width: 500px;">
+        <h3 style="text-align: center; margin-bottom: 0.5rem;">Pair a Device</h3>
+        <p class="card-desc" style="text-align: center;">Choose how your Android companion connects to this desktop.</p>
+
+        <div v-if="!showLocalOptions && !showExternalOptions" class="pair-choice-grid">
+          <div
+            class="choice-card"
+            :class="{ 'hovered': hoveredOption === 'local' }"
+            @mouseenter="hoveredOption = 'local'"
+            @mouseleave="hoveredOption = null"
+            @click="showLocalOptions = true"
+          >
+            <div class="choice-icon">🏠</div>
+            <h4>Pair Locally</h4>
+            <p>Same network. Fast, low latency.</p>
+            <div class="choice-methods">
+              <span>Wi-Fi Direct</span>
+              <span>mDNS</span>
+              <span>Manual IP</span>
+            </div>
+          </div>
+          <div
+            class="choice-card"
+            :class="{ 'hovered': hoveredOption === 'external' }"
+            @mouseenter="hoveredOption = 'external'"
+            @mouseleave="hoveredOption = null"
+            @click="showExternalOptions = true"
+          >
+            <div class="choice-icon">🌍</div>
+            <h4>Pair Externally</h4>
+            <p>Over the internet. WAN / relay.</p>
+            <div class="choice-methods">
+              <span>Magic Wormhole</span>
+              <span>Tor Onion</span>
+            </div>
+          </div>
         </div>
-        
-        <div class="drawer-body">
-          <div class="diagnostic-card">
-            <h4>Live RTT Latency (Round-Trip Time)</h4>
-            <p class="card-desc">Monitors QUIC tunnel latency in real time as pathway transitions trigger.</p>
-            
-            <div class="chart-wrapper">
-              <canvas ref="canvasRef" width="360" height="150" class="telemetry-chart"></canvas>
+
+        <div v-if="showLocalOptions" class="method-list">
+          <h4 style="margin-bottom: 0.75rem;">📍 Local Pairing Methods</h4>
+          <div
+            v-for="m in localMethods" :key="m.id"
+            class="method-option"
+            @click="handleLocalSelect(m.id)"
+          >
+            <span class="method-icon">{{ m.icon }}</span>
+            <div>
+              <strong>{{ m.label }}</strong>
+              <p class="card-desc">{{ m.desc }}</p>
             </div>
           </div>
+          <button class="btn btn-secondary btn-sm" style="margin-top: 0.75rem;" @click="showLocalOptions = false">Back</button>
+        </div>
 
-          <div class="diagnostic-card" style="margin-top: 1.5rem;">
-            <h4>Active Interface Statistics</h4>
-            <div class="stat-row">
-              <span>Current Link Type:</span>
-              <strong :style="{ color: isLinkActive ? 'var(--accent-cyan)' : '#ef4444' }">
-                {{ isLinkActive ? (wifiDirectActive ? 'Wi-Fi Direct P2P (Tier 1)' : (lanActive ? 'mDNS LAN (Tier 2)' : 'WireGuard WAN (Tier 3)')) : 'Disconnected (Offline)' }}
-              </strong>
-            </div>
-            <div class="stat-row">
-              <span>Average RTT Jitter:</span>
-              <span>{{ isLinkActive ? '±0.4 ms' : 'N/A (Disconnected)' }}</span>
-            </div>
-            <div class="stat-row">
-              <span>Dynamic UDP Hole State:</span>
-              <span :style="{ color: isLinkActive ? '#22c55e' : '#94a3b8' }">
-                {{ isLinkActive ? 'OPEN / STABLE' : 'CLOSED / OFFLINE' }}
-              </span>
+        <div v-if="showExternalOptions" class="method-list">
+          <h4 style="margin-bottom: 0.75rem;">🌍 External Pairing Methods</h4>
+          <div
+            v-for="m in externalMethods" :key="m.id"
+            class="method-option"
+            @click="handleExternalSelect(m.id)"
+          >
+            <span class="method-icon">{{ m.icon }}</span>
+            <div>
+              <strong>{{ m.label }}</strong>
+              <p class="card-desc">{{ m.desc }}</p>
             </div>
           </div>
+          <button class="btn btn-secondary btn-sm" style="margin-top: 0.75rem;" @click="showExternalOptions = false">Back</button>
+        </div>
 
+        <div class="modal-actions" style="margin-top: 1rem;">
+          <button class="btn btn-secondary" @click="showPairModal = false; showLocalOptions = false; showExternalOptions = false">Cancel</button>
         </div>
       </div>
     </div>
@@ -468,308 +233,86 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.header-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.5rem;
+.panel { padding: 1.5rem; }
+.header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+.section-title { font-size: 1.3rem; font-weight: 800; }
+.section-subtitle { font-size: 0.85rem; color: var(--text-secondary); }
+.connect-prompt { display: flex; justify-content: center; padding: 3rem 0; }
+.connect-card {
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 20px;
+  padding: 2.5rem; text-align: center; max-width: 380px; cursor: pointer;
+  transition: all 0.3s ease;
 }
-.section-subtitle {
-  color: var(--text-secondary);
-  font-size: 0.9rem;
+.connect-card:hover { transform: translateY(-3px); border-color: var(--accent-cyan); box-shadow: 0 8px 30px rgba(6,182,212,0.15); }
+.connect-card-icon { margin-bottom: 1rem; }
+.paired-view { display: flex; flex-direction: column; gap: 1.5rem; }
+.paired-header-card {
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px;
+  padding: 1.5rem; display: flex; justify-content: space-between; align-items: center;
 }
-.connectivity-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
+.paired-info { display: flex; align-items: center; gap: 1rem; }
+.avatar-placeholder {
+  width: 48px; height: 48px; border-radius: 50%; background: var(--accent-cyan);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.2rem; font-weight: bold; color: white;
 }
-@media (max-width: 1024px) {
-  .connectivity-grid {
-    grid-template-columns: 1fr;
-  }
+.paired-actions { display: flex; gap: 0.5rem; }
+.method-section h4 { margin-bottom: 0.25rem; }
+.method-card {
+  background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 12px;
+  padding: 1rem; margin-bottom: 0.75rem;
 }
-.connectivity-card, .fallback-card {
-  padding: 1.5rem;
+.method-card-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+.method-card-actions { display: flex; gap: 0.5rem; }
+.badge-local { background: rgba(6,182,212,0.15); color: var(--accent-cyan); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+.badge-remote { background: rgba(99,102,241,0.15); color: var(--accent-indigo); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+.badge-offline { background: rgba(239,68,68,0.15); color: #ef4444; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+.text-cyan { color: var(--accent-cyan); }
+.text-indigo { color: var(--accent-indigo); }
+.fix-firewall-section { margin-top: 0.5rem; }
+
+.pair-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+.choice-card {
+  background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 16px;
+  padding: 1.5rem; text-align: center; cursor: pointer;
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.5rem;
-}
-.active-badge {
-  background: rgba(99, 102, 241, 0.2);
-  color: #a5b4fc;
-  font-size: 0.75rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: 9999px;
-  border: 1px solid rgba(99, 102, 241, 0.4);
-}
-.card-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  margin-bottom: 1rem;
-}
-.interfaces-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.interface-item {
-  background: rgba(15, 23, 42, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
+.choice-card.hovered { transform: translateY(-6px) scale(1.02); border-color: var(--accent-cyan); box-shadow: 0 12px 40px rgba(6,182,212,0.2); }
+.choice-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+.choice-card h4 { margin-bottom: 0.25rem; }
+.choice-card p { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
+.choice-methods { display: flex; flex-wrap: wrap; gap: 0.25rem; justify-content: center; }
+.choice-methods span { font-size: 0.65rem; background: rgba(99,102,241,0.1); color: var(--text-secondary); padding: 0.15rem 0.4rem; border-radius: 4px; }
+
+.method-list { margin: 1rem 0; }
+.method-option {
+  display: flex; align-items: center; gap: 0.75rem;
+  background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 12px;
+  padding: 1rem; margin-bottom: 0.5rem; cursor: pointer;
   transition: all 0.2s ease;
 }
-.interface-item.active {
-  border-color: var(--accent-cyan);
-  background: rgba(6, 182, 212, 0.05);
-  box-shadow: 0 0 15px rgba(6, 182, 212, 0.1);
-}
-.interface-item.inactive {
-  opacity: 0.85;
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.03);
-}
-.interface-item.disabled {
-  opacity: 0.45;
-  background: rgba(255, 255, 255, 0.02);
-  border-color: rgba(255, 255, 255, 0.02);
-  pointer-events: none;
-}
-.no-wifi-badge {
-  font-size: 0.6rem;
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-:global(html.theme-daylight) .interface-item.inactive {
-  background: rgba(0, 0, 0, 0.06);
-  border-color: rgba(0, 0, 0, 0.03);
-}
-.interface-item.drag-over {
-  border-color: var(--accent-indigo);
-  outline: 2px dashed var(--accent-indigo);
-  outline-offset: -2px;
-}
-.interface-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.25rem;
-}
-.interface-title {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.9rem;
-}
-.drag-handle {
-  cursor: grab;
-  display: flex;
-  align-items: center;
-  color: var(--text-secondary);
-  margin-right: 0.2rem;
-  padding: 2px;
-  border-radius: 4px;
-  transition: color 0.2s;
-}
-.drag-handle:hover {
-  color: var(--accent-cyan);
-}
-.drag-handle:active {
-  cursor: grabbing;
-}
-.tier-number {
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-primary);
-  font-size: 0.7rem;
-  font-weight: bold;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-}
-.interface-desc {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-.always-on {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-}
-.toggle-switch {
-  position: relative;
-  width: 44px;
-  height: 22px;
-}
-.toggle-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-.toggle-switch label {
-  position: absolute;
-  cursor: pointer;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #334155;
-  transition: .2s;
-  border-radius: 34px;
-}
-.toggle-switch label:before {
-  position: absolute;
-  content: "";
-  height: 16px;
-  width: 16px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
-  transition: .2s;
-  border-radius: 50%;
-}
-.toggle-switch input:checked + label {
-  background-color: var(--accent-cyan);
-}
-.toggle-switch input:checked + label:before {
-  transform: translateX(22px);
-}
-.fallback-inputs {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.switch-row {
-  display: flex;
-  align-items: center;
-}
-.switch-label {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.9rem;
-  cursor: pointer;
-  color: var(--text-primary);
-}
-.input-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.input-group label {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-}
-.input-text {
-  background: var(--bg-dark);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 0.5rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  outline: none;
-}
-.input-text:focus {
-  border-color: var(--accent-indigo);
-}
-.stun-action-box {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-.stun-result {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.85rem;
-  background: var(--bg-dark);
-  padding: 0.75rem;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-}
-.code-badge {
-  font-family: monospace;
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent-indigo);
-  padding: 0.15rem 0.4rem;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  border: 1px solid rgba(99, 102, 241, 0.3);
-}
+.method-option:hover { border-color: var(--accent-cyan); background: rgba(6,182,212,0.05); }
+.method-icon { font-size: 1.5rem; }
 
-/* Slide-over Drawer Styles */
-.drawer-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  z-index: 1000;
-  display: flex;
-  justify-content: flex-end;
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8); backdrop-filter: blur(8px);
+  display: flex; justify-content: center; align-items: center; z-index: 1000;
 }
-.drawer-panel {
-  background: var(--bg-card);
-  border-left: 1px solid var(--border-color);
-  width: 400px;
-  max-width: 90%;
-  height: 100%;
-  padding: 2rem;
-  display: flex;
-  flex-direction: column;
-  animation: slide-in 0.3s ease-out;
+.modal-content {
+  background: var(--bg-card); border: 1px solid var(--border-color);
+  border-radius: 16px; width: 90%; max-width: 480px; padding: 1.5rem;
+  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
 }
-@keyframes slide-in {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
-}
-.drawer-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 1rem;
-  margin-bottom: 1.5rem;
-}
-.close-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1.75rem;
-  cursor: pointer;
-}
-.diagnostic-card {
-  background: var(--bg-dark);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 1rem;
-}
-.diagnostic-card h4 {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 0.25rem;
-}
-.chart-wrapper {
-  background: var(--bg-dark);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 0.5rem;
-  margin-top: 0.5rem;
-}
-.telemetry-chart {
-  width: 100%;
-  height: 150px;
-  display: block;
-}
-.stat-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.85rem;
-  padding: 0.5rem 0;
-  border-bottom: 1px solid var(--border-color);
-}
+.modal-actions { display: flex; justify-content: center; gap: 0.5rem; }
+
+.btn { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.85rem; font-weight: 700; border: none; cursor: pointer; transition: all 0.2s ease; }
+.btn-primary { background: var(--accent-cyan); color: #000; }
+.btn-accent { background: var(--accent-indigo); color: white; }
+.btn-secondary { background: rgba(148,163,184,0.15); color: var(--text-primary); }
+.btn-danger-outline { background: transparent; border: 1px solid #ef4444; color: #ef4444; }
+.btn-secondary-outline { background: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); }
+.btn-xs { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+.btn-sm { padding: 0.4rem 0.8rem; font-size: 0.8rem; }
+.card-desc { font-size: 0.8rem; color: var(--text-secondary); }
 </style>

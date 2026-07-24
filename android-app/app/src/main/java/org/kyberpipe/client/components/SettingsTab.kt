@@ -38,6 +38,12 @@ fun SettingsTab(
     onTriggerHandshake: () -> Unit,
     onAvatarPickerClick: () -> Unit,
     onSaveSettings: () -> Unit,
+    wifiDirectActive: Boolean,
+    lanActive: Boolean,
+    wireguardActive: Boolean,
+    onWifiDirectToggled: (Boolean) -> Unit,
+    onLanToggled: (Boolean) -> Unit,
+    onWireguardToggled: (Boolean) -> Unit,
     localLogs: List<String> = emptyList(),
     onCopyStacktrace: () -> Unit = {},
     onExportDiagnosticLogs: () -> Unit = {},
@@ -51,9 +57,6 @@ fun SettingsTab(
     var ddnsEnabled by remember { mutableStateOf(settings.enableDdns) }
     var themeState by remember { mutableStateOf(settings.themeMode) }
     var amoledState by remember { mutableStateOf(settings.amoledMode) }
-    var wifiDirectToggled by remember { mutableStateOf(true) }
-    var lanToggled by remember { mutableStateOf(false) }
-    var wireguardToggled by remember { mutableStateOf(true) }
 
     val colors = MaterialTheme.colorScheme
 
@@ -276,20 +279,20 @@ fun SettingsTab(
                 )
 
                 val pathwayToggles = mapOf(
-                    "wifi_direct" to wifiDirectToggled,
-                    "mdns_lan" to lanToggled,
-                    "wireguard_wan" to wireguardToggled
+                    "wifi_direct" to wifiDirectActive,
+                    "mdns_lan" to lanActive,
+                    "wireguard_wan" to wireguardActive
                 )
 
                 fun togglePathway(key: String, checked: Boolean) {
-                    val activeCount = listOf(wifiDirectToggled, lanToggled, wireguardToggled).count { it }
+                    val activeCount = listOf(wifiDirectActive, lanActive, wireguardActive).count { it }
                     if (!checked && activeCount <= 1) {
                         return
                     }
                     when (key) {
-                        "wifi_direct" -> wifiDirectToggled = checked
-                        "mdns_lan" -> lanToggled = checked
-                        "wireguard_wan" -> wireguardToggled = checked
+                        "wifi_direct" -> onWifiDirectToggled(checked)
+                        "mdns_lan" -> onLanToggled(checked)
+                        "wireguard_wan" -> onWireguardToggled(checked)
                     }
                     onSaveSettings()
                 }
@@ -416,17 +419,8 @@ fun SettingsTab(
                         ) {
                             Button(
                                 onClick = {
-                                    val hostIp = if (pairingConfigInput.trim().startsWith("{")) {
-                                        try {
-                                            org.json.JSONObject(pairingConfigInput).optString("local_ip", "10.0.2.2")
-                                        } catch (e: Exception) {
-                                            "10.0.2.2"
-                                        }
-                                    } else {
-                                        "10.0.2.2"
-                                    }
-                                    sendPostRequestAsync("http://10.0.2.2:23520/api/unpair", "{}")
-                                    if (hostIp != "10.0.2.2") {
+                                    val hostIp = settings.pairedHostIp
+                                    if (hostIp.isNotEmpty()) {
                                         sendPostRequestAsync("http://$hostIp:23520/api/unpair", "{}")
                                     }
 

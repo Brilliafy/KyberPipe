@@ -26,89 +26,23 @@ fun PairingInputSection(
     onPairingConfigChange: (String) -> Unit,
     onTriggerHandshake: () -> Unit
 ) {
-    var activeTab by remember { mutableStateOf("code") } // "code" or "json"
     val colors = MaterialTheme.colorScheme
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Tab Headers
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(colors.surfaceVariant.copy(alpha = 0.5f), shape = RoundedCornerShape(8.dp))
-                .padding(4.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .background(
-                        if (activeTab == "code") colors.primary else Color.Transparent,
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                    .clickable { activeTab = "code" }
-                    .padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Pairing Code",
-                    color = if (activeTab == "code") colors.onPrimary else colors.onSurface,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .background(
-                        if (activeTab == "json") colors.primary else Color.Transparent,
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                    .clickable { activeTab = "json" }
-                    .padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "JSON Config",
-                    color = if (activeTab == "json") colors.onPrimary else colors.onSurface,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        if (activeTab == "code") {
-            Text(
-                text = "Enter the 6-digit safe pairing SAS code from your PC:",
-                fontSize = 12.sp,
-                color = colors.onSurface.copy(alpha = 0.7f),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            SegmentedPinInput(
-                initialValue = if (pairingConfigInput.length == 6 && pairingConfigInput.all { it.isDigit() }) pairingConfigInput else "",
-                onCodeComplete = { code ->
-                    onPairingConfigChange(code)
-                }
-            )
-        } else {
-            OutlinedTextField(
-                value = pairingConfigInput,
-                onValueChange = onPairingConfigChange,
-                label = { Text("Paste PC Pairing Config JSON or Pairing URL", fontSize = 11.sp) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = colors.onSurface,
-                    unfocusedTextColor = colors.onSurface,
-                    focusedBorderColor = colors.primary,
-                    unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
-                ),
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3,
-                maxLines = 5
-            )
-        }
+        OutlinedTextField(
+            value = pairingConfigInput,
+            onValueChange = onPairingConfigChange,
+            label = { Text("Paste PC Pairing Config JSON or Pairing URL", fontSize = 11.sp) },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = colors.onSurface,
+                unfocusedTextColor = colors.onSurface,
+                focusedBorderColor = colors.primary,
+                unfocusedBorderColor = colors.onSurface.copy(alpha = 0.2f)
+            ),
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 5
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
