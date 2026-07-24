@@ -1,0 +1,621 @@
+pub mod crypto;
+pub mod error;
+pub mod network;
+pub mod packets;
+pub mod qr_scanner;
+pub mod telemetry;
+
+use error::KyberError;
+use network::PathMigrationManager;
+use packets::{
+    compute_sha256_hex, BinaryClipboardPacket, ClipboardPacket, HardwareCommandPacket,
+    NotificationActionPacket, NotificationPacket, OutboundSmsPacket, SensorPacket, SmsPacket,
+};
+use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+
+uniffi::setup_scaffolding!();
+
+use crypto::HybridKeyPair;
+use std::sync::RwLock;
+
+pub(crate) static KEY_STORE: std::sync::LazyLock<RwLock<Vec<(String, HybridKeyPair)>>> =
+    std::sync::LazyLock::new(|| RwLock::new(Vec::new()));
+
+static RATCHET_STORE: std::sync::LazyLock<
+    RwLock<
+        Vec<(
+            String,
+            std::sync::Arc<std::sync::Mutex<crypto::DoubleRatchetState>>,
+        )>,
+    >,
+> = std::sync::LazyLock::new(|| RwLock::new(Vec::new()));
+
+static SHARED_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
+    std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .expect("Failed to build shared tokio runtime")
+    });
+
+#[derive(uniffi::Record)]
+pub struct PqKeyPair {
+    pub x25519_pk: Vec<u8>,
+    pub x25519_sk: Vec<u8>,
+    pub mlkem_pk: Vec<u8>,
+    pub mlkem_sk: Vec<u8>,
+}
+
+#[derive(uniffi::Record)]
+pub struct PqKemResponse {
+    pub ciphertext: Vec<u8>,
+    pub shared_secret: Vec<u8>,
+}
+
+#[derive(uniffi::Record)]
+pub struct EncryptedPayload {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(uniffi::Record)]
+pub struct PathChallengeResult {
+    pub challenge_token: String,
+    pub expected_response: String,
+}
+
+#[derive(uniffi::Record, serde::Serialize, serde::Deserialize, Clone)]
+pub struct ConnectionInfo {
+    pub active_tier: u32,
+    pub active_path_description: String,
+    pub latency_ms: f64,
+    pub public_endpoint: String,
+}
+
+#[derive(uniffi::Record, serde::Serialize, serde::Deserialize, Clone)]
+pub struct PairingConfig {
+    pub host_identity_pk_hex: String,
+    pub local_ip: String,
+    pub wifi_direct_mac: String,
+    pub p2p_ip: String,
+    pub wireguard_pk_hex: String,
+    pub stun_endpoint: String,
+    pub pairing_nonce_hex: String,
+}
+
+/// Standalone UniFFI initialization helper for Hybrid post-quantum handshake
+#[uniffi::export]
+pub fn initialize_pq_handshake() -> Result<(), KyberError> {
+    let _pair = crypto::generate_hybrid_keypair();
+    Ok(())
+}
+
+/// UniFFI export: Generate Hybrid (X25519 + ML-KEM-768) keypair returning hex-encoded strings
+#[uniffi::export]
+pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
+    let pair = crypto::generate_hybrid_keypair();
+    let handle = hex::encode(rand::random::<[u8; 16]>());
+    if let Ok(mut store) = KEY_STORE.write() {
+        let store: &mut Vec<(String, HybridKeyPair)> = &mut store;
+        store.push((handle.clone(), pair.clone()));
+        if store.len() > 10 {
+            store.remove(0);
+        }
+    }
+    Ok(PqKeyPair {
+        x25519_pk: pair.x25519_pk.to_vec(),
+        x25519_sk: pair.x25519_sk.to_vec(),
+        mlkem_pk: pair.mlkem_pk.clone(),
+        mlkem_sk: pair.mlkem_sk.clone(),
+    })
+}
+
+/// Retrieve a stored keypair by handle
+pub fn get_keypair_by_handle(handle: &str) -> Option<HybridKeyPair> {
+    let store = KEY_STORE.read().ok()?;
+    let store: &Vec<(String, HybridKeyPair)> = &store;
+    store
+        .iter()
+        .find(|pair: &&(String, HybridKeyPair)| pair.0.as_str() == handle)
+        .map(|(_, kp): &(String, HybridKeyPair)| kp.clone())
+}
+
+/// UniFFI export: Decapsulate shared secret using a key handle instead of raw secret keys
+#[uniffi::export]
+pub fn decapsulate_pq_secret_by_handle(
+    ciphertext: Vec<u8>,
+    key_handle: String,
+) -> Result<Vec<u8>, KyberError> {
+    let pair = get_keypair_by_handle(&key_handle).ok_or_else(|| {
+        KyberError::DecapsulationFailed("Key handle not found in secure store".into())
+    })?;
+    let mut x25519_arr = [0u8; 32];
+    x25519_arr.copy_from_slice(&pair.x25519_sk);
+    crypto::decapsulate_hybrid(&ciphertext, &x25519_arr, &pair.mlkem_sk)
+}
+
+/// UniFFI export: Encapsulate shared secret against peer's Hybrid public keys
+#[uniffi::export]
+pub fn encapsulate_pq_secret(
+    peer_x25519_pk: Vec<u8>,
+    peer_mlkem_pk: Vec<u8>,
+) -> Result<PqKemResponse, KyberError> {
+    if peer_x25519_pk.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: peer_x25519_pk.len() as u64,
+        });
+    }
+    let mut x25519_arr = [0u8; 32];
+    x25519_arr.copy_from_slice(&peer_x25519_pk);
+
+    let res = crypto::encapsulate_hybrid(&x25519_arr, &peer_mlkem_pk)?;
+    Ok(PqKemResponse {
+        ciphertext: res.ciphertext_bytes,
+        shared_secret: res.combined_shared_secret,
+    })
+}
+
+/// UniFFI export: Decapsulate shared secret against ciphertext & secret keys
+#[uniffi::export]
+pub fn decapsulate_pq_secret(
+    ciphertext: Vec<u8>,
+    my_x25519_sk: Vec<u8>,
+    my_mlkem_sk: Vec<u8>,
+) -> Result<Vec<u8>, KyberError> {
+    if my_x25519_sk.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: my_x25519_sk.len() as u64,
+        });
+    }
+    let mut x25519_sk_arr = [0u8; 32];
+    x25519_sk_arr.copy_from_slice(&my_x25519_sk);
+
+    let ss = crypto::decapsulate_hybrid(&ciphertext, &x25519_sk_arr, &my_mlkem_sk)?;
+    Ok(ss)
+}
+
+/// UniFFI export: HKDF-SHA256 key derivation
+#[uniffi::export]
+pub fn derive_session_key(shared_secret: Vec<u8>, salt: Vec<u8>) -> Result<Vec<u8>, KyberError> {
+    let derived = crypto::derive_session_key(&shared_secret, &salt, b"kyberpipe-hybrid-session")?;
+    Ok(derived.to_vec())
+}
+
+/// UniFFI export: Encrypt plaintext string with 256-bit session key
+#[uniffi::export]
+pub fn encrypt_payload_with_key(
+    session_key: Vec<u8>,
+    data: String,
+) -> Result<EncryptedPayload, KyberError> {
+    if session_key.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: session_key.len() as u64,
+        });
+    }
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&session_key);
+
+    let mut nonce_bytes = [0u8; 12];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+
+    let ciphertext = crypto::encrypt_chacha20(&key_arr, &nonce_bytes, data.as_bytes())?;
+    Ok(EncryptedPayload {
+        nonce: nonce_bytes.to_vec(),
+        ciphertext,
+    })
+}
+
+/// UniFFI export: Decrypt ciphertext with 256-bit session key & nonce
+#[uniffi::export]
+pub fn decrypt_payload_with_key(
+    session_key: Vec<u8>,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+) -> Result<String, KyberError> {
+    if session_key.len() != 32 {
+        return Err(KyberError::InvalidKeyLength {
+            expected: 32,
+            got: session_key.len() as u64,
+        });
+    }
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&session_key);
+
+    if nonce.len() != 12 {
+        return Err(KyberError::DecryptionFailed(
+            "Nonce must be 12 bytes".into(),
+        ));
+    }
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(&nonce);
+
+    let plaintext_bytes = crypto::decrypt_chacha20(&key_arr, &nonce_arr, &ciphertext)?;
+    String::from_utf8(plaintext_bytes)
+        .map_err(|e| KyberError::DecryptionFailed(format!("UTF-8 decode error: {e}")))
+}
+
+/// Return the key handle from the last generated keypair (stores in KEY_STORE)
+#[uniffi::export]
+pub fn get_last_key_handle() -> Result<String, KyberError> {
+    let store = KEY_STORE
+        .read()
+        .map_err(|_| KyberError::CryptoError("Key store lock failed".into()))?;
+    let store: &Vec<(String, HybridKeyPair)> = &store;
+    store
+        .last()
+        .map(|(h, _): &(String, HybridKeyPair)| h.clone())
+        .ok_or_else(|| KyberError::CryptoError("No keypair generated yet".into()))
+}
+
+/// Packet creation helpers
+#[uniffi::export]
+pub fn create_sensor_packet(lux: f64, timestamp: u64) -> Result<String, KyberError> {
+    let pkt = SensorPacket { lux, timestamp };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_clipboard_packet(text: String, timestamp: u64) -> Result<String, KyberError> {
+    let hash = compute_sha256_hex(&text);
+    let pkt = ClipboardPacket {
+        content: text,
+        hash,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_binary_clipboard_packet(
+    mime_type: String,
+    data_base64: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let hash = compute_sha256_hex(&data_base64);
+    let pkt = BinaryClipboardPacket {
+        mime_type,
+        data_base64,
+        hash,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_sms_packet(
+    sender: String,
+    body: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = SmsPacket {
+        sender,
+        body,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_outbound_sms_packet(
+    recipient: String,
+    body: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = OutboundSmsPacket {
+        recipient,
+        body,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_notification_packet(
+    title: String,
+    text: String,
+    app_package: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = NotificationPacket {
+        sbn_key: format!("{app_package}_{timestamp}"),
+        title,
+        text,
+        app_package,
+        icon_base64: None,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_notification_action_packet(
+    sbn_key: String,
+    action_index: u32,
+    action_title: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = NotificationActionPacket {
+        sbn_key,
+        action_index,
+        action_title,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn create_hardware_command_packet(
+    command_type: String,
+    payload_json: String,
+    timestamp: u64,
+) -> Result<String, KyberError> {
+    let pkt = HardwareCommandPacket {
+        command_type,
+        payload_json,
+        timestamp,
+    };
+    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
+}
+
+#[uniffi::export]
+pub fn generate_path_challenge_tokens(session_key: Vec<u8>) -> PathChallengeResult {
+    let (challenge_token, expected_response) =
+        PathMigrationManager::create_path_challenge(&session_key);
+    PathChallengeResult {
+        challenge_token,
+        expected_response,
+    }
+}
+
+#[uniffi::export]
+pub fn verify_path_response_token(
+    challenge_token: String,
+    response_token: String,
+    session_key: Vec<u8>,
+) -> bool {
+    PathMigrationManager::verify_path_response(&challenge_token, &response_token, &session_key)
+}
+
+#[uniffi::export]
+pub fn generate_sas_code(
+    host_pk: Vec<u8>,
+    client_pk: Vec<u8>,
+    shared_secret: Vec<u8>,
+) -> Result<String, KyberError> {
+    crypto::generate_sas_code(&host_pk, &client_pk, &shared_secret)
+}
+
+#[uniffi::export]
+pub fn toggle_flight_data_recorder(enabled: bool) {
+    telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
+}
+
+#[uniffi::export]
+pub fn dump_flight_data_recorder() -> String {
+    telemetry::GLOBAL_FLIGHT_RECORDER.dump_events_json()
+}
+
+#[uniffi::export]
+pub fn trigger_panic_hardware_wipe() -> Result<(), KyberError> {
+    crypto::trigger_panic_hardware_wipe()
+}
+
+#[uniffi::export]
+pub fn is_duplicate_clipboard(content_hash: String, recent_hashes: Vec<String>) -> bool {
+    recent_hashes.contains(&content_hash)
+}
+
+#[uniffi::export]
+pub fn compute_sha256(data: String) -> String {
+    compute_sha256_hex(&data)
+}
+
+#[uniffi::export]
+pub fn perform_stun_hole_punch(stun_host: String) -> Result<String, KyberError> {
+    let addr = SHARED_RUNTIME.block_on(network::query_stun_server(&stun_host))?;
+    Ok(addr.to_string())
+}
+
+/// Listen for LAN mDNS beacons from desktop and return discovered hosts
+#[uniffi::export]
+pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> {
+    let results = SHARED_RUNTIME
+        .block_on(network::listen_for_beacons(
+            network::P2P_BEACON_PORT,
+            timeout_secs,
+        ))?
+        .into_iter()
+        .map(|(pk, ip, name)| format!("{pk}:{ip}:{name}"))
+        .collect();
+    Ok(results)
+}
+
+#[uniffi::export]
+pub fn evaluate_connection_hierarchy(
+    wifi_direct_active: bool,
+    lan_active: bool,
+    public_endpoint: String,
+) -> ConnectionInfo {
+    if wifi_direct_active {
+        ConnectionInfo {
+            active_tier: 1,
+            active_path_description: "Wi-Fi Direct P2P Link (Multiplexed QUIC)".to_string(),
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
+            public_endpoint,
+        }
+    } else if lan_active {
+        ConnectionInfo {
+            active_tier: 2,
+            active_path_description: "Local LAN AP Link (mDNS UDP Discovery)".to_string(),
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
+            public_endpoint,
+        }
+    } else {
+        ConnectionInfo {
+            active_tier: 3,
+            active_path_description: "WireGuard WAN Tunnel Overlay (Encrypted QUIC)".to_string(),
+            latency_ms: 0.0, // RTT measured live; 0 = unknown
+            public_endpoint,
+        }
+    }
+}
+
+pub fn get_local_ip() -> String {
+    get_system_local_ip()
+}
+
+pub fn get_wifi_direct_mac() -> String {
+    get_primary_mac()
+}
+
+pub async fn send_beacon_payload(payload: String) -> Result<(), KyberError> {
+    network::send_p2p_beacon(&payload, None).await
+}
+
+/// Sign a beacon payload with a fresh ML-DSA-65 key and return (signed_payload, signing_pk_hex)
+pub fn sign_beacon_payload(payload: &str) -> Result<String, KyberError> {
+    let (pk, sk) = pqcrypto_mldsa::mldsa65::keypair();
+    let sig = crypto::sign_mldsa_payload(payload.as_bytes(), sk.as_bytes())?;
+    Ok(format!(
+        "{}:{}:{}",
+        payload,
+        hex::encode(&sig),
+        hex::encode(pk.as_bytes())
+    ))
+}
+
+fn get_system_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ip.is_empty() && ip != "0.0.0.0" {
+                    return ip;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn get_primary_mac() -> String {
+    let _local_ip = get_system_local_ip();
+    let default_iface = get_default_interface();
+    if default_iface.is_empty() {
+        return String::new();
+    }
+    let mac_path = format!("/sys/class/net/{default_iface}/address");
+    if let Ok(mac) = std::fs::read_to_string(&mac_path) {
+        let mac = mac.trim().to_string();
+        if mac.len() >= 17 && mac.chars().filter(|&c| c == ':').count() == 5 {
+            return mac;
+        }
+    }
+    String::new()
+}
+
+fn get_default_interface() -> String {
+    if let Ok(route) = std::fs::read_to_string("/proc/net/route") {
+        for line in route.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts.get(1) == Some(&"00000000") {
+                return parts[0].to_string();
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let iface = entry.file_name().to_string_lossy().to_string();
+            if iface == "lo" {
+                continue;
+            }
+            return iface;
+        }
+    }
+    String::new()
+}
+
+fn get_p2p_ip() -> String {
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let iface = entry.file_name().to_string_lossy().to_string();
+            if iface.starts_with("p2p-") || iface.starts_with("p2p_") {
+                let ip_path = format!("/sys/class/net/{iface}/address");
+                if std::fs::read_to_string(&ip_path).is_ok() {
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        if let Ok(addr) = "192.168.49.1:0".parse::<std::net::SocketAddr>() {
+                            if socket.connect(addr).is_ok() {
+                                if let Ok(local) = socket.local_addr() {
+                                    let ip = local.ip().to_string();
+                                    if ip.starts_with("192.168.49.") || ip.starts_with("192.168.") {
+                                        return ip;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn try_start_p2p_group() {
+    // First check if hardware supports P2P
+    if let Ok(out) = std::process::Command::new("iw").args(["list"]).output() {
+        let output = String::from_utf8_lossy(&out.stdout);
+        if !output.contains("P2P") {
+            return; // Hardware doesn't support Wi-Fi Direct
+        }
+    }
+    if let Ok(out) = std::process::Command::new("wpa_cli").arg("ping").output() {
+        if out.status.success() {
+            let _ = std::process::Command::new("wpa_cli")
+                .arg("p2p_group_add")
+                .output();
+        }
+    }
+}
+
+#[uniffi::export]
+pub fn generate_pairing_config(
+    host_pk_hex: String,
+    wireguard_pk_hex: String,
+) -> Result<PairingConfig, KyberError> {
+    let mut nonce = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+
+    // Try to start Wi-Fi Direct P2P group (desktop as group owner)
+    try_start_p2p_group();
+
+    Ok(PairingConfig {
+        host_identity_pk_hex: host_pk_hex,
+        local_ip: get_system_local_ip(),
+        wifi_direct_mac: get_primary_mac(),
+    })
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hybrid_handshake_flow() {
+        let _alice = generate_pq_keypair().unwrap();
+        let bob = generate_pq_keypair().unwrap();
+
+        let kem_res = encapsulate_pq_secret(bob.x25519_pk.clone(), bob.mlkem_pk.clone()).unwrap();
+        let decapsulated = decapsulate_pq_secret(
+            kem_res.ciphertext.clone(),
+            bob.x25519_sk.clone(),
+            bob.mlkem_sk.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(kem_res.shared_secret, decapsulated);
+    }
+}
