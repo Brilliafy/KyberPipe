@@ -303,7 +303,7 @@ fun MainScreen(
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         bindToWifiNetwork(connectivityManager)
         onFirewallDropDetected = {
-            addLog("[Network] Firewall drop detected — desktop firewall blocking port 23520")
+            addLog("[Network] Firewall drop detected — desktop firewall blocking port 9876")
             connectionStatus = "DISCONNECTED (Firewall blocked)"
             connectionMethod = "None"
             connectionColor = Color.Yellow
@@ -448,17 +448,13 @@ fun MainScreen(
 
                         if (settings.isPaired) {
                             val hostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
-                            if (hostIp.isNotEmpty()) {
-                                val jsonBody = if (sessionKey.isNotEmpty()) {
-                                    val encrypted = encryptPayloadWithKey(sessionKey, text)
-                                    JSONObject().put("encrypted", JSONObject()
-                                        .put("nonce_hex", encrypted.nonceHex)
-                                        .put("ciphertext_hex", encrypted.ciphertextHex)
-                                    ).toString()
-                                } else {
-                                    JSONObject().put("text", text).toString()
-                                }
-                                sendPostRequestAsync("http://$hostIp:23520/api/clipboard", jsonBody)
+                            if (hostIp.isNotEmpty() && sessionKey.isNotEmpty()) {
+                                val encrypted = encryptPayloadWithKey(sessionKey, text)
+                                val jsonBody = JSONObject().put("encrypted", JSONObject()
+                                    .put("nonce_hex", encrypted.nonceHex)
+                                    .put("ciphertext_hex", encrypted.ciphertextHex)
+                                ).toString()
+                                sendPostRequestAsync("http://$hostIp:9876/api/clipboard", jsonBody)
                             }
                         }
                     }
@@ -510,11 +506,11 @@ fun MainScreen(
 
             connectionStatus = "CONNECTING..."
             connectionColor = Color.Yellow
-            addLog("[Network] Testing connection to $hostToTry:23520")
+            addLog("[Network] Testing connection to $hostToTry:9876")
 
             val reachable = withContext(Dispatchers.IO) {
                 try {
-                    val url = java.net.URL("http://$hostToTry:23520/api/poll")
+                    val url = java.net.URL("http://$hostToTry:9876/api/poll")
                     val conn = url.openConnection() as java.net.HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 2000
@@ -532,12 +528,12 @@ fun MainScreen(
                 connectionMethod = "LAN"
                 connectionColor = Color.Green
                 attemptCount = 0
-                addLog("[Network] Host reachable at $hostToTry:23520")
+                addLog("[Network] Host reachable at $hostToTry:9876")
             } else {
                 connectionStatus = "DISCONNECTED (Unreachable)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
-                addLog("[Network] Host $hostToTry:23520 not reachable")
+                addLog("[Network] Host $hostToTry:9876 not reachable")
             }
         }
     }
@@ -556,7 +552,7 @@ fun MainScreen(
                 val responseText = withContext(Dispatchers.IO) {
                     var result: String? = null
                     try {
-                        val url = java.net.URL("http://$targetHostIp:23520/api/poll")
+                        val url = java.net.URL("http://$targetHostIp:9876/api/poll")
                         val conn = url.openConnection() as java.net.HttpURLConnection
                         conn.requestMethod = "GET"
                         conn.connectTimeout = 1500
@@ -602,11 +598,9 @@ fun MainScreen(
                                     val ct = latestClipEncrypted.getString("ciphertext_hex")
                                     decryptPayloadWithKey(sessionKey, nonce, ct)
                                 } catch (_: Exception) {
-                                    json.optString("latest_clip", "")
+                                    ""
                                 }
-                            } else {
-                                json.optString("latest_clip", "")
-                            }
+                            } else ""
                             if (latestClip.isNotEmpty()) {
                                 val exists = clipboardList.any { it.text == latestClip }
                                 if (!exists) {
@@ -664,15 +658,20 @@ fun MainScreen(
                 if (ssid.isNotEmpty()) {
                     try {
                         val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                        @Suppress("DEPRECATION")
                         val wifiConfig = android.net.wifi.WifiConfiguration().apply {
                             SSID = "\"$ssid\""
                             preSharedKey = "\"$pass\""
                             allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
                         }
+                        @Suppress("DEPRECATION")
                         val netId = wifiManager.addNetwork(wifiConfig)
                         if (netId != -1) {
+                            @Suppress("DEPRECATION")
                             wifiManager.disconnect()
+                            @Suppress("DEPRECATION")
                             wifiManager.enableNetwork(netId, true)
+                            @Suppress("DEPRECATION")
                             wifiManager.reconnect()
                             addLog("[P2P] Connecting to P2P network: $ssid")
                         }
@@ -934,7 +933,7 @@ fun MainScreen(
                                     .put("ciphertext_hex", kemCiphertext)
                                     .put("client_pk_hex", keyPair?.mlkemPkHex ?: "")
                                     .toString()
-                                sendPostRequestAsync("http://$realIp:23520/api/pair", jsonBody)
+                                sendPostRequestAsync("http://$realIp:9876/api/pair", jsonBody)
                             }
 
                             settings.pairedDeviceName = tempPcName

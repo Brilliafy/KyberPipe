@@ -198,7 +198,7 @@ const pairingQrUrl = ref("");
 const showPairingQr = ref(false);
 const showManualIpDialog = ref(false);
 const manualIpInput = ref("");
-const manualPortInput = ref("23520");
+const manualPortInput = ref("9876");
 const showSasVerification = ref(false);
 const sasWords = ref(["", "", "", ""]);
 
@@ -682,7 +682,7 @@ const submitManualPairing = async () => {
   const ip = manualIpInput.value.trim();
   if (!ip) return;
   pairingQrData.value = JSON.stringify({
-    method: "manual_ip", host: ip, port: parseInt(manualPortInput.value) || 23520,
+    method: "manual_ip", host: ip, port: parseInt(manualPortInput.value) || 9876,
     pqc_pub: keyPair.value?.mlkem_pk_hex || "",
     x25519_pub: keyPair.value?.x25519_pk_hex || ""
   });
@@ -745,7 +745,7 @@ onMounted(async () => {
     if (pqcPub) {
       await invoke("register_mdns_service", {
         serviceName: deviceName.value || "KyberPipe-Desktop",
-        port: 23520,
+        port: 9876,
         txtData: pqcPub
       });
     }
@@ -1032,7 +1032,7 @@ onUnmounted(() => {
         </div>
         <div class="form-group" style="margin-bottom: 1rem;">
           <label>Port</label>
-          <input type="number" v-model="manualPortInput" class="input-text" placeholder="23520" />
+          <input type="number" v-model="manualPortInput" class="input-text" placeholder="9876" />
         </div>
         <p class="card-desc">A QR will be generated for the Android app to scan.</p>
         <div class="modal-actions" style="margin-top: 1rem;">
@@ -1077,7 +1077,7 @@ onUnmounted(() => {
     <div class="flatpak-modal-overlay" v-if="showFirewallModal" @click.self="showFirewallModal = false">
       <div class="flatpak-modal-card" style="max-width: 550px;">
         <h3>🛡️ Allow Android to connect?</h3>
-        <p class="card-desc" style="margin: 0.75rem 0;">KyberPipe needs to open port <strong>23520/tcp</strong> on your firewall so your Android device can pair and sync with this desktop.</p>
+        <p class="card-desc" style="margin: 0.75rem 0;">KyberPipe needs to open port <strong>9876/tcp</strong> on your firewall so your Android device can pair and sync with this desktop.</p>
         <p class="card-desc" style="margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-secondary);">
           If you skip this, Android won't be able to discover or connect to this desktop over the local network. Wi-Fi Direct and USB tethering will still work.
         </p>
