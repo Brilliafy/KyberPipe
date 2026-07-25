@@ -41,7 +41,7 @@ import org.kyberpipe.client.service.MdnsBeaconListener
 import org.kyberpipe.client.service.BeaconHost
 import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
-import org.kyberpipe.client.utils.sendPostRequestAsync
+import org.kyberpipe.client.utils.bindToWifiNetwork
 import org.kyberpipe.client.utils.bindToWifiNetwork
 import org.kyberpipe.client.utils.onFirewallDropDetected
 import uniffi.core_crypto.*
@@ -105,15 +105,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        val uri = intent?.data
-        if (uri != null) {
-            val dataParam = uri.getQueryParameter("data")
-            if (dataParam != null && dataParam.isNotEmpty()) {
-                deepLinkData.value = dataParam
-            } else {
-                // If it's the raw custom uri without query param, use the whole scheme
-                deepLinkData.value = uri.toString()
-            }
+        val uri = intent?.data ?: return
+        val scheme = uri.scheme ?: ""
+        val host = uri.host ?: ""
+
+        // Validate URI origin — prevent malicious apps from injecting
+        // spoofed pairing data via arbitrary intents.
+        val validOrigin = when (scheme) {
+            "kyberpipe" -> host == "pair"
+            "https" -> host == "brilliafy.github.io" && uri.path?.startsWith("/kyberpipe/pair") == true
+            else -> false
+        }
+        if (!validOrigin) {
+            Log.w("KyberpipeIntent", "Rejected deep link from untrusted origin: $scheme://$host${uri.path}")
+            return
+        }
+
+        val dataParam = uri.getQueryParameter("data")
+        if (dataParam != null && dataParam.isNotEmpty()) {
+            deepLinkData.value = dataParam
+        } else {
+            deepLinkData.value = uri.toString()
         }
     }
 
@@ -273,6 +285,7 @@ fun MainScreen(
     var connectionColor by remember { mutableStateOf(Color.Red) }
     var attemptCount by remember { mutableStateOf(0) }
     val maxAttempts = 5
+    var clipboardSyncJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     // Toggles
     var wifiDirectActive by remember { mutableStateOf(true) }
@@ -406,7 +419,7 @@ fun MainScreen(
         }
         val filter = android.content.IntentFilter("org.kyberpipe.client.NOTIFICATION_INTERCEPTED")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             context.registerReceiver(receiver, filter)
@@ -452,9 +465,19 @@ fun MainScreen(
                                 val encrypted = encryptPayloadWithKey(sessionKey, text)
                                 val jsonBody = JSONObject().put("encrypted", JSONObject()
                                     .put("nonce_hex", encrypted.nonceHex)
-                                    .put("ciphertext_hex", encrypted.ciphertextHex)
-                                ).toString()
-                                sendPostRequestAsync("http://$hostIp:9876/api/clipboard", jsonBody)
+                                                .put("ciphertext_hex", encrypted.ciphertextHex)
+                                            ).toString()
+                                        // Clipboard sync with debounce + single in-flight.
+                                        clipboardSyncJob?.cancel()
+                                        clipboardSyncJob = kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                                            delay(500)
+                                            if (!isActive) return@launch
+                                            try {
+                                                uniffi.core_crypto.quicSendAndRecv(0x02.toUByte(), jsonBody)
+                                            } catch (e: Exception) {
+                                                addLog("[Clipboard] QUIC sync failed: ${e.message}")
+                                            }
+                                        }
                             }
                         }
                     }
@@ -508,16 +531,10 @@ fun MainScreen(
             connectionColor = Color.Yellow
             addLog("[Network] Testing connection to $hostToTry:9876")
 
-            val reachable = withContext(Dispatchers.IO) {
+            val reachable = withContext(Dispatchers.Default) {
                 try {
-                    val url = java.net.URL("http://$hostToTry:9876/api/poll")
-                    val conn = url.openConnection() as java.net.HttpURLConnection
-                    conn.requestMethod = "GET"
-                    conn.connectTimeout = 2000
-                    conn.readTimeout = 2000
-                    val code = conn.responseCode
-                    conn.disconnect()
-                    code == 200
+                    val result = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), "")
+                    result.isNotEmpty()
                 } catch (_: Exception) {
                     false
                 }
@@ -549,16 +566,10 @@ fun MainScreen(
                 val targetHostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
                 if (targetHostIp.isEmpty()) continue
 
-                val responseText = withContext(Dispatchers.IO) {
+                val responseText = withContext(Dispatchers.Default) {
                     var result: String? = null
                     try {
-                        val url = java.net.URL("http://$targetHostIp:9876/api/poll")
-                        val conn = url.openConnection() as java.net.HttpURLConnection
-                        conn.requestMethod = "GET"
-                        conn.connectTimeout = 1500
-                        conn.readTimeout = 1500
-                        val text = conn.inputStream.bufferedReader().use { it.readText() }
-                        conn.disconnect()
+                        val text = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), "")
                         if (text.isNotEmpty()) {
                             result = text
                         }
@@ -685,11 +696,39 @@ fun MainScreen(
             val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
             sasCodeDisplay = computedSas
             kemCiphertext = kemResponse.ciphertextHex
-            sessionKey = deriveSessionKey(kemResponse.sharedSecretHex, "6b79626572706970652d73796e632d7631")
-            settings.sessionKey = sessionKey
-            tempPcName = "Linux Desktop workstation"
-            showFirstConnectModal = true
-            addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
+            // Do NOT set sessionKey or isPaired yet — the host must first receive
+            // the ciphertext and derive its own session key.
+            var hostAccepted = false
+            if (tempHostIp.isNotEmpty()) {
+                try {
+                    val jsonBody = JSONObject()
+                        .put("name", settings.deviceName)
+                        .put("ciphertext_hex", kemCiphertext)
+                        .put("client_pk_hex", myPkHex)
+                        .toString()
+                    val response = uniffi.core_crypto.quicSendAndRecv(0x01.toUByte(), jsonBody)
+                    val respJson = try { JSONObject(response) } catch (_: Exception) { null }
+                    val status = respJson?.optString("status", "")
+                    if (status == "pairing_pending_sas") {
+                        // Derive session key using the host public key as salt
+                        // instead of hardcoded "kyberpipe-sync-v1". Each pairing
+                        // session gets a unique KDF context, preventing shared
+                        // secret reuse across sessions.
+                        sessionKey = deriveSessionKey(kemResponse.sharedSecretHex, hostPkHex)
+                        addLog("[Pairing] Host received ciphertext, pending SAS confirmation")
+                        hostAccepted = true
+                    } else {
+                        addLog("[Pairing] Host rejected handshake: $response")
+                    }
+                } catch (e: Exception) {
+                    addLog("[Pairing] QUIC send failed: ${e.message}")
+                }
+            }
+            if (hostAccepted) {
+                tempPcName = "Linux Desktop workstation"
+                showFirstConnectModal = true
+                addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
+            }
         } else {
             addLog("[Pairing] Invalid QR: missing PQC public keys")
             Toast.makeText(context, "Invalid QR: missing cryptographic keys", Toast.LENGTH_LONG).show()
@@ -928,18 +967,14 @@ fun MainScreen(
                                 ?: tempHostIp.takeIf { it.isNotEmpty() }
                                 ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
                             if (realIp != null) {
-                                val jsonBody = JSONObject()
-                                    .put("name", settings.deviceName)
-                                    .put("ciphertext_hex", kemCiphertext)
-                                    .put("client_pk_hex", keyPair?.mlkemPkHex ?: "")
-                                    .toString()
-                                sendPostRequestAsync("http://$realIp:9876/api/pair", jsonBody)
+                                // kemCiphertext was already sent to host in performKemHandshake.
+                                // Now mark locally as paired — host will promote pending session
+                                // key after SAS confirmation on desktop side.
+                                settings.pairedDeviceName = tempPcName
+                                settings.isPaired = true
+                                settings.pairedHostIp = realIp
+                                showFirstConnectModal = false
                             }
-
-                            settings.pairedDeviceName = tempPcName
-                            settings.isPaired = true
-                            settings.pairedHostIp = realIp ?: ""
-                            showFirstConnectModal = false
                             // Do NOT call evaluateConnection here — the polling loop
                             // will detect the PC's /api/poll response and update status.
                         }

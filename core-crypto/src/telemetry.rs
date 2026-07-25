@@ -65,7 +65,20 @@ impl FlightDataRecorder {
 
     pub fn dump_events_json(&self) -> String {
         if let Ok(buffer) = self.events.lock() {
-            serde_json::to_string_pretty(&*buffer).unwrap_or_else(|_| "[]".to_string())
+            // Strip stacktrace from ErrorTrace events before exposing to WebView.
+            // Stack traces can leak key material addresses, internal session IDs,
+            // and encrypted buffer lengths from cryptographic operations.
+            let sanitized: Vec<FlightEvent> = buffer
+                .iter()
+                .map(|e| match e {
+                    FlightEvent::ErrorTrace { error_message, .. } => FlightEvent::ErrorTrace {
+                        error_message: error_message.clone(),
+                        stacktrace: String::new(),
+                    },
+                    other => other.clone(),
+                })
+                .collect();
+            serde_json::to_string_pretty(&sanitized).unwrap_or_else(|_| "[]".to_string())
         } else {
             "[]".to_string()
         }

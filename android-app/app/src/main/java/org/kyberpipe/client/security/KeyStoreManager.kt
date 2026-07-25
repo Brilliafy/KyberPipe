@@ -32,18 +32,6 @@ object KeyStoreManager {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-            .setUserAuthenticationRequired(true)
-            .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    setUserAuthenticationParameters(
-                        60,
-                        KeyProperties.AUTH_BIOMETRIC_STRONG
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    setUserAuthenticationValidityDurationSeconds(60)
-                }
-            }
             .setInvalidatedByBiometricEnrollment(true)
             .build()
 

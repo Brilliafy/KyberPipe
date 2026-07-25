@@ -40,7 +40,12 @@ fn setup_panic_hook() {
         );
 
         let anonymized_report = anonymize_report(&raw_report);
-        let _ = fs::write("crash_log.txt", anonymized_report);
+        // Write to app data directory, not CWD (symlink attack vector)
+        let data_dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+            .map(|d| d.data_dir().to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let crash_path = data_dir.join("crash_log.txt");
+        let _ = fs::write(&crash_path, anonymized_report);
     }));
 }
 
@@ -173,8 +178,6 @@ pub fn run() {
             get_media_state,
             check_firewall,
             request_firewall_open,
-            scan_subnet_for_port,
-            send_reverse_request,
             create_p2p_group,
             register_mdns_service,
             create_tor_onion,

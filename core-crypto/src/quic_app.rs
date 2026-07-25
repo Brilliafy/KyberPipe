@@ -4,6 +4,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -154,11 +155,19 @@ impl QuicAppManager {
                 "Frame body too large: {body_len}"
             )));
         }
-        let mut body = vec![0u8; body_len];
+        let mut body = Vec::with_capacity((body_len).min(8192));
         if body_len > 0 {
-            recv.read_exact(&mut body)
+            let mut limited = recv.take(body_len as u64);
+            limited
+                .read_to_end(&mut body)
                 .await
                 .map_err(|e| KyberError::NetworkError(format!("Read frame body failed: {e}")))?;
+            if body.len() != body_len {
+                return Err(KyberError::NetworkError(format!(
+                    "Frame body truncated: expected {body_len} bytes, got {}",
+                    body.len()
+                )));
+            }
         }
         Ok(QuicFrame { stream_type, body })
     }

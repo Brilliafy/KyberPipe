@@ -260,86 +260,13 @@ pub fn request_firewall_open() -> String {
     String::new()
 }
 
-#[tauri::command]
-pub fn scan_subnet_for_port(port: u16) -> Vec<String> {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    let local_ip = core_crypto::get_local_ip();
-    if local_ip.is_empty() {
-        return vec![];
-    }
-    let parts: Vec<&str> = local_ip.split('.').collect();
-    if parts.len() != 4 {
-        return vec![];
-    }
-    let prefix = format!("{}.{}.{}.", parts[0], parts[1], parts[2]);
-
-    let mut results = vec![];
-    let mut handles = vec![];
-
-    for i in 1..255 {
-        let ip = format!("{prefix}{i}");
-        handles.push(std::thread::spawn(move || {
-            if let Ok(mut addrs) = format!("{ip}:{port}").to_socket_addrs() {
-                if let Some(addr) = addrs.next() {
-                    if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-                        return Some(ip);
-                    }
-                }
-            }
-            None
-        }));
-    }
-
-    for h in handles {
-        if let Ok(Some(ip)) = h.join() {
-            if ip != local_ip {
-                results.push(ip);
-            }
-        }
-    }
-
-    results
-}
-
-#[tauri::command]
-pub fn send_reverse_request(host: String, port: u16, request: String) -> String {
-    use std::io::{Read, Write};
-    use std::net::{IpAddr, TcpStream};
-    use std::time::Duration;
-
-    let addr: std::net::SocketAddr = match format!("{host}:{port}").parse() {
-        Ok(a) => a,
-        Err(_) => return String::new(),
-    };
-    let ip = addr.ip();
-    let allowed = match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || (v4.octets()[0] == 192 && v4.octets()[1] == 168)
-                || (v4.octets()[0] == 172 && (16..=31).contains(&v4.octets()[1]))
-                || v4.octets()[0] == 10
-                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
-        }
-        IpAddr::V6(v6) => v6.is_loopback(),
-    };
-    if !allowed {
-        return String::new();
-    }
-
-    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-        let _ = stream.write_all(request.as_bytes());
-        let _ = stream.flush();
-        let mut buf = vec![0u8; 4096];
-        if let Ok(n) = stream.read(&mut buf) {
-            return String::from_utf8_lossy(&buf[..n]).to_string();
-        }
-    }
-    String::new()
-}
+/// REMOVED: scan_subnet_for_port performed a full /24 TCP port scan with 254 threads
+/// from the WebView, enabling internal network reconnaissance and SSRF.
+/// See security audit round 8 #2 for details.
+///
+/// REMOVED: send_reverse_request exposed raw TCP socket writing to the webview,
+/// enabling SSRF and protocol smuggling into private networks.
+/// See security audit #16 for details.
 
 #[derive(Serialize)]
 pub struct P2pGroupInfo {
@@ -446,14 +373,12 @@ pub fn register_mdns_service(service_name: String, port: u16, txt_data: String) 
 #[derive(Serialize)]
 pub struct TorOnionInfo {
     pub onion_address: String,
-    pub auth_key: String,
 }
 
 #[tauri::command]
-pub fn create_tor_onion() -> TorOnionInfo {
+pub fn create_tor_onion(state: State<'_, std::sync::Arc<AppState>>) -> TorOnionInfo {
     let mut info = TorOnionInfo {
         onion_address: String::new(),
-        auth_key: String::new(),
     };
 
     let tmpdir = std::env::temp_dir().join(format!(
@@ -496,7 +421,7 @@ ClientOnly 1
     );
     let _ = std::fs::write(&torrc_path, torrc_content);
 
-    let mut tor_child = match std::process::Command::new("tor")
+    let tor_child = match std::process::Command::new("tor")
         .args(["-f", &torrc_path.to_string_lossy()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -527,19 +452,17 @@ ClientOnly 1
             if let Some(id) = line.strip_prefix("250-ServiceID=") {
                 info.onion_address = format!("{id}.onion");
             }
-            if let Some(privkey) = line.strip_prefix("250-PrivateKey=") {
-                if line.contains("x25519") {
-                    info.auth_key = privkey.to_string();
-                }
-            }
         }
 
         let _ = stream.write_all(b"CLOSECIRCUIT 0\r\n");
         let _ = stream.write_all(b"SIGNAL SHUTDOWN\r\n");
     }
 
-    let _ = tor_child.kill();
-    let _ = tor_child.wait();
+    // Store tor child in AppState so the daemon stays alive as long as the app is running.
+    // Previously tor_child was killed immediately, destroying the .onion route.
+    if let Ok(mut tc) = state.tor_child.lock() {
+        *tc = Some(tor_child);
+    }
 
     info
 }
