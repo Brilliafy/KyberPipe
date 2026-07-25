@@ -3,6 +3,24 @@ use core_crypto::packets::SmsPacket;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
+/// Strip HTML tags and common markup from user-controlled notification strings
+/// to prevent DBus content injection attacks via org.freedesktop.Notifications.
+/// GNOME/KDE notification daemons support HTML-like markup (<a href>, <img>, etc.)
+/// which can be abused for URI-based attacks if attacker-controlled content is rendered.
+fn sanitize_notification_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn send_desktop_notification(
     title: String,
@@ -55,8 +73,8 @@ pub async fn push_notification_packet(
         updated_at: timestamp,
         type_field: "remote".to_string(),
     };
-    let notif_title = title.clone();
-    let notif_text = text.clone();
+    let notif_title = sanitize_notification_text(&title);
+    let notif_text = sanitize_notification_text(&text);
     tokio::task::spawn_blocking(move || {
         let _ = notify_rust::Notification::new()
             .summary(&notif_title)
