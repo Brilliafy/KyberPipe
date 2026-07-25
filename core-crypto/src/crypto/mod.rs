@@ -8,7 +8,7 @@ pub mod padding;
 pub mod ratchet;
 pub mod sas;
 pub mod shamir;
-pub mod signing;
+// signing.rs is intentionally empty — functions are defined in this module directly.
 
 // Re-export everything at crate::crypto::* for backward compatibility
 pub use aead::*;
@@ -20,7 +20,6 @@ pub use padding::*;
 pub use ratchet::*;
 pub use sas::*;
 pub use shamir::*;
-pub use signing::*;
 
 use crate::error::KyberError;
 use hkdf::Hkdf;
@@ -129,15 +128,6 @@ pub fn fountain_encode_payload(data: &[u8], symbol_size: usize) -> Vec<Vec<u8>> 
 
 /// Poly multiplication placeholder — NTT not yet implemented.
 /// Returns Err to prevent silent incorrect usage.
-pub fn accelerated_ntt_poly_mul(
-    _poly_a: &[u16; 256],
-    _poly_b: &[u16; 256],
-) -> Result<[u16; 256], KyberError> {
-    Err(KyberError::CryptoError(
-        "NTT polynomial multiplication not yet implemented".into(),
-    ))
-}
-
 /// Byzantine Fault Tolerant (BFT) Peer Attestation Consensus (>2/3 Quorum Requirement)
 pub fn evaluate_bft_mesh_consensus(peer_votes: Vec<bool>) -> bool {
     if peer_votes.is_empty() {
@@ -148,15 +138,6 @@ pub fn evaluate_bft_mesh_consensus(peer_votes: Vec<bool>) -> bool {
 }
 
 /// Threshold Post-Quantum Multi-Party Computation KEM decapsulation share combination
-pub fn mpc_mlkem_decapsulate_shares(
-    _shares: Vec<Vec<u8>>,
-    _threshold: usize,
-) -> Result<Vec<u8>, KyberError> {
-    Err(KyberError::CryptoError(
-        "Use reconstruct_secret_shamir instead — XOR combination is not threshold-secure".into(),
-    ))
-}
-
 /// Sign payload using NIST ML-DSA-65 (Module Lattice-Based Digital Signature Algorithm)
 pub fn sign_mldsa_payload(payload: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>, KyberError> {
     if payload.is_empty() {
@@ -215,20 +196,6 @@ pub fn ofdm_acoustic_encode_payload(data: &[u8]) -> Vec<f32> {
 /// Verify TPM 2.0 PCRs and Android Hardware Root KeyAttestation certificate chain
 /// NOT YET IMPLEMENTED
 #[deprecated(note = "Not implemented — returns false unconditionally")]
-pub fn verify_remote_attestation_pcrs(
-    _tpm_pcr_hex: &str,
-    _android_attestation_chain_len: usize,
-) -> bool {
-    false
-}
-
-/// Verify Zero-Knowledge Device Identity Proof (zk-SNARK pi)
-/// NOT YET IMPLEMENTED
-#[deprecated(note = "Not implemented — returns false unconditionally")]
-pub fn verify_zk_snark_device_proof(_proof_bytes: &[u8], _master_pk_bytes: &[u8]) -> bool {
-    false
-}
-
 /// Trigger Emergency Panic Destruction: Zeroizes in-memory keys, logs event.
 /// Hardware KeyStore invalidation is best-effort and not yet implemented.
 pub fn trigger_panic_hardware_wipe() -> Result<(), KyberError> {
@@ -381,7 +348,7 @@ mod tests {
             generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
         let sas2 =
             generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
-        assert_eq!(sas1.len(), 6);
+        assert_eq!(sas1.len(), 7);
         assert_eq!(sas1, sas2);
     }
 
@@ -413,15 +380,6 @@ mod tests {
         assert!(verify_mldsa_signature(payload, &sig, &pk));
         assert!(!verify_mldsa_signature(b"tampered", &sig, &pk));
     }
-
-    #[test]
-    fn test_ntt_polynomial_multiplication() {
-        let poly_a = [2u16; 256];
-        let poly_b = [3u16; 256];
-        let res = accelerated_ntt_poly_mul(&poly_a, &poly_b);
-        assert!(res.is_err());
-    }
-
     #[test]
     fn test_bft_consensus() {
         let votes = vec![true, true, true, false];

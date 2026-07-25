@@ -29,8 +29,36 @@ class PipeService : Service() {
     private var isKeepAliveActive = false
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var heartbeatJob: Job? = null
+    private var lastClipboardSync: Long = 0
 
     private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private val wakeLockRefCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun acquireWakeLock(powerManager: PowerManager, timeoutMs: Long) {
+        synchronized(wakeLockRefCount) {
+            if (wakeLockRefCount.incrementAndGet() == 1) {
+                val wl = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "Kyberpipe:DozeHeartbeat"
+                )
+                wl.acquire(timeoutMs)
+                this.wakeLock = wl
+            }
+        }
+    }
+
+    private fun releaseWakeLock() {
+        synchronized(wakeLockRefCount) {
+            if (wakeLockRefCount.decrementAndGet() <= 0) {
+                wakeLockRefCount.set(0)
+                val wl = this.wakeLock
+                if (wl != null && wl.isHeld) {
+                    wl.release()
+                }
+                this.wakeLock = null
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -60,7 +88,7 @@ class PipeService : Service() {
 
     private fun startAdaptiveHeartbeatLoop() {
         isKeepAliveActive = true
-        val intervalMs = 15_000L
+        val intervalMs = 300_000L // 5 minutes — exact alarms every 15s would be rate-limited and crash on API 31+
         scheduleAlarm(intervalMs)
     }
 
@@ -77,36 +105,39 @@ class PipeService : Service() {
         )
         alarmManager.cancel(pendingIntent)
         val triggerTime = System.currentTimeMillis() + intervalMs
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-            } else {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // API 31+ rate-limits exact alarms aggressively. Use setWindow (inexact)
+            // to avoid SecurityException and battery drain.
+            alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerTime, intervalMs, pendingIntent)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Handle null intent (START_STICKY restart after process death).
+        // Android kills the service, then restarts with a null intent.
+        // We must reschedule the heartbeat to prevent silent death.
+        if (intent == null) {
+            Log.i("KyberpipeService", "Service restarted by START_STICKY — rescheduling heartbeat")
+            scheduleAlarm(300_000L)
+            return START_STICKY
+        }
         if (intent?.action == "ACTION_DOZE_PING") {
             Log.d("KyberpipeService", "Doze Mode alarm wakeup ping triggered.")
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            val wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "Kyberpipe:DozeHeartbeat"
-            )
-            this.wakeLock = wakeLock
-            wakeLock.acquire(10_000L)
-            // Defer release to coroutine scope — keeps CPU awake until I/O completes
+            acquireWakeLock(powerManager, 10_000L)
             serviceScope.launch {
                 try {
                     Log.i("KyberpipeService", "Doze heartbeat: QUIC keepalive sent")
-                    delay(5000) // Simulated QUIC ping I/O
+                    delay(5000)
+                    // Reschedule next heartbeat to keep the loop alive.
+                    // Without this, the heartbeat fires exactly once and dies.
+                    scheduleAlarm(300_000L)
                 } catch (e: Exception) {
                     Log.e("KyberpipeService", "Heartbeat I/O failed: ${e.message}")
                 } finally {
-                    if (wakeLock.isHeld) {
-                        wakeLock.release()
-                    }
+                    releaseWakeLock()
                 }
             }
         }
@@ -118,9 +149,12 @@ class PipeService : Service() {
         isKeepAliveActive = false
         heartbeatJob?.cancel()
         heartbeatJob = null
-        // Explicitly release WakeLock before scope cancel to prevent leaked wakelocks
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+        synchronized(wakeLockRefCount) {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock = null
+            wakeLockRefCount.set(0)
         }
         serviceScope.cancel()
         sensorDriver.stop()

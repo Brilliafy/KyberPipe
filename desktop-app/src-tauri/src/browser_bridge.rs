@@ -22,6 +22,15 @@ pub fn run_native_messaging_loop() -> io::Result<()> {
         }
 
         let length = u32::from_ne_bytes(length_bytes) as usize;
+        // WebExtension Native Messaging spec: maximum message size is 1 MB.
+        // Reject anything larger to prevent OOM pre-allocation attacks.
+        const MAX_MSG_SIZE: usize = 1_048_576;
+        if length > MAX_MSG_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Native message too large: {length} > {MAX_MSG_SIZE}"),
+            ));
+        }
         let mut msg_buffer = vec![0u8; length];
         stdin.read_exact(&mut msg_buffer)?;
 

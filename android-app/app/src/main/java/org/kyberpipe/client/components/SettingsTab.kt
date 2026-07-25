@@ -3,6 +3,7 @@ package org.kyberpipe.client.components
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -24,7 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Warning
 import org.kyberpipe.client.utils.SettingsManager
-import org.kyberpipe.client.utils.sendPostRequestAsync
 import uniffi.core_crypto.PqKeyPair
 import java.io.ByteArrayOutputStream
 
@@ -421,7 +421,11 @@ fun SettingsTab(
                                 onClick = {
                                     val hostIp = settings.pairedHostIp
                                     if (hostIp.isNotEmpty()) {
-                                        sendPostRequestAsync("http://$hostIp:9876/api/unpair", "{}")
+                                        try {
+                                            uniffi.core_crypto.quicSendAndRecv(0x05.toUByte(), "{}")
+                                        } catch (e: Exception) {
+                                            Log.e("KyberpipeSettings", "QUIC unpair failed: ${e.message}")
+                                        }
                                     }
 
                                     settings.isPaired = false

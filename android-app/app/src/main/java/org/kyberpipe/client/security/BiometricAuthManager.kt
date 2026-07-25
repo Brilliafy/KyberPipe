@@ -1,6 +1,7 @@
 package org.kyberpipe.client.security
 
 import android.util.Log
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import java.util.concurrent.Executors
@@ -42,6 +43,7 @@ object BiometricAuthManager {
             .setTitle(title)
             .setSubtitle(subtitle)
             .setNegativeButtonText("Cancel")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .build()
 
         biometricPrompt.authenticate(promptInfo)

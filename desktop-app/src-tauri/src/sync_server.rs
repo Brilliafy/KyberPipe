@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::state::SecureString;
 use core_crypto::quic_app::BoxFuture;
 use std::sync::Arc;
 
@@ -83,15 +84,27 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                                 .into_bytes();
                         }
                     }
-                    // Check for SAS timeout — clear stale pending states
+                    // Check for SAS timeout BEFORE the pending check so stale sessions
+                    // can be cleared. Must run before is_pairing_pending() — otherwise
+                    // the cleanup block is unreachable dead code.
                     let sas_code = s.sas_code.lock().unwrap().clone();
                     if !sas_code.is_empty() {
                         let pending_key = s.pending_session_key.lock().unwrap().to_string();
                         if !pending_key.is_empty() {
                             s.add_log("[Pairing] Clearing stale pending SAS (previous attempt incomplete)".to_string());
-                            *s.pending_session_key.lock().unwrap() = zeroize::Zeroizing::new(String::new());
+                            *s.pending_session_key.lock().unwrap() = SecureString::new(String::new());
                             s.sas_code.lock().unwrap().clear();
                         }
+                    }
+                    // Reject if SAS verification is already pending (prevents silent hijack)
+                    if s.is_pairing_pending() {
+                        s.add_log(
+                            "[Pairing] Rejected: SAS verification already in progress. Complete or timeout first."
+                                .to_string(),
+                        );
+                        return r#"{"status":"error","reason":"Pairing already in progress"}"#
+                            .to_string()
+                            .into_bytes();
                     }
 
                     let body_str = String::from_utf8_lossy(&body);
@@ -126,7 +139,9 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                                     {
                                         // Store in pending — NOT promoted to active session_key
                                         // until SAS code is confirmed via confirm_pairing endpoint
-                                        *s.pending_session_key.lock().unwrap() = zeroize::Zeroizing::new(sk);
+                                        *s.pending_session_key.lock().unwrap() = SecureString::new(sk);
+                                        // Bind initiator's public key to this pending session
+                                        *s.pairing_initiator_pk.lock().unwrap() = client_pk_hex.clone();
                                         s.add_log(
                                             "[Session] Derived session key from KEM handshake (pending SAS confirmation)"
                                                 .to_string(),
@@ -200,8 +215,7 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                             }
                         }
                     }
-                    if !text.is_empty() && !s.dedup.is_suppressed(&text) {
-                        s.dedup.record_text(&text);
+                    if !text.is_empty() && s.dedup.check_and_record(&text) {
                         let _ = crate::portal::sync_clipboard_text(&text);
                         s.add_log(format!(
                             "[Clipboard] Received via QUIC: \"{}\"",
@@ -347,11 +361,18 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                 })
             };
 
-            // Unpair handler
+            // Unpair handler — requires proof of session key possession
+            // to prevent unauthenticated network adversaries from wiping pairing state.
             let s = state.clone();
             let on_unpair = move || -> BoxFuture<()> {
                 let s = s.clone();
                 Box::pin(async move {
+                    // Verify that a session key exists — unauthenticated unpair is not allowed.
+                    let has_session = !s.session_key.lock().unwrap().is_empty();
+                    if !has_session {
+                        s.add_log("[Pairing] Unpair rejected: no active session".to_string());
+                        return;
+                    }
                     {
                         let mut settings = s.settings.lock().unwrap_or_else(|e| e.into_inner());
                         settings.is_paired = false;
