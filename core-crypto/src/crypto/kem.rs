@@ -48,8 +48,10 @@ pub fn encapsulate_hybrid(
         KyberError::EncapsulationFailed("Invalid ML-KEM-768 public key bytes".into())
     })?;
     let (mlkem_ss, mlkem_ct) = kyber768::encapsulate(&peer_mlkem_pk);
-    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
+    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len() + 40);
+    combined_ss.extend_from_slice(b"KyberPipe-X25519");
     combined_ss.extend_from_slice(x25519_ss.as_bytes());
+    combined_ss.extend_from_slice(b"KyberPipe-MLKEM");
     combined_ss.extend_from_slice(mlkem_ss.as_bytes());
     let mut combined_ct = Vec::with_capacity(32 + mlkem_ct.as_bytes().len());
     combined_ct.extend_from_slice(ephem_x25519_pk.as_bytes());
@@ -84,8 +86,10 @@ pub fn decapsulate_hybrid(
         KyberError::DecapsulationFailed("Invalid ML-KEM-768 secret key bytes".into())
     })?;
     let mlkem_ss = kyber768::decapsulate(&mlkem_ct, &my_mlkem_sk);
-    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len());
+    let mut combined_ss = Vec::with_capacity(32 + mlkem_ss.as_bytes().len() + 40);
+    combined_ss.extend_from_slice(b"KyberPipe-X25519");
     combined_ss.extend_from_slice(x25519_ss.as_bytes());
+    combined_ss.extend_from_slice(b"KyberPipe-MLKEM");
     combined_ss.extend_from_slice(mlkem_ss.as_bytes());
     Ok(combined_ss)
 }

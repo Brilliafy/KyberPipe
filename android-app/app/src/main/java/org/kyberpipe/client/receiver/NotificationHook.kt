@@ -12,7 +12,7 @@ class NotificationHook : NotificationListenerService() {
 
     companion object {
         var activeMediaSbn: StatusBarNotification? = null
-        
+
         fun triggerMediaAction(actionIndex: Int) {
             val sbn = activeMediaSbn ?: return
             val actions = sbn.notification.actions
@@ -23,6 +23,18 @@ class NotificationHook : NotificationListenerService() {
                 } catch (e: Exception) {
                     Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
                 }
+            }
+        }
+
+        /// Send media payload over QUIC via UniFFI bindings instead of HTTP/TCP.
+        /// Uses stream type 0x03 (STREAM_MEDIA).
+        fun quicSendMedia(hostIp: String, payload: String) {
+            try {
+                val port = 9876
+                val result = uniffi.core_crypto.quicSendAndRecv(0x03.toUByte(), payload)
+                Log.d("KyberpipeMedia", "QUIC media sync response: $result")
+            } catch (e: Exception) {
+                Log.e("KyberpipeMedia", "QUIC media sync failed: ${e.message}")
             }
         }
     }
@@ -109,8 +121,11 @@ class NotificationHook : NotificationListenerService() {
             )
             Log.d("KyberpipeNotifHook", "Serialized notification packet: $jsonPacket")
 
-            // Send local broadcast to update MainActivity UI in real time
+            // Send local broadcast to update MainActivity UI in real time.
+            // Scope to our own package to prevent third-party apps from
+            // intercepting sensitive notification data.
             val intent = Intent("org.kyberpipe.client.NOTIFICATION_INTERCEPTED").apply {
+                setPackage(packageName)
                 putExtra("title", title)
                 putExtra("text", formattedText)
                 putExtra("packageName", packageName)
@@ -181,19 +196,17 @@ class NotificationHook : NotificationListenerService() {
             val sessionKey = settings.sessionKey
             if (hostIp.isNotEmpty()) {
                 val payload = if (sessionKey.isNotEmpty()) {
-                    try {
-                        val encrypted = uniffi.core_crypto.encryptPayloadWithKey(sessionKey, jsonStr)
-                        org.json.JSONObject().put("encrypted", org.json.JSONObject()
-                            .put("nonce_hex", encrypted.nonceHex)
-                            .put("ciphertext_hex", encrypted.ciphertextHex)
-                        ).toString()
-                    } catch (_: Exception) {
-                        jsonStr
-                    }
+                    // Encrypt the payload. On failure, abort transmission — never fall back to plaintext.
+                    val encrypted = uniffi.core_crypto.encryptPayloadWithKey(sessionKey, jsonStr)
+                    org.json.JSONObject().put("encrypted", org.json.JSONObject()
+                        .put("nonce_hex", encrypted.nonceHex)
+                        .put("ciphertext_hex", encrypted.ciphertextHex)
+                    ).toString()
                 } else {
                     jsonStr
                 }
-                org.kyberpipe.client.utils.sendPostRequestAsync("http://$hostIp:9876/api/media", payload)
+                // Use QUIC instead of HTTP/TCP for media sync
+                quicSendMedia(hostIp, payload)
             }
         }
     }

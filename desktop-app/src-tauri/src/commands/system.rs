@@ -94,7 +94,10 @@ pub fn init_sentry_desktop_telemetry(
 
 #[tauri::command]
 pub fn get_latest_crash_log() -> Option<String> {
-    std::fs::read_to_string("crash_log.txt").ok()
+    let data_dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::read_to_string(data_dir.join("crash_log.txt")).ok()
 }
 
 #[tauri::command]
@@ -130,32 +133,20 @@ pub fn check_stepup_authorization(
     if !requires_high_tier {
         return Ok(true);
     }
-    let result = std::process::Command::new("pkexec")
-        .args([
-            "--disable-internal-agent",
-            "true",
-            "sh",
-            "-c",
-            "echo authorized",
-        ])
-        .output();
-    match result {
-        Ok(out) => {
-            if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "authorized" {
-                tracing::info!(
-                    "[Step-Up Auth] High-tier action '{action_name}' approved via Polkit"
-                );
-                Ok(true)
-            } else {
-                tracing::warn!("[Step-Up Auth] High-tier action '{action_name}' denied by Polkit");
-                Ok(false)
-            }
-        }
-        Err(e) => {
-            tracing::error!("[Step-Up Auth] Polkit check failed: {e}");
-            Err(format!("Polkit authorization failed: {e}"))
-        }
-    }
+    // REMOVED: pkexec sh -c "echo authorized" — this was a Local Privilege Escalation
+    // vector. pkexec must only execute registered Polkit actions, never arbitrary
+    // shell commands. Using it with --disable-internal-agent and sh -c bypasses
+    // all authentication controls and allows any local user to elevate privileges.
+    // See CVE-2021-4034 (pwnkit) for the class of vulnerability.
+    // Proper step-up authorization requires a registered Polkit action file and
+    // calling pkexec with the action name, not a shell command.
+    tracing::warn!(
+        "[Step-Up Auth] High-tier action '{action_name}' — Polkit step-up is disabled for security. Requires registered Polkit action."
+    );
+    Err(
+        "Step-up authorization is unavailable. This action requires a registered Polkit action."
+            .to_string(),
+    )
 }
 
 #[tauri::command]

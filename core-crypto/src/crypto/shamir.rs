@@ -93,9 +93,9 @@ fn gf256_lagrange_interpolate(points: &[(u8, u8)], x: u8) -> u8 {
 
 /// Split a master secret into n shares requiring k shares to reconstruct (GF(2^8) Shamir Secret Sharing)
 pub fn split_secret_shamir(secret: &[u8], k: usize, n: usize) -> Result<Vec<Vec<u8>>, KyberError> {
-    if k == 0 || n == 0 || k > n || k > 256 || n > 256 {
+    if k == 0 || n == 0 || k > n || k > 255 || n > 255 {
         return Err(KyberError::CryptoError(
-            "Invalid k-of-n threshold parameters (k,n must be 1..=256, k <= n)".into(),
+            "Invalid k-of-n threshold parameters (k,n must be 1..=255, k <= n)".into(),
         ));
     }
     let mut shares = vec![Vec::with_capacity(secret.len() + 2); n];
@@ -126,6 +126,27 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
         ));
     }
     let secret_len = shares[0].len() - 2;
+    if secret_len == 0 {
+        return Err(KyberError::CryptoError("Share data too short".into()));
+    }
+    // Validate all shares have consistent length
+    for share in shares {
+        if share.len() != shares[0].len() {
+            return Err(KyberError::CryptoError(
+                "Share length mismatch — shares must be from the same split".into(),
+            ));
+        }
+    }
+    // Validate distinct x coordinates — duplicate x causes division-by-zero in GF(256)
+    let mut x_coords: Vec<u8> = shares.iter().take(k).map(|s| s[0]).collect();
+    x_coords.sort();
+    for i in 1..x_coords.len() {
+        if x_coords[i] == x_coords[i - 1] {
+            return Err(KyberError::CryptoError(
+                "Duplicate x coordinate in shares — share set is invalid".into(),
+            ));
+        }
+    }
     let mut secret = Vec::with_capacity(secret_len);
 
     for byte_idx in 0..secret_len {

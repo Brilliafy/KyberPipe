@@ -19,6 +19,99 @@ pub fn run_boa_sandboxed_script(
     lux: f64,
     feed_data: &str,
 ) -> ScriptExecutionResult {
+    let script = script_code.to_string();
+    let feed = feed_data.to_string();
+    // Execute JS in a separate OS process with isolated heap.
+    // Thread isolation is insufficient — Rust heap is process-global,
+    // so aggressive JS allocations OOM the entire desktop app.
+    // We spawn the run_boa_inner function as a subprocess via the same binary
+    // with a special flag, communicating via stdin/stdout.
+    let exe_path = std::env::current_exe().ok();
+    if let Some(exe) = exe_path {
+        let input = serde_json::json!({
+            "script": script,
+            "lux": lux,
+            "feed": feed,
+        });
+        let input_str = input.to_string();
+        match std::process::Command::new(&exe)
+            .arg("--boa-sandbox")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            // Clear the environment to prevent the sandbox from inheriting
+            // the parent's session identifiers, D-Bus address, or other secrets.
+            // But pass through DISPLAY and WAYLAND_DISPLAY so the sandbox
+            // can render if needed (Boa has no display requirement, but
+            // environment breakage can cause spurious errors).
+            .env_clear()
+            .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
+            .env(
+                "WAYLAND_DISPLAY",
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+            )
+            .spawn()
+        {
+            Ok(mut child) => {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(input_str.as_bytes());
+                    drop(stdin);
+                }
+                match child.wait_with_output() {
+                    Ok(output) => {
+                        if output.status.success() {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            serde_json::from_str(&stdout).unwrap_or(ScriptExecutionResult {
+                                success: false,
+                                output: format!("Failed to parse sandbox output: {stdout}"),
+                                logs: vec![],
+                            })
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            ScriptExecutionResult {
+                                success: false,
+                                output: format!("Sandbox process error: {stderr}"),
+                                logs: vec![],
+                            }
+                        }
+                    }
+                    Err(e) => ScriptExecutionResult {
+                        success: false,
+                        output: format!("Sandbox process I/O error: {e}"),
+                        logs: vec![],
+                    },
+                }
+            }
+            Err(e) => ScriptExecutionResult {
+                success: false,
+                output: format!("Failed to spawn sandbox process: {e}"),
+                logs: vec![],
+            },
+        }
+    } else {
+        // Fallback: run in-process if we can't determine the binary path.
+        // This is safe for testing but not production.
+        let handle = std::thread::Builder::new()
+            .name("boa-fallback".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || run_boa_inner(&script, lux, &feed));
+        match handle {
+            Ok(jh) => jh.join().unwrap_or(ScriptExecutionResult {
+                success: false,
+                output: "ERROR: Boa sandbox thread panicked (likely OOM)".to_string(),
+                logs: vec![],
+            }),
+            Err(e) => ScriptExecutionResult {
+                success: false,
+                output: format!("ERROR: Failed to spawn sandbox thread: {e}"),
+                logs: vec![],
+            },
+        }
+    }
+}
+
+fn run_boa_inner(script_code: &str, lux: f64, feed_data: &str) -> ScriptExecutionResult {
     info!(
         "Executing sandboxed JS code via Boa Engine (lux = {}, feed = {})",
         lux, feed_data
@@ -115,6 +208,23 @@ pub fn run_boa_sandboxed_script(
 }
 
 pub fn run_fallback_subprocess(script_path: &str, lux: f64) -> ScriptExecutionResult {
+    // Security: hardcoded allowlist prevents arbitrary path execution (RCE via XSS).
+    // Only specific vetted script files are allowed — NEVER interpreters like python/bash,
+    // because passing --light as argv[1] to an interpreter creates a live shell.
+    const ALLOWED_PATHS: &[&str] = &[
+        "/opt/kyberpipe/scripts/fallback.py",
+        "/opt/kyberpipe/scripts/fallback.sh",
+    ];
+    if !ALLOWED_PATHS.contains(&script_path) {
+        return ScriptExecutionResult {
+            success: false,
+            output: format!(
+                "ERROR: Script path '{}' is not in the allowlist",
+                script_path
+            ),
+            logs: vec![],
+        };
+    }
     info!(
         "Executing fallback native script path: {} (lux = {})",
         script_path, lux

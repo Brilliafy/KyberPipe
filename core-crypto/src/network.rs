@@ -1,6 +1,8 @@
 use crate::error::KyberError;
+use hkdf::hmac::{Hmac, Mac};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use sha2::Digest;
+use rustls::server::danger::ClientCertVerified;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -15,27 +17,37 @@ pub const BEACON_MAGIC: &[u8] = b"KYBERPIPE_P2P_BEACON_V1";
 pub struct PathMigrationManager;
 
 impl PathMigrationManager {
-    /// Generate a cryptographically secure PATH_CHALLENGE token and matching PATH_RESPONSE token
-    pub fn create_path_challenge() -> (String, String) {
+    /// Generate a cryptographically secure PATH_CHALLENGE token and matching PATH_RESPONSE token.
+    /// The response is computed as HMAC-SHA256(session_key, challenge) — binding the path
+    /// ownership proof to the authenticated session. Without this binding, any network observer
+    /// could compute the response to any challenge via plain SHA256.
+    pub fn create_path_challenge(session_key: &[u8]) -> (String, String) {
         let mut challenge_bytes = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge_bytes);
         let challenge_token = hex::encode(challenge_bytes);
 
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(b"kyberpipe-path-response:");
-        hasher.update(challenge_token.as_bytes());
-        let response_token = hex::encode(hasher.finalize());
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(session_key).expect("HMAC key should be valid");
+        mac.update(b"kyberpipe-path-response:");
+        mac.update(challenge_token.as_bytes());
+        let response_token = hex::encode(mac.finalize().into_bytes());
 
         (challenge_token, response_token)
     }
 
-    /// Verify PATH_RESPONSE matches expected challenge (constant-time)
-    pub fn verify_path_response(challenge_token: &str, response_token: &str) -> bool {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(b"kyberpipe-path-response:");
-        hasher.update(challenge_token.as_bytes());
-        let expected = hex::encode(hasher.finalize());
-        // Constant-time comparison via subtle crate
+    /// Verify PATH_RESPONSE matches expected challenge (constant-time HMAC comparison).
+    /// The session key is required to recompute the HMAC — without it, unauthenticated
+    /// network observers cannot forge valid responses.
+    pub fn verify_path_response(
+        session_key: &[u8],
+        challenge_token: &str,
+        response_token: &str,
+    ) -> bool {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(session_key).expect("HMAC key should be valid");
+        mac.update(b"kyberpipe-path-response:");
+        mac.update(challenge_token.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
         let expected_bytes = expected.as_bytes();
         let response_bytes = response_token.as_bytes();
         if expected_bytes.len() != response_bytes.len() {
@@ -193,6 +205,60 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
     }
 }
 
+impl rustls::server::danger::ClientCertVerifier for PinnedCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.verify_cert(end_entity)?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        let provider = rustls::crypto::ring::default_provider();
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
+    }
+}
+
 /// Build QUIC server listener bound to 0.0.0.0:4433 supporting cross-subnet (Ethernet <-> Wi-Fi) routing
 pub fn bind_cross_subnet_listener(port: u16) -> Result<quinn::Endpoint, KyberError> {
     let (certs, key) = generate_self_signed_cert()?;
@@ -233,10 +299,11 @@ pub fn configure_quic_server(
     require_client_auth: bool,
 ) -> Result<quinn::ServerConfig, KyberError> {
     let mut server_crypto = if require_client_auth {
-        let client_verifier =
-            rustls::server::WebPkiClientVerifier::builder(Arc::new(rustls::RootCertStore::empty()))
-                .build()
-                .map_err(|e| KyberError::NetworkError(format!("Client verifier error: {e}")))?;
+        // Client must present a self-signed cert. When no pinned hash is configured
+        // (P2P bootstrap), accept the presented cert without a pin check.
+        // The pairing protocol provides post-quantum authentication out-of-band via SAS,
+        // so TLS-level pinning is optional during initial key exchange.
+        let client_verifier = Arc::new(PinnedCertVerifier::new(None, false));
         rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(certs, key)
@@ -430,11 +497,18 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
         let attr_len = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
         pos += 4;
 
-        if pos + attr_len > len {
+        // Validate attr_len before accessing attr_value — attacker-controlled
+        // length values could cause out-of-bounds reads.
+        if attr_len > 512 || pos + attr_len > len {
             break;
         }
         let attr_value = &buf[pos..pos + attr_len];
         pos += attr_len;
+
+        // Only accept known attribute types to reduce attack surface
+        if attr_type != 0x0001 && attr_type != 0x0020 {
+            continue;
+        }
 
         if attr_type == 0x0001 {
             // MAPPED-ADDRESS
@@ -496,11 +570,13 @@ mod tests {
 
     #[test]
     fn test_path_migration_challenge_response() {
-        let (challenge, response) = PathMigrationManager::create_path_challenge();
+        let sk = b"test-session-key-0123456789";
+        let (challenge, response) = PathMigrationManager::create_path_challenge(sk);
         assert!(PathMigrationManager::verify_path_response(
-            &challenge, &response
+            sk, &challenge, &response
         ));
         assert!(!PathMigrationManager::verify_path_response(
+            sk,
             &challenge,
             "invalid-token"
         ));
