@@ -6,38 +6,75 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import java.util.ArrayList
+import org.kyberpipe.client.utils.SessionKeyManager
+
+data class NotificationEvent(
+    val title: String,
+    val text: String,
+    val packageName: String,
+    val timestamp: Long
+)
 
 class NotificationHook : NotificationListenerService() {
 
+    private lateinit var serviceScope: CoroutineScope
+
     companion object {
-        var activeMediaSbn: StatusBarNotification? = null
+        /** Extracted media notification state — avoids holding full StatusBarNotification
+         *  (which retains Context, Bitmaps, and PendingIntent references). */
+        private var activeMediaPackage: String? = null
+        private var activeMediaActions: List<Pair<Int, android.app.PendingIntent>>? = null
+
+        /** SharedFlow for notification events — replaces exported broadcast receiver. */
+        private val _notificationEvents = MutableSharedFlow<NotificationEvent>(extraBufferCapacity = 64)
+        val notificationEvents: SharedFlow<NotificationEvent> = _notificationEvents.asSharedFlow()
 
         fun triggerMediaAction(actionIndex: Int) {
-            val sbn = activeMediaSbn ?: return
-            val actions = sbn.notification.actions
-            if (actions != null && actionIndex in actions.indices) {
-                try {
-                    actions[actionIndex].actionIntent.send()
-                    Log.d("KyberpipeMedia", "Successfully sent media action pending intent at index $actionIndex")
-                } catch (e: Exception) {
-                    Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
-                }
+            val actions = activeMediaActions ?: return
+            val (_, pendingIntent) = actions.firstOrNull { it.first == actionIndex } ?: return
+            try {
+                pendingIntent.send()
+                Log.d("KyberpipeMedia", "Successfully sent media action pending intent at index $actionIndex")
+            } catch (e: Exception) {
+                Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
             }
         }
 
         /// Send media payload over QUIC via UniFFI bindings instead of HTTP/TCP.
         /// Uses stream type 0x03 (STREAM_MEDIA).
-        fun quicSendMedia(hostIp: String, payload: String) {
-            try {
-                val port = 9876
-                val result = uniffi.core_crypto.quicSendAndRecv(0x03.toUByte(), payload)
-                Log.d("KyberpipeMedia", "QUIC media sync response: $result")
-            } catch (e: Exception) {
-                Log.e("KyberpipeMedia", "QUIC media sync failed: ${e.message}")
+        fun quicSendMedia(scope: CoroutineScope, hostIp: String, payload: String) {
+            // Launch on IO dispatcher to avoid blocking the NotificationListenerService thread.
+            // Blocking here causes ANR when the QUIC connection is slow or unreachable.
+            scope.launch {
+                try {
+                    val result = uniffi.core_crypto.quicSendAndRecv(0x03.toUByte(), payload)
+                    Log.d("KyberpipeMedia", "QUIC media sync response: $result")
+                } catch (e: Exception) {
+                    Log.e("KyberpipeMedia", "QUIC media sync failed: ${e.message}")
+                }
             }
         }
     }
+
+    override fun onCreate() {
+        super.onCreate()
+        serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    }
+
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
@@ -121,17 +158,15 @@ class NotificationHook : NotificationListenerService() {
             )
             Log.d("KyberpipeNotifHook", "Serialized notification packet: $jsonPacket")
 
-            // Send local broadcast to update MainActivity UI in real time.
-            // Scope to our own package to prevent third-party apps from
-            // intercepting sensitive notification data.
-            val intent = Intent("org.kyberpipe.client.NOTIFICATION_INTERCEPTED").apply {
-                setPackage(packageName)
-                putExtra("title", title)
-                putExtra("text", formattedText)
-                putExtra("packageName", packageName)
-                putExtra("timestamp", timestamp)
-            }
-            sendBroadcast(intent)
+            // Emit to SharedFlow instead of broadcast — no exported receiver needed
+            _notificationEvents.tryEmit(
+                NotificationEvent(
+                    title = title,
+                    text = formattedText,
+                    packageName = packageName,
+                    timestamp = timestamp
+                )
+            )
         } catch (e: Exception) {
             Log.e("KyberpipeNotifHook", "Failed to format notification packet: ${e.message}")
         }
@@ -180,7 +215,11 @@ class NotificationHook : NotificationListenerService() {
             }
         }
 
-        activeMediaSbn = sbn
+        // Extract only what we need — don't hold the full StatusBarNotification
+        activeMediaPackage = sbn.packageName
+        activeMediaActions = sbn.notification.actions?.mapIndexed { i, action ->
+            i to action.actionIntent
+        }
 
         val settings = org.kyberpipe.client.utils.SettingsManager(applicationContext)
         if (settings.isPaired) {
@@ -197,19 +236,30 @@ class NotificationHook : NotificationListenerService() {
             if (hostIp.isNotEmpty()) {
                 val payload = if (sessionKey.isNotEmpty()) {
                     // Encrypt the payload. On failure, abort transmission — never fall back to plaintext.
-                    val encrypted = uniffi.core_crypto.encryptPayloadWithKey(sessionKey, jsonStr)
-                    org.json.JSONObject().put("encrypted", org.json.JSONObject()
-                        .put("nonce_hex", encrypted.nonceHex)
-                        .put("ciphertext_hex", encrypted.ciphertextHex)
-                    ).toString()
+                    val encrypted = SessionKeyManager.encrypt(jsonStr)
+                    if (encrypted != null) {
+                        org.json.JSONObject().put("encrypted", org.json.JSONObject()
+                            .put("nonce_hex", encrypted.nonce.joinToString("") { "%02x".format(it) })
+                            .put("ciphertext_hex", encrypted.ciphertext.joinToString("") { "%02x".format(it) })
+                        ).toString()
+                    } else {
+                        Log.e("KyberpipeMedia", "Encryption failed — aborting transmission")
+                        return
+                    }
                 } else {
-                    jsonStr
+                    Log.e("KyberpipeMedia", "No session key — aborting transmission")
+                    return
                 }
                 // Use QUIC instead of HTTP/TCP for media sync
-                quicSendMedia(hostIp, payload)
+                quicSendMedia(serviceScope, hostIp, payload)
             }
         }
     }
 
-    override fun onNotificationRemoved(sbn: StatusBarNotification?) {}
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        if (sbn != null && sbn.packageName == activeMediaPackage) {
+            activeMediaPackage = null
+            activeMediaActions = null
+        }
+    }
 }

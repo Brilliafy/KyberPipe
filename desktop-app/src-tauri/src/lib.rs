@@ -1,9 +1,13 @@
-mod browser_bridge;
 mod commands;
 mod executor;
 mod portal;
+mod ratchet_store;
 mod state;
+mod handlers;
 mod sync_server;
+
+#[cfg(test)]
+mod e2e;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -46,6 +50,9 @@ fn setup_panic_hook() {
             .unwrap_or_else(std::env::temp_dir);
         let crash_path = data_dir.join("crash_log.txt");
         let _ = fs::write(&crash_path, anonymized_report);
+        eprintln!("{raw_report}");
+        // Never unwind across the FFI/Tauri boundary — abort after logging.
+        std::process::abort();
     }));
 }
 
@@ -120,13 +127,64 @@ fn scrub_ips(input: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Check for sandbox/worker mode before starting the full Tauri app.
+    // These flags are used when the app re-spawns itself as a subprocess
+    // for isolated Boa JS execution.
+    let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--boa-worker".to_string()) {
+        // Persistent Boa worker mode: read JSON commands from stdin,
+        // execute scripts, write JSON results to stdout.
+        executor::run_boa_worker_loop();
+        return;
+    }
+    if args.contains(&"--boa-sandbox".to_string()) {
+        // Legacy one-shot sandbox mode: read JSON from stdin, execute, write result.
+        executor::apply_worker_rlimits();
+        use std::io::Read;
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).ok();
+        let req: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+        let script = req["script"].as_str().unwrap_or("");
+        let lux = req["lux"].as_f64().unwrap_or(0.0);
+        let feed = req["feed"].as_str().unwrap_or("");
+        let result = executor::run_boa_sandboxed_script(script, lux, feed);
+        println!("{}", serde_json::to_string(&result).unwrap_or_default());
+        return;
+    }
+
     setup_panic_hook();
     let state = std::sync::Arc::new(AppState::default());
+
+    // Restore persisted ratchet sessions (encrypted with an INDEPENDENT
+    // snapshot key — audit finding #15b, not derived from the session key) so
+    // a restart does not force a full re-pair.
+    if let Some(snapshot_key_hex) = ratchet_store::snapshot_key_from_keyring() {
+        let restored = ratchet_store::restore_all_ratchet_sessions(&snapshot_key_hex);
+        if restored > 0 {
+            state.add_log(format!(
+                "[Ratchet] Restored {restored} persisted session(s) from encrypted store"
+            ));
+        }
+    }
+    
+    // SD8: PCKS#11 YubiKey warning check
+    {
+        let mut settings = state.settings.lock();
+        if settings.yubikey_bound {
+            state.add_log("WARNING: Your previous hardware-backed keys were not actually backed by hardware due to a missing PKCS#11 integration. YubiKey binding has been reset.".to_string());
+            settings.yubikey_bound = false;
+        }
+    }
+    state.save_settings();
+
     let state_clone = state.clone();
 
     tauri::Builder::default()
         .manage(state)
-        .setup(move |_app| {
+        .setup(move |app| {
+            // Expose the AppHandle to the pairing handler so SAS/complete/timeout
+            // transitions can be pushed to the webview (audit finding #7).
+            let _ = crate::handlers::APP_HANDLE.set(app.handle().clone());
             crate::sync_server::start_local_sync_server(state_clone);
             Ok(())
         })
@@ -146,15 +204,14 @@ pub fn run() {
             get_telemetry_metrics,
             generate_sas_pairing_code,
             store_key_in_secure_enclave,
+            request_privilege_token,
             check_stepup_authorization,
             merge_mesh_crdt_state,
-            stream_binary_file,
             toggle_neural_anomaly_engine,
             toggle_flight_recorder,
             dump_flight_recorder_events,
             init_sentry_desktop_telemetry,
             bind_pkcs11_yubikey_hardware_token,
-            execute_enclave_confidential_wasm,
             generate_shamir_recovery_shares,
             reconstruct_key_from_shamir_shares,
             trigger_panic_self_destruct,
@@ -164,8 +221,11 @@ pub fn run() {
             perform_stun_hole_punch,
             evaluate_connection_status,
             get_pairing_config,
+            confirm_pairing_sas,
+            get_pairing_status,
             get_settings,
             save_settings,
+            delete_connection,
             get_connection_status_full,
             set_connection_status_full,
             grant_file_access,

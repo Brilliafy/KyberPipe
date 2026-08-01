@@ -1,4 +1,98 @@
 use super::KyberError;
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+/// Keyed-HMAC type alias.
+type HmacSha256 = Hmac<Sha256>;
+
+/// Derive the share-integrity MAC key from the master secret (HKDF). A real
+/// keyed HMAC means an attacker who tampers with a share cannot recompute a
+/// valid MAC without knowing the full master secret.
+pub(crate) fn derive_share_mac_key(master_secret: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-shamir-hmac-v1"), master_secret);
+    let mut okm = [0u8; 32];
+    let _ = hk.expand(b"share-integrity", &mut okm);
+    okm
+}
+
+/// Build the canonical MAC input for a share. Binds the share index AND the
+/// embedded x-coordinate (data[0] = index + 1) together with all metadata, so
+/// an attacker cannot swap share indices or disagree on the coordinate.
+fn mac_input(share: &ShamirShare) -> Vec<u8> {
+    let mut mac_input = Vec::new();
+    mac_input.push(share.index);
+    mac_input.push(share.threshold);
+    mac_input.push(share.total);
+    mac_input.extend_from_slice(&share.timestamp.to_be_bytes());
+    mac_input.extend_from_slice(&share.data);
+    mac_input
+}
+
+/// Keyed HMAC-SHA256 integrity tag for a share.
+pub(crate) fn compute_share_mac(master_secret: &[u8], share: &ShamirShare) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(&derive_share_mac_key(master_secret))
+        .expect("HMAC key is 32 bytes");
+    mac.update(&mac_input(share));
+    mac.finalize().into_bytes().into()
+}
+
+/// Metadata-enriched Shamir share with keyed-HMAC integrity.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ShamirShare {
+    pub index: u8,
+    pub threshold: u8,
+    pub total: u8,
+    pub timestamp: u64,
+    #[serde(with = "hex_bytes")]
+    pub data: Vec<u8>,
+    #[serde(with = "hex_bytes_32")]
+    pub mac: [u8; 32],
+}
+
+mod hex_bytes {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+mod hex_bytes_32 {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if v.len() != 32 {
+            return Err(serde::de::Error::custom("expected 32-byte hex string"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&v);
+        Ok(arr)
+    }
+}
 
 /// GF(2^8) with irreducible polynomial x^8 + x^4 + x^3 + x + 1 (0x11B)
 struct Gf256;
@@ -91,6 +185,9 @@ fn gf256_lagrange_interpolate(points: &[(u8, u8)], x: u8) -> u8 {
     result
 }
 
+#[deprecated(
+    note = "Use split_secret_shamir_with_meta for shares with metadata and HMAC verification"
+)]
 /// Split a master secret into n shares requiring k shares to reconstruct (GF(2^8) Shamir Secret Sharing)
 pub fn split_secret_shamir(secret: &[u8], k: usize, n: usize) -> Result<Vec<Vec<u8>>, KyberError> {
     if k == 0 || n == 0 || k > n || k > 255 || n > 255 {
@@ -160,4 +257,91 @@ pub fn reconstruct_secret_shamir(shares: &[Vec<u8>], k: usize) -> Result<Vec<u8>
         secret.push(recovered_byte);
     }
     Ok(secret)
+}
+/// Split a master secret into n shares with metadata (index, threshold, timestamp, HMAC).
+/// The MAC is a REAL keyed HMAC (key derived from the master secret via HKDF),
+/// binding index + embedded x-coordinate + all metadata — tampering or index
+/// swapping invalidates the tag.
+#[allow(deprecated)]
+pub fn split_secret_shamir_with_meta(
+    secret: &[u8],
+    k: usize,
+    n: usize,
+) -> Result<Vec<ShamirShare>, KyberError> {
+    let shares = split_secret_shamir(secret, k, n)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut result = Vec::with_capacity(n);
+    for (i, data) in shares.into_iter().enumerate() {
+        let share = ShamirShare {
+            index: i as u8,
+            threshold: k as u8,
+            total: n as u8,
+            timestamp,
+            data,
+            mac: [0u8; 32],
+        };
+        let mac = compute_share_mac(secret, &share);
+        result.push(ShamirShare {
+            mac,
+            ..share
+        });
+    }
+    Ok(result)
+}
+
+/// Verify the keyed HMAC integrity of a ShamirShare against the master secret.
+/// Also enforces metadata consistency: the embedded x-coordinate (data[0]) must
+/// equal index + 1 (GF(2^8) shares use x = index+1).
+pub fn verify_share_with_key(share: &ShamirShare, master_secret: &[u8]) -> bool {
+    // Consistency: the embedded x-coordinate must agree with the share index.
+    let x = *share.data.first().unwrap_or(&0);
+    if x != share.index.saturating_add(1) {
+        return false;
+    }
+    let computed = compute_share_mac(master_secret, share);
+    subtle::ConstantTimeEq::ct_eq(computed.as_slice(), share.mac.as_slice()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keyed_hmac_detects_tampering() {
+        let secret = b"master-identity-key-bytes";
+        let shares = split_secret_shamir_with_meta(secret, 2, 3).unwrap();
+        assert_eq!(shares.len(), 3);
+        // Valid shares verify against the master secret.
+        for share in &shares {
+            assert!(verify_share_with_key(share, secret));
+        }
+        // Tampering with any share byte invalidates the MAC.
+        let mut tampered = shares[0].clone();
+        let last = tampered.data.len() - 1;
+        tampered.data[last] ^= 0xFF;
+        assert!(!verify_share_with_key(&tampered, secret));
+        // Swapping indices invalidates the tag (index bound into MAC).
+        let mut swapped = shares[1].clone();
+        swapped.index = shares[0].index;
+        assert!(!verify_share_with_key(&swapped, secret));
+    }
+
+    #[test]
+    fn test_x_coordinate_consistency_enforced() {
+        let secret = b"another-master-key";
+        let mut share = split_secret_shamir_with_meta(secret, 2, 3).unwrap().remove(0);
+        // Corrupt the embedded x-coordinate so it disagrees with index.
+        share.data[0] = share.data[0].wrapping_add(7);
+        assert!(!verify_share_with_key(&share, secret));
+    }
+
+    #[test]
+    fn test_wrong_master_secret_fails() {
+        let secret = b"real-master-key";
+        let shares = split_secret_shamir_with_meta(secret, 2, 3).unwrap();
+        assert!(!verify_share_with_key(&shares[0], b"attacker-key"));
+    }
 }

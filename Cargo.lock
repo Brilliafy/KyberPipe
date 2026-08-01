@@ -1657,10 +1657,14 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chacha20poly1305",
+ "crc32fast",
+ "directories 5.0.1",
  "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "image",
  "jni 0.21.1",
+ "keyring 3.6.3",
  "pqcrypto-kyber",
  "pqcrypto-mldsa",
  "pqcrypto-traits",
@@ -2423,13 +2427,17 @@ dependencies = [
  "core-crypto",
  "directories 5.0.1",
  "hex",
- "keyring",
+ "keyring 2.3.3",
+ "libc",
  "magic-wormhole",
  "mimalloc",
  "notify-rust",
+ "quinn",
  "rand 0.8.7",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -2437,6 +2445,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "wasmtime",
+ "wat",
  "zeroize",
 ]
 
@@ -4772,6 +4781,16 @@ dependencies = [
  "secret-service",
  "security-framework 2.11.1",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "zeroize",
 ]
 
 [[package]]

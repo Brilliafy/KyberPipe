@@ -1,7 +1,65 @@
-use crate::executor::{run_boa_sandboxed_script, run_fallback_subprocess, ScriptExecutionResult};
+use crate::executor::{
+    resolve_allowed_fallback_script, run_boa_sandboxed_script, run_fallback_subprocess,
+    ScriptExecutionResult,
+};
 use crate::state::AppState;
 use core_crypto::packets::SensorPacket;
 use tauri::State;
+
+/// RFC 1918 private networks, link-local, loopback, CGNAT ranges
+fn is_private_or_restricted(addr: &std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8
+            if octets[0] == 10 {
+                return true;
+            }
+            // 172.16.0.0/12
+            if octets[0] == 172 && (octets[1] & 0xF0) == 16 {
+                return true;
+            }
+            // 192.168.0.0/16
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            // 127.0.0.0/8 (loopback)
+            if octets[0] == 127 {
+                return true;
+            }
+            // 169.254.0.0/16 (link-local / metadata)
+            if octets[0] == 169 && octets[1] == 254 {
+                return true;
+            }
+            // 100.64.0.0/10 (CGNAT)
+            if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+                return true;
+            }
+            // 0.0.0.0/8
+            if octets[0] == 0 {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(v6) => {
+            // ::1 (loopback)
+            if *v6 == std::net::Ipv6Addr::LOCALHOST {
+                return true;
+            }
+            // fe80::/10 (link-local)
+            let segments = v6.segments();
+            if segments[0] & 0xFFC0 == 0xFE80 {
+                return true;
+            }
+            // fd00::/8 (unique local)
+            if segments[0] & 0xFF00 == 0xFD00 {
+                return true;
+            }
+            // ::ffff:0:0/96 (IPv4-mapped)
+            false
+        }
+    }
+}
 
 fn native_http_fetch(url: &str) -> Result<String, String> {
     use std::io::{Read, Write};
@@ -32,49 +90,18 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
                 .map(|iter| iter.collect())
                 .map_err(|e| format!("DNS resolution failed: {e}"))
         })?;
+    // SSRF protection: reject private/link-local/loopback addresses
     for addr in &socket_addrs {
-        let ip = addr.ip();
-        let ip = match ip {
-            std::net::IpAddr::V6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    std::net::IpAddr::V4(v4)
-                } else {
-                    std::net::IpAddr::V6(v6)
-                }
-            }
-            v4 => v4,
-        };
-        let is_private = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || v4.is_multicast()
-                    || v4.octets()[0] == 169
-                    || v4.octets()[0] == 10
-                    || (v4.octets()[0] == 172 && (16..=31).contains(&v4.octets()[1]))
-                    || (v4.octets()[0] == 192 && v4.octets()[1] == 168)
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || v6.octets()[0..2] == [0xfc, 0x00]
-                    || v6.octets()[0..2] == [0xfd, 0x00]
-            }
-        };
-        if is_private {
+        if is_private_or_restricted(&addr.ip()) {
             return Err(format!(
-                "SSRF blocked: connections to private IP range ({}) are not allowed",
-                ip
+                "SSRF blocked: connection to private/internal address {} is not allowed",
+                addr.ip()
             ));
         }
     }
     let first_addr = *socket_addrs
         .first()
         .ok_or_else(|| "No address resolved".to_string())?;
-
     let mut stream = TcpStream::connect_timeout(&first_addr, Duration::from_secs(5))
         .map_err(|e| format!("Connect failed: {e}"))?;
     stream
@@ -149,29 +176,15 @@ pub fn execute_fallback_script(
     lux: f64,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<ScriptExecutionResult, String> {
-    let allowed_scripts: &[(&str, &str)] = &[
-        (
-            "kyberpipe-fallback.sh",
-            "/usr/lib/kyberpipe/scripts/kyberpipe-fallback.sh",
-        ),
-        (
-            "kyberpipe-sensor.sh",
-            "/usr/lib/kyberpipe/scripts/kyberpipe-sensor.sh",
-        ),
-    ];
-    let script_name = std::path::Path::new(&script_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let resolved_path = allowed_scripts
-        .iter()
-        .find(|(name, _)| *name == script_name)
-        .map(|(_, path)| *path)
-        .ok_or_else(|| format!("Script '{}' not in allowed execution list", script_name))?;
+    // Resolve against the SINGLE shared allowlist (audit finding #19). The
+    // resolved value is the same relative key `run_fallback_subprocess` uses,
+    // so the command layer and the executor can never disagree.
+    let allowed_path = resolve_allowed_fallback_script(&script_path)
+        .map_err(|e| e)?;
     state.add_log(format!(
-        "[Subprocess] Executing fallback script: {resolved_path} (lux = {lux})"
+        "[Subprocess] Executing fallback script: {allowed_path} (lux = {lux})"
     ));
-    let res = run_fallback_subprocess(resolved_path, lux);
+    let res = run_fallback_subprocess(&allowed_path, lux);
     state.add_log(format!(
         "[Subprocess] Result: success={}, output={}",
         res.success, res.output
@@ -186,18 +199,6 @@ pub fn push_sensor_reading(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Vec<SensorPacket> {
     let pkt = SensorPacket { lux, timestamp };
-    if let Ok(mut hist) = state.sensor_history.lock() {
-        if hist.len() >= 50 {
-            hist.remove(0);
-        }
-        hist.push(pkt);
-        hist.clone()
-    } else {
-        vec![]
-    }
-}
-
-#[tauri::command]
-pub fn execute_enclave_confidential_wasm(wasm_bytes: Vec<u8>) -> Result<String, String> {
-    crate::executor::execute_wasm_script(&wasm_bytes)
+    state.add_sensor_packet(pkt);
+    state.get_sensor_history()
 }

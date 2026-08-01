@@ -565,7 +565,7 @@ fun SettingsTab(
                     Spacer(modifier = Modifier.height(10.dp))
                     Text("NIST ML-KEM-768 PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
-                        text = pair.mlkemPkHex.take(48) + "...",
+                        text = pair.mlkemPk.joinToString("") { "%02x".format(it) }.take(48) + "...",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFC084FC)
@@ -573,7 +573,7 @@ fun SettingsTab(
                     Spacer(modifier = Modifier.height(10.dp))
                     Text("X25519 Ephemeral PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
-                        text = pair.x25519PkHex.take(48) + "...",
+                        text = pair.x25519Pk.joinToString("") { "%02x".format(it) }.take(48) + "...",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFC084FC)

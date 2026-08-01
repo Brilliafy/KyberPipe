@@ -42,7 +42,7 @@ android {
     }
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
+            jniLibs.srcDir("src/main/jniLibs")
         }
     }
     packaging {
@@ -92,5 +92,8 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // ZXing fallback for dense QR codes
     implementation("com.google.zxing:core:3.5.3")
+    
+    // Security Crypto
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }
 

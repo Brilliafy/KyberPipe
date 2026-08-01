@@ -6,46 +6,132 @@ pub mod qr_scanner;
 pub mod quic_app;
 pub mod telemetry;
 
+pub mod crypto_api;
+pub mod ffi;
+pub mod network_api;
 pub mod p2p_group;
+pub mod pairing_api;
 pub mod quic_bridge;
 pub mod ratchet_ffi;
+pub mod session_handle;
 pub mod system_net;
 
+// Re-export domain API modules so callers can use `crate::function_name`
+// and UniFFI bindings see a flat namespace.
+pub use crypto_api::*;
+pub use network_api::*;
+pub use pairing_api::*;
+
 use error::KyberError;
-use network::PathMigrationManager;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::future::Future;
 
 uniffi::setup_scaffolding!();
 
-/// Dedicated Tokio runtime for blocking/synchronous UniFFI bridge calls.
-/// NEVER uses block_in_place — always dispatches to this isolated runtime
-/// to prevent starvation of the primary network event loop.
-static SYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+/// Ensure panics in native Rust code never unwind across FFI boundaries (JNI/C ABI)
+/// which causes Undefined Behavior.
+static PANIC_HOOK_INIT: std::sync::Once = std::sync::Once::new();
 
-fn get_sync_runtime() -> &'static tokio::runtime::Runtime {
-    SYNC_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("Failed to build sync Tokio runtime")
-    })
+pub fn ensure_panic_hook_installed() {
+    PANIC_HOOK_INIT.call_once(|| {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            eprintln!("[CRITICAL ERROR] Panic occurred in core-crypto native layer: {info}");
+            prev_hook(info);
+            // Never unwind across the C ABI (UB). Abort — except in this crate's
+            // own test binary, where the test harness must observe the failure.
+            if !cfg!(test) {
+                std::process::abort();
+            }
+        }));
+    });
 }
 
-/// Helper: block on a future using the dedicated SYNC_RUNTIME.
-/// Never uses block_in_place or Handle::try_current to avoid starving
-/// the primary network runtime on concurrent UniFFI calls.
-fn block_on_sync<F: std::future::Future>(fut: F) -> F::Output {
-    get_sync_runtime().block_on(fut)
+/// IO runtime for long-lived tasks (QUIC accept loop, beacon listeners).
+/// Dedicated thread pool prevents FFI calls from starving the accept loop.
+/// Stored as `Mutex<Option<Runtime>>` so `shutdown_io_runtime()` (test
+/// teardown) can take ownership and stop the worker threads — a plain
+/// `LazyLock<Runtime>` can never be shut down and would keep a test process
+/// alive forever.
+static IO_RUNTIME: std::sync::LazyLock<std::sync::Mutex<Option<tokio::runtime::Runtime>>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("kyberpipe-io")
+                .worker_threads(2)
+                .build()
+                .expect("Failed to create IO runtime"),
+        ))
+    });
+
+/// FFI runtime for short-lived blocking calls from UniFFI (encrypt, decrypt, key ops).
+/// Separate from IO_RUNTIME to prevent worker-thread exhaustion under concurrent FFI load.
+static FFI_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("kyberpipe-ffi")
+        .worker_threads(2)
+        .max_blocking_threads(64)
+        .build()
+        .expect("Failed to create FFI runtime")
+});
+
+/// Block on a future using the FFI runtime. Used for short-lived UniFFI bridge calls.
+pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
+    FFI_RUNTIME.block_on(fut)
 }
 
-#[derive(Clone, uniffi::Record, serde::Serialize)]
+/// Block on a future with timeout using the FFI runtime.
+/// Returns `None` if the timeout expires. Use from FFI boundaries (e.g.,
+/// Android JNI) where blocking indefinitely would exhaust the platform thread pool.
+pub fn block_on_sync_timeout<F: Future>(
+    fut: F,
+    timeout: std::time::Duration,
+) -> Option<F::Output> {
+    FFI_RUNTIME.block_on(tokio::time::timeout(timeout, fut)).ok()
+}
+
+/// Block on a future using the IO runtime. Used for long-lived tasks (accept loop).
+pub fn block_on_io<F: Future>(fut: F) -> F::Output {
+    let guard = IO_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .expect("IO runtime was shut down (shutdown_io_runtime)")
+        .block_on(fut)
+}
+
+/// Shut down the IO runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide
+/// LazyLock; calling this in production would break the accept loop. The e2e
+/// test calls it after the dispatch loop stops so the test process can exit
+/// (the worker threads would otherwise keep the process alive forever).
+pub fn shutdown_io_runtime() {
+    if let Ok(mut guard) = IO_RUNTIME.lock() {
+        if let Some(rt) = guard.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+/// Generation counter — incremented on self-destruct. In-flight operations
+/// with a stale generation are rejected.
+static DESTRUCT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Check if the current generation is still valid (no self-destruct occurred).
+pub fn check_generation() -> bool {
+    DESTRUCT_GENERATION.load(std::sync::atomic::Ordering::Acquire) == 0
+}
+
+/// Increment the generation counter (called during self-destruct).
+pub fn increment_destruct_generation() {
+    DESTRUCT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+#[derive(Clone, serde::Serialize, uniffi::Record)]
 pub struct PqKeyPair {
-    pub x25519_pk_hex: String,
-    pub x25519_sk_hex: String,
-    pub mlkem_pk_hex: String,
-    pub mlkem_sk_hex: String,
+    pub x25519_pk: Vec<u8>,
+    pub x25519_sk: Vec<u8>,
+    pub mlkem_pk: Vec<u8>,
+    pub mlkem_sk: Vec<u8>,
 }
 
 #[derive(uniffi::Record)]
@@ -56,16 +142,45 @@ pub struct PqKeyPairRaw {
     pub mlkem_sk: Vec<u8>,
 }
 
+/// PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
+/// halves of the keypair NEVER leave the Rust process — the renderer receives
+/// only the public keys needed to build pairing QR payloads, and the pairing
+/// handler reads the private halves from Rust state.
+#[derive(uniffi::Record, serde::Serialize, Clone)]
+pub struct PqPairingPublic {
+    pub x25519_pk_hex: String,
+    pub mlkem_pk_hex: String,
+}
+
+impl From<&PqKeyPair> for PqPairingPublic {
+    fn from(pair: &PqKeyPair) -> Self {
+        Self {
+            x25519_pk_hex: hex::encode(&pair.x25519_pk),
+            mlkem_pk_hex: hex::encode(&pair.mlkem_pk),
+        }
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct PqKemResponse {
-    pub ciphertext_hex: String,
-    pub shared_secret_hex: String,
+    pub ciphertext: Vec<u8>,
+    pub shared_secret: Vec<u8>,
+}
+
+/// A generated per-install client identity certificate (audit finding #8).
+/// `cert_der`/`key_der` are DER-encoded; `sha256_hex` is the cert fingerprint
+/// the server pins during pairing.
+#[derive(uniffi::Record)]
+pub struct ClientIdentityCert {
+    pub cert_der: Vec<u8>,
+    pub key_der: Vec<u8>,
+    pub sha256_hex: String,
 }
 
 #[derive(uniffi::Record)]
 pub struct EncryptedPayload {
-    pub nonce_hex: String,
-    pub ciphertext_hex: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 #[derive(uniffi::Record)]
@@ -93,537 +208,227 @@ pub struct PairingConfig {
     pub pairing_nonce_hex: String,
 }
 
-#[uniffi::export]
-pub fn initialize_pq_handshake() -> Result<(), KyberError> {
-    let _pair = crypto::generate_hybrid_keypair();
-    Ok(())
+// ── Double Ratchet FFI ──
+// Double Ratchet FFI — peer-keyed session registry
+/// Process-global pairing keypair registry. `generate_pq_pairing_public` stores
+/// the FULL keypair (including private halves) here so a pairing handler can
+/// decapsulate the peer's KEM ciphertext. Previously the private half was built
+/// into a temporary and dropped — a latent API trap (audit finding #14).
+static PAIRING_KEYPAIR: std::sync::OnceLock<std::sync::Mutex<Option<PqKeyPair>>> =
+    std::sync::OnceLock::new();
+
+/// Retrieve the keypair stored by `generate_pq_pairing_public` (if any).
+pub fn get_pq_pairing_keypair() -> Option<PqKeyPair> {
+    PAIRING_KEYPAIR
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.clone())
 }
 
+/// PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
+/// halves of the keypair NEVER leave the Rust process — the renderer receives
+/// only the public keys needed to build pairing QR payloads, and the pairing
+/// handler reads the private halves from the process-global registry populated
+/// here (NOT a dropped temporary — audit finding #14).
 #[uniffi::export]
-pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
-    let pair = crypto::generate_hybrid_keypair();
-    Ok(PqKeyPair {
-        x25519_pk_hex: hex::encode(pair.x25519_pk),
-        x25519_sk_hex: hex::encode(pair.x25519_sk),
-        mlkem_pk_hex: hex::encode(pair.mlkem_pk.clone()),
-        mlkem_sk_hex: hex::encode(pair.mlkem_sk.clone()),
-    })
-}
-
-#[uniffi::export]
-pub fn generate_pq_keypair_raw() -> Result<PqKeyPairRaw, KyberError> {
-    let pair = crypto::generate_hybrid_keypair();
-    Ok(PqKeyPairRaw {
+pub fn generate_pq_pairing_public() -> Result<PqPairingPublic, KyberError> {
+    ensure_panic_hook_installed();
+    let pair = crate::crypto::generate_hybrid_keypair();
+    let keypair = PqKeyPair {
         x25519_pk: pair.x25519_pk.to_vec(),
         x25519_sk: pair.x25519_sk.to_vec(),
         mlkem_pk: pair.mlkem_pk.clone(),
         mlkem_sk: pair.mlkem_sk.clone(),
-    })
-}
-
-#[uniffi::export]
-pub fn encapsulate_pq_secret(
-    peer_x25519_pk_hex: String,
-    peer_mlkem_pk_hex: String,
-) -> Result<PqKemResponse, KyberError> {
-    let x25519_bytes = hex::decode(&peer_x25519_pk_hex).map_err(|e| {
-        KyberError::EncapsulationFailed(format!("Invalid X25519 public key hex: {e}"))
-    })?;
-    if x25519_bytes.len() != 32 {
-        return Err(KyberError::InvalidKeyLength {
-            expected: 32,
-            got: x25519_bytes.len() as u64,
-        });
+    };
+    // Persist the FULL keypair so a future pairing handler can decapsulate.
+    let cell = PAIRING_KEYPAIR.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(keypair.clone());
     }
-    let mut x25519_arr = [0u8; 32];
-    x25519_arr.copy_from_slice(&x25519_bytes);
-
-    let mlkem_bytes = hex::decode(&peer_mlkem_pk_hex).map_err(|e| {
-        KyberError::EncapsulationFailed(format!("Invalid ML-KEM public key hex: {e}"))
-    })?;
-
-    let res = crypto::encapsulate_hybrid(&x25519_arr, &mlkem_bytes)?;
-    Ok(PqKemResponse {
-        ciphertext_hex: hex::encode(&res.ciphertext_bytes),
-        shared_secret_hex: hex::encode(&res.combined_shared_secret),
-    })
+    Ok(PqPairingPublic::from(&keypair))
 }
 
-#[uniffi::export]
-pub fn decapsulate_pq_secret(
-    ciphertext_hex: String,
-    my_x25519_sk_hex: String,
-    my_mlkem_sk_hex: String,
-) -> Result<String, KyberError> {
-    let ct_bytes = hex::decode(&ciphertext_hex)
-        .map_err(|e| KyberError::DecapsulationFailed(format!("Invalid ciphertext hex: {e}")))?;
-
-    let x25519_sk_bytes = hex::decode(&my_x25519_sk_hex).map_err(|e| {
-        KyberError::DecapsulationFailed(format!("Invalid X25519 secret key hex: {e}"))
-    })?;
-    if x25519_sk_bytes.len() != 32 {
-        return Err(KyberError::InvalidKeyLength {
-            expected: 32,
-            got: x25519_sk_bytes.len() as u64,
-        });
-    }
-    let mut x25519_sk_arr = [0u8; 32];
-    x25519_sk_arr.copy_from_slice(&x25519_sk_bytes);
-
-    let mlkem_sk_bytes = hex::decode(&my_mlkem_sk_hex).map_err(|e| {
-        KyberError::DecapsulationFailed(format!("Invalid ML-KEM secret key hex: {e}"))
-    })?;
-
-    let ss = crypto::decapsulate_hybrid(&ct_bytes, &x25519_sk_arr, &mlkem_sk_bytes)?;
-    Ok(hex::encode(ss))
-}
-
-#[uniffi::export]
-pub fn derive_session_key(
-    shared_secret_hex: String,
-    salt_hex: String,
-) -> Result<String, KyberError> {
-    let ss_bytes = hex::decode(&shared_secret_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid shared secret hex: {e}")))?;
-    let salt_bytes = hex::decode(&salt_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid salt hex: {e}")))?;
-
-    let derived = crypto::derive_session_key(&ss_bytes, &salt_bytes, b"kyberpipe-hybrid-session")?;
-    Ok(hex::encode(derived))
-}
-
-static ENCRYPT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[uniffi::export]
-pub fn encrypt_payload_with_key(
-    session_key_hex: String,
-    data: String,
-) -> Result<EncryptedPayload, KyberError> {
-    let key_bytes = hex::decode(&session_key_hex)
-        .map_err(|e| KyberError::EncryptionFailed(format!("Invalid key hex: {e}")))?;
-    if key_bytes.len() != 32 {
-        return Err(KyberError::InvalidKeyLength {
-            expected: 32,
-            got: key_bytes.len() as u64,
-        });
-    }
-    let mut key_arr = [0u8; 32];
-    key_arr.copy_from_slice(&key_bytes);
-
-    let seq = ENCRYPT_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nonce_bytes = crypto::generate_nonce_from_seq(seq);
-
-    let ciphertext = crypto::encrypt_chacha20(&key_arr, &nonce_bytes, data.as_bytes(), &[])?;
-    Ok(EncryptedPayload {
-        nonce_hex: hex::encode(nonce_bytes),
-        ciphertext_hex: hex::encode(ciphertext),
-    })
-}
-
-#[uniffi::export]
-pub fn decrypt_payload_with_key(
-    session_key_hex: String,
-    nonce_hex: String,
-    ciphertext_hex: String,
-) -> Result<String, KyberError> {
-    let key_bytes = hex::decode(&session_key_hex)
-        .map_err(|e| KyberError::DecryptionFailed(format!("Invalid key hex: {e}")))?;
-    if key_bytes.len() != 32 {
-        return Err(KyberError::InvalidKeyLength {
-            expected: 32,
-            got: key_bytes.len() as u64,
-        });
-    }
-    let mut key_arr = [0u8; 32];
-    key_arr.copy_from_slice(&key_bytes);
-
-    let nonce_bytes = hex::decode(&nonce_hex)
-        .map_err(|e| KyberError::DecryptionFailed(format!("Invalid nonce hex: {e}")))?;
-    if nonce_bytes.len() != 12 {
-        return Err(KyberError::DecryptionFailed(
-            "Nonce must be 12 bytes".into(),
-        ));
-    }
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(&nonce_bytes);
-
-    let ct_bytes = hex::decode(&ciphertext_hex)
-        .map_err(|e| KyberError::DecryptionFailed(format!("Invalid ciphertext hex: {e}")))?;
-
-    let plaintext_bytes = crypto::decrypt_chacha20(&key_arr, &nonce_arr, &ct_bytes, &[])?;
-    String::from_utf8(plaintext_bytes)
-        .map_err(|e| KyberError::DecryptionFailed(format!("UTF-8 decode error: {e}")))
-}
-
-#[uniffi::export]
-pub fn create_sensor_packet(lux: f64, timestamp: u64) -> Result<String, KyberError> {
-    let pkt = packets::SensorPacket { lux, timestamp };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_clipboard_packet(text: String, timestamp: u64) -> Result<String, KyberError> {
-    let hash = packets::compute_sha256_hex(&text);
-    let pkt = packets::ClipboardPacket {
-        content: text,
-        hash,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_binary_clipboard_packet(
-    mime_type: String,
-    data_base64: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let hash = packets::compute_sha256_hex(&data_base64);
-    let pkt = packets::BinaryClipboardPacket {
-        mime_type,
-        data_base64,
-        hash,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_sms_packet(
-    sender: String,
-    body: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let pkt = packets::SmsPacket {
-        sender,
-        body,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_outbound_sms_packet(
-    recipient: String,
-    body: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let pkt = packets::OutboundSmsPacket {
-        recipient,
-        body,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_notification_packet(
-    title: String,
-    text: String,
-    app_package: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let pkt = packets::NotificationPacket {
-        sbn_key: format!("{app_package}_{timestamp}"),
-        title,
-        text,
-        app_package,
-        icon_base64: None,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_notification_action_packet(
-    sbn_key: String,
-    action_index: u32,
-    action_title: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let pkt = packets::NotificationActionPacket {
-        sbn_key,
-        action_index,
-        action_title,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn create_hardware_command_packet(
-    command_type: String,
-    payload_json: String,
-    timestamp: u64,
-) -> Result<String, KyberError> {
-    let pkt = packets::HardwareCommandPacket {
-        command_type,
-        payload_json,
-        timestamp,
-    };
-    serde_json::to_string(&pkt).map_err(|e| KyberError::SerializationError(e.to_string()))
-}
-
-#[uniffi::export]
-pub fn generate_path_challenge_tokens(
-    session_key_hex: String,
-) -> Result<PathChallengeResult, KyberError> {
-    let sk = hex::decode(&session_key_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid session key hex: {e}")))?;
-    let (challenge_token, expected_response) = PathMigrationManager::create_path_challenge(&sk);
-    Ok(PathChallengeResult {
-        challenge_token,
-        expected_response,
-    })
-}
-
-#[uniffi::export]
-pub fn verify_path_response_token(
-    session_key_hex: String,
-    challenge_token: String,
-    response_token: String,
-) -> Result<bool, KyberError> {
-    let sk = hex::decode(&session_key_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid session key hex: {e}")))?;
-    Ok(PathMigrationManager::verify_path_response(
-        &sk,
-        &challenge_token,
-        &response_token,
-    ))
-}
-
-#[uniffi::export]
-pub fn generate_sas_code(
-    host_pk_hex: String,
-    client_pk_hex: String,
-    shared_secret_hex: String,
-) -> Result<String, KyberError> {
-    let host_bytes = hex::decode(&host_pk_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid host PK hex: {e}")))?;
-    let client_bytes = hex::decode(&client_pk_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid client PK hex: {e}")))?;
-    let ss_bytes = hex::decode(&shared_secret_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid SS hex: {e}")))?;
-
-    crypto::generate_sas_code(&host_bytes, &client_bytes, &ss_bytes)
-}
-
-#[uniffi::export]
-pub fn toggle_flight_data_recorder(enabled: bool) {
-    telemetry::GLOBAL_FLIGHT_RECORDER.set_enabled(enabled);
-}
-
-#[uniffi::export]
-pub fn dump_flight_data_recorder() -> String {
-    telemetry::GLOBAL_FLIGHT_RECORDER.dump_events_json()
-}
-
-#[uniffi::export]
-#[allow(deprecated)]
-pub fn trigger_panic_hardware_wipe() -> Result<(), KyberError> {
-    crypto::trigger_panic_hardware_wipe()
-}
-
-#[uniffi::export]
-pub fn is_duplicate_clipboard(content_hash: String, recent_hashes: Vec<String>) -> bool {
-    recent_hashes.contains(&content_hash)
-}
-
-#[uniffi::export]
-pub fn compute_sha256(data: String) -> String {
-    packets::compute_sha256_hex(&data)
-}
-
-#[uniffi::export]
-pub fn perform_stun_hole_punch(stun_host: String) -> Result<String, KyberError> {
-    let addr = block_on_sync(network::query_stun_server(&stun_host))?;
-    Ok(addr.to_string())
-}
-
-// QUIC connection management — thin wrapper around quic_bridge
-#[uniffi::export]
-pub fn quic_bind_server(port: u16) -> Result<(), KyberError> {
-    block_on_sync(quic_app::QuicAppManager::bind_server(port))?;
-    Ok(())
-}
-
-#[uniffi::export]
-pub fn quic_connect(
-    host: String,
-    port: u16,
-    pinned_cert_hash_hex: String,
-) -> Result<bool, KyberError> {
-    let addr: std::net::SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|e| KyberError::NetworkError(format!("Invalid address: {e}")))?;
-    let pinned = if pinned_cert_hash_hex.is_empty() {
-        None
-    } else {
-        Some(pinned_cert_hash_hex)
-    };
-    let conn = block_on_sync(quic_app::QuicAppManager::connect(
-        addr,
-        pinned.clone(),
-        None,
-    ))?;
-    quic_bridge::store_connection(conn, addr, pinned);
-    Ok(true)
-}
-
-#[uniffi::export]
-pub fn quic_send_and_recv(stream_type: u8, body_json: String) -> Result<String, KyberError> {
-    let conn = quic_bridge::get_or_reconnect()?;
-    block_on_sync(quic_bridge::quic_send_and_recv_impl(
-        &conn,
-        stream_type,
-        &body_json,
-    ))
-}
-
-#[uniffi::export]
-pub fn quic_disconnect() {
-    quic_bridge::close_connection();
-}
-
-// Double Ratchet FFI — peer-keyed session registry
 #[uniffi::export]
 pub fn ratchet_init_session(
     peer_identity: String,
-    master_shared_secret_hex: String,
+    master_shared_secret: Vec<u8>,
     is_initiator: bool,
+    peer_x25519_pk: Vec<u8>,
+    peer_mlkem_pk: Vec<u8>,
 ) -> Result<String, KyberError> {
-    let ss = hex::decode(&master_shared_secret_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid shared secret hex: {e}")))?;
-    ratchet_ffi::ratchet_init_session_impl(&peer_identity, &ss, is_initiator)?;
-    Ok("OK".to_string())
+    ensure_panic_hook_installed();
+    let x25519 = if peer_x25519_pk.is_empty() {
+        None
+    } else {
+        Some(peer_x25519_pk.as_slice())
+    };
+    let mlkem = if peer_mlkem_pk.is_empty() {
+        None
+    } else {
+        Some(peer_mlkem_pk.as_slice())
+    };
+    ratchet_ffi::ratchet_init_session_impl(
+        &peer_identity,
+        &master_shared_secret,
+        is_initiator,
+        x25519,
+        mlkem,
+    )?;
+    Ok("Session initialized".to_string())
 }
 
 #[uniffi::export]
 pub fn ratchet_remove_session(peer_identity: String) -> bool {
+    ensure_panic_hook_installed();
     ratchet_ffi::ratchet_remove_session_impl(&peer_identity)
 }
-
+#[uniffi::export]
+pub fn ratchet_clear_all_sessions() {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_clear_all_sessions_impl();
+}
+#[uniffi::export]
+pub fn ratchet_peer_ids() -> Vec<String> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_peer_ids_impl()
+}
 #[uniffi::export]
 pub fn ratchet_encrypt_message(
     peer_identity: String,
-    plaintext_hex: String,
-) -> Result<String, KyberError> {
-    let pt = hex::decode(&plaintext_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid hex: {e}")))?;
-    let msg = ratchet_ffi::ratchet_encrypt_message_impl(&peer_identity, &pt)?;
-    let mut json = serde_json::json!({
-        "nonce_hex": hex::encode(msg.nonce),
-        "ciphertext_hex": hex::encode(msg.ciphertext),
-    });
-    if let Some(ref pk) = msg.rekey_x25519_pk {
-        json["rekey_x25519_pk_hex"] = serde_json::Value::String(hex::encode(pk));
-    }
-    if let Some(ref mpk) = msg.rekey_mlkem_pk {
-        json["rekey_mlkem_pk_hex"] = serde_json::Value::String(hex::encode(mpk));
-    }
-    if let Some(ref ct) = msg.rekey_ciphertext {
-        json["rekey_ciphertext_hex"] = serde_json::Value::String(hex::encode(ct));
-    }
-    serde_json::to_string(&json).map_err(|e| KyberError::SerializationError(e.to_string()))
+    plaintext: Vec<u8>,
+) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_encrypt_message_impl(&peer_identity, &plaintext)
 }
 
 #[uniffi::export]
 pub fn ratchet_decrypt_message(
     peer_identity: String,
-    nonce_hex: String,
-    ciphertext_hex: String,
-) -> Result<String, KyberError> {
-    let nonce_bytes = hex::decode(&nonce_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid nonce hex: {e}")))?;
-    if nonce_bytes.len() != 12 {
-        return Err(KyberError::CryptoError("Invalid nonce length".into()));
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    if nonce.len() != 12 {
+        return Err(KyberError::DecryptionFailed(
+            "Nonce must be 12 bytes".into(),
+        ));
     }
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&nonce_bytes);
-    let ct = hex::decode(&ciphertext_hex)
-        .map_err(|e| KyberError::CryptoError(format!("Invalid ciphertext hex: {e}")))?;
-    let pt = ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &nonce, &ct)?;
-    let json = serde_json::json!({"plaintext_hex": hex::encode(pt)});
-    serde_json::to_string(&json).map_err(|e| KyberError::SerializationError(e.to_string()))
+    ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &nonce, &ciphertext)
 }
 
 #[uniffi::export]
-pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> {
-    let results = block_on_sync(network::listen_for_beacons(
-        network::P2P_BEACON_PORT,
-        timeout_secs,
-    ))?
-    .into_iter()
-    .map(|(pk, ip, name)| format!("{pk}:{ip}:{name}"))
-    .collect();
-    Ok(results)
-}
-
-#[uniffi::export]
-pub fn evaluate_connection_hierarchy(
-    wifi_direct_active: bool,
-    lan_active: bool,
-    public_endpoint: String,
-) -> ConnectionInfo {
-    if wifi_direct_active {
-        ConnectionInfo {
-            active_tier: 1,
-            active_path_description: "Wi-Fi Direct P2P Link (Multiplexed QUIC)".to_string(),
-            latency_ms: 0.0,
-            public_endpoint,
-        }
-    } else if lan_active {
-        ConnectionInfo {
-            active_tier: 2,
-            active_path_description: "Local LAN AP Link (mDNS UDP Discovery)".to_string(),
-            latency_ms: 0.0,
-            public_endpoint,
-        }
-    } else {
-        ConnectionInfo {
-            active_tier: 3,
-            active_path_description: "WireGuard WAN Tunnel Overlay (Encrypted QUIC)".to_string(),
-            latency_ms: 0.0,
-            public_endpoint,
-        }
+pub fn ratchet_decrypt_with_rekey_message(
+    peer_identity: String,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+    rekey_ciphertext: Option<Vec<u8>>,
+    rekey_x25519_pk: Option<Vec<u8>>,
+    rekey_mlkem_pk: Option<Vec<u8>>,
+) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    if nonce.len() != 12 {
+        return Err(KyberError::DecryptionFailed(
+            "Nonce must be 12 bytes".into(),
+        ));
     }
-}
-
-pub fn get_local_ip() -> String {
-    system_net::get_system_local_ip()
-}
-
-pub fn get_wifi_direct_mac() -> String {
-    system_net::get_primary_mac()
-}
-
-pub async fn send_beacon_payload(payload: String) -> Result<(), KyberError> {
-    p2p_group::send_beacon_payload(payload).await
-}
-
-pub fn try_start_p2p_group() {
-    p2p_group::try_start_p2p_group()
+    let rekey_x25519 = match rekey_x25519_pk.as_deref() {
+        Some(s) => Some(s.try_into().map_err(|_| {
+            KyberError::InvalidKeyLength {
+                expected: 32,
+                got: s.len() as u64,
+            }
+        })?),
+        None => None,
+    };
+    ratchet_ffi::ratchet_decrypt_with_rekey_message_impl(
+        &peer_identity,
+        &nonce,
+        &ciphertext,
+        rekey_ciphertext.as_deref(),
+        rekey_x25519,
+        rekey_mlkem_pk.as_deref(),
+    )
 }
 
 #[uniffi::export]
-pub fn generate_pairing_config(
-    host_pk_hex: String,
-    wireguard_pk_hex: String,
-) -> Result<PairingConfig, KyberError> {
-    let mut nonce = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+pub fn generate_rekey_ack_message(
+    peer_identity: String,
+    seq: u64,
+) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::generate_rekey_ack_message_impl(&peer_identity, seq)
+}
 
-    try_start_p2p_group();
+#[uniffi::export]
+pub fn ratchet_process_rekey_ack(
+    peer_identity: String,
+    seq: u64,
+) -> Result<bool, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_process_rekey_ack_impl(&peer_identity, seq)
+}
 
-    Ok(PairingConfig {
-        host_identity_pk_hex: host_pk_hex,
-        local_ip: system_net::get_system_local_ip(),
-        wifi_direct_mac: system_net::get_primary_mac(),
-        p2p_ip: system_net::get_p2p_ip(),
-        wireguard_pk_hex,
-        stun_endpoint: "stun.l.google.com:19302".to_string(),
-        pairing_nonce_hex: hex::encode(nonce),
-    })
+/// Take the pending RekeyAck carrier seq (if any) and produce the encrypted
+/// ACK message to send back to the peer. Returns None when no ACK is pending.
+#[uniffi::export]
+pub fn ratchet_generate_rekey_ack(
+    peer_identity: String,
+) -> Result<Option<crypto::RatchetEncryptedMessage>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_generate_rekey_ack_impl(&peer_identity)
+}
+
+/// Export a ratchet session as a serialized snapshot (JSON bytes) for
+/// encrypted persistence. Returns None if no session exists for the peer.
+#[uniffi::export]
+pub fn ratchet_export_session(
+    peer_identity: String,
+) -> Result<Option<Vec<u8>>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_export_session_impl(&peer_identity)
+}
+
+/// Restore a ratchet session from a previously exported (and decrypted)
+/// snapshot. Replaces any existing session for the peer.
+#[uniffi::export]
+pub fn ratchet_import_session(
+    peer_identity: String,
+    data: Vec<u8>,
+) -> Result<(), KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_import_session_impl(&peer_identity, &data)
+}
+
+/// Resynchronize a ratchet session after the peer's authenticated Synchronize
+/// message. Returns the number of messages skipped.
+#[uniffi::export]
+pub fn ratchet_synchronize_session(
+    peer_identity: String,
+    target_seq: u64,
+) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_synchronize_session_impl(&peer_identity, target_seq)
+}
+
+/// The receiver's current recv counter — used to build a Synchronize request
+/// when a gap exceeds max_skip.
+#[uniffi::export]
+pub fn ratchet_recv_count(
+    peer_identity: String,
+) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_recv_count_impl(&peer_identity)
+}
+
+/// The sender's current send counter — carried in every poll response so the
+/// peer can detect a receive-chain gap exceeding max_skip and resync (the
+/// Synchronize recovery path, audit finding #4).
+#[uniffi::export]
+pub fn ratchet_send_count(
+    peer_identity: String,
+) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_send_count_impl(&peer_identity)
 }
 
 #[cfg(test)]
@@ -635,11 +440,34 @@ mod tests {
         let _alice = generate_pq_keypair().unwrap();
         let bob = generate_pq_keypair().unwrap();
 
-        let kem_res = encapsulate_pq_secret(bob.x25519_pk_hex, bob.mlkem_pk_hex).unwrap();
-        let decapsulated =
-            decapsulate_pq_secret(kem_res.ciphertext_hex, bob.x25519_sk_hex, bob.mlkem_sk_hex)
-                .unwrap();
+        let kem_res = encapsulate_pq_secret(bob.x25519_pk.clone(), bob.mlkem_pk.clone()).unwrap();
+        let decapsulated = decapsulate_pq_secret(
+            kem_res.ciphertext.clone(),
+            bob.x25519_sk.clone(),
+            bob.mlkem_sk.clone(),
+        )
+        .unwrap();
 
-        assert_eq!(kem_res.shared_secret_hex, decapsulated);
+        assert_eq!(kem_res.shared_secret, decapsulated);
+    }
+
+    /// Audit #14: `generate_pq_pairing_public` must retain the PRIVATE half of
+    /// the pairing keypair in the registry so a pairing handler can later
+    /// decapsulate the peer's KEM ciphertext. Regression: the private half used
+    /// to be built into a temporary and dropped at the end of the call.
+    #[test]
+    fn test_pairing_public_retains_private_key() {
+        // Clear any prior registry state.
+        if let Some(cell) = PAIRING_KEYPAIR.get() {
+            if let Ok(mut g) = cell.lock() {
+                *g = None;
+            }
+        }
+        let public = generate_pq_pairing_public().expect("pairing public");
+        let stored = get_pq_pairing_keypair().expect("private half must survive");
+        assert_eq!(stored.mlkem_pk, hex::decode(&public.mlkem_pk_hex).unwrap());
+        assert_eq!(stored.x25519_pk, hex::decode(&public.x25519_pk_hex).unwrap());
+        assert!(!stored.mlkem_sk.is_empty(), "mlkem private key must be retained");
+        assert!(!stored.x25519_sk.is_empty(), "x25519 private key must be retained");
     }
 }

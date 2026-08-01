@@ -5,6 +5,9 @@ use sha2::Sha256;
 /// Generate a 7-character alphanumeric Short Authentication String (SAS) for out-of-band verification.
 /// Provides ~36 bits of entropy to resist MitM brute-force during pairing.
 /// All characters are derived from HKDF output — no LCG fallback.
+/// Bound to ephemeral host_pk, client_pk, and shared_secret — replay of the same
+/// public keys within a session produces the same SAS, which is safe because
+/// each pairing generates fresh ephemeral keys.
 pub fn generate_sas_code(
     host_pk_bytes: &[u8],
     client_pk_bytes: &[u8],
@@ -15,15 +18,6 @@ pub fn generate_sas_code(
     hkdf_input.extend_from_slice(host_pk_bytes);
     hkdf_input.extend_from_slice(client_pk_bytes);
     hkdf_input.extend_from_slice(shared_secret);
-
-    // Include a timestamp epoch to scope SAS expiry to this pairing session
-    let epoch = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        / 300) // 5-minute window
-        .to_be_bytes();
-    hkdf_input.extend_from_slice(&epoch);
 
     let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-sas-v2-salt"), &hkdf_input);
     // Derive 7 bytes from HKDF — enough for 7 base32 characters (5 bits each = 35 bits)

@@ -1,0 +1,9 @@
+/// Typed pairing request — avoids serde_json::Value DOM parsing
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct PairingRequest {
+    ciphertext_hex: String,
+    client_pk_hex: String,
+    #[serde(default = "default_device_name")]
+    name: String,
+}

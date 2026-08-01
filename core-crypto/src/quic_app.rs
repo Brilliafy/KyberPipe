@@ -2,8 +2,10 @@ use crate::error::KyberError;
 use crate::network;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
@@ -15,9 +17,11 @@ pub const STREAM_CLIPBOARD: u8 = 0x02;
 pub const STREAM_MEDIA: u8 = 0x03;
 pub const STREAM_POLL: u8 = 0x04;
 pub const STREAM_UNPAIR: u8 = 0x05;
+pub const STREAM_REKEY_ACK: u8 = 0x06;
+pub const STREAM_SMS: u8 = 0x07;
 
-/// Maximum message body size (16 MB)
-pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+/// Maximum message body size (1 MB) — clipboard/media payloads
+pub const MAX_MESSAGE_SIZE: usize = 1 * 1024 * 1024;
 
 /// Binary frame: [stream_type: 1B][body_len: 4B][body: body_len]
 #[derive(Debug)]
@@ -63,16 +67,164 @@ impl QuicFrame {
 /// High-level QUIC application connection manager
 pub struct QuicAppManager;
 
+/// Process-global pinned client certificate hash for mTLS enforcement.
+/// Set after SAS pairing confirms the client's identity; read by bind_server
+/// to configure server-side cert pinning on subsequent QUIC connections.
+static PINNED_CLIENT_CERT: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+/// Process-global QUIC server endpoint. Swappable for mTLS rebind after pairing.
+/// The accept loop reads from this; when rebind swaps the endpoint, the old
+/// accept() returns an error and the loop restarts with the new endpoint.
+static SERVER_ENDPOINT: OnceLock<std::sync::Mutex<Option<Endpoint>>> = OnceLock::new();
+
+/// Get the current server endpoint (if any).
+pub fn get_server_endpoint() -> Option<Endpoint> {
+    SERVER_ENDPOINT
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|e| e.clone())
+}
+
+/// Extract the SHA-256 hash (hex) of the peer's end-entity certificate.
+/// Returns None when the peer presented no certificate (e.g. unauthenticated
+/// client) or the identity cannot be downcast to a certificate chain.
+pub fn connection_peer_cert_hash(conn: &quinn::Connection) -> Option<String> {
+    use sha2::Digest;
+    let certs = conn
+        .peer_identity()?
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()?;
+    let cert = certs.first()?;
+    Some(hex::encode(sha2::Sha256::digest(cert.as_ref())))
+}
+
+/// Store a new server endpoint, returning the old one (if any) for cleanup.
+fn store_server_endpoint(ep: Endpoint) -> Option<Endpoint> {
+    let cell = SERVER_ENDPOINT.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap();
+    let old = guard.take();
+    *guard = Some(ep);
+    old
+}
+
+
+/// Store the pinned client cert hash after successful SAS pairing and rebind
+/// the server so mTLS enforcement takes effect IMMEDIATELY — not on the next
+/// startup. Rejects empty/malformed hashes (audit findings #8/#8b: an empty
+/// pin would reject every client and a deferred rebind leaves an
+/// unauthenticated window).
+pub fn set_pinned_client_cert(hash: String) {
+    // A structurally invalid or empty pin must never be installed — doing so
+    // would brick authorization for every future client.
+    if hash.is_empty() || hash.len() != 64 || hex::decode(&hash).is_err() {
+        warn!(
+            "[mTLS] Rejecting invalid client cert pin (len={}): not installing",
+            hash.len()
+        );
+        return;
+    }
+    *PINNED_CLIENT_CERT
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(hash);
+}
+
+fn cert_dir() -> PathBuf {
+    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|p| p.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn load_or_generate_cert() -> Result<
+    (
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    KyberError,
+> {
+    let cert_path = cert_dir().join("server_cert.der");
+    let key_path = cert_dir().join("server_key.der");
+
+    if cert_path.exists() && key_path.exists() {
+        let cert_der = std::fs::read(&cert_path)
+            .map_err(|e| KyberError::NetworkError(format!("Failed to read cert: {e}")))?;
+        let key_der = std::fs::read(&key_path)
+            .map_err(|e| KyberError::NetworkError(format!("Failed to read key: {e}")))?;
+
+        let cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into());
+        return Ok((vec![cert], key));
+    }
+
+    // Generate new cert and persist
+    let (certs, key) = network::generate_self_signed_cert()?;
+    if let Some(cert) = certs.first() {
+        let _ = std::fs::write(&cert_path, cert.as_ref());
+    }
+    if let rustls::pki_types::PrivateKeyDer::Pkcs8(doc) = &key {
+        let _ = std::fs::write(&key_path, doc.secret_pkcs8_der().as_ref());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((certs, key))
+}
+
 impl QuicAppManager {
     pub async fn bind_server(port: u16) -> Result<Endpoint, KyberError> {
-        let (certs, key) = network::generate_self_signed_cert()?;
-        let server_config = network::configure_quic_server(certs, key, true)?;
+        // Try to load persisted cert; generate new one only on first run
+        let (certs, key) = load_or_generate_cert()?;
+        let pinned = PINNED_CLIENT_CERT
+            .get()
+            .and_then(|m| m.lock().ok())
+            .and_then(|h| h.clone());
+        let server_config = network::configure_quic_server(certs, key, true, pinned)?;
         let socket_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         let endpoint = Endpoint::server(server_config, socket_addr)
             .map_err(|e| KyberError::NetworkError(format!("QUIC server bind failed: {e}")))?;
         info!("QUIC app server bound to port {port}");
+        // Store in shared static for dynamic rebind support
+        store_server_endpoint(endpoint.clone());
         Ok(endpoint)
     }
+
+    /// Rebind the server endpoint with updated pinned client certificate.
+    /// Call after pairing completes to enforce mTLS on subsequent connections.
+    /// Re-binds on the SAME port the server currently uses (the peer
+    /// reconnects to the same address) and swaps the endpoint atomically — the
+    /// old endpoint's `accept()` returns None, which triggers the dispatch loop
+    /// to re-acquire the new endpoint and continue.
+    pub async fn rebind_server(port: u16) -> Result<(), KyberError> {
+        let pinned = PINNED_CLIENT_CERT
+            .get()
+            .and_then(|m| m.lock().ok())
+            .and_then(|h| h.clone());
+        if pinned.is_none() {
+            return Err(KyberError::NetworkError(
+                "No pinned client cert set — cannot rebind with mTLS".into(),
+            ));
+        }
+        // Preserve the currently-bound port so a rebind never moves the
+        // listener (clients reconnect to the same address).
+        let port = match get_server_endpoint() {
+            Some(ep) => ep.local_addr().map(|a| a.port()).unwrap_or(port),
+            None => port,
+        };
+        info!("Rebinding QUIC server on port {port} with mTLS enforcement");
+        let new_endpoint = Self::bind_server(port).await?;
+        // bind_server already stored the new endpoint via store_server_endpoint.
+        // The old endpoint (if any) was dropped by store_server_endpoint,
+        // causing the accept loop to see `accept() → None` and restart with
+        // the new endpoint.
+        drop(new_endpoint);
+        Ok(())
+    }
+
+
 
     pub async fn connect(
         server_addr: std::net::SocketAddr,
@@ -90,8 +242,8 @@ impl QuicAppManager {
                 .map_err(|e| KyberError::NetworkError(e.to_string()))?
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(network::PinnedCertVerifier::new(
-                    pinned_cert_hash,
-                    true,
+                    pinned_cert_hash.clone(),
+                    pinned_cert_hash.is_some(),
                 )))
                 .with_client_auth_cert(certs, key)
                 .map_err(|e| KyberError::NetworkError(format!("mTLS client config error: {e}")))?;
@@ -171,108 +323,5 @@ impl QuicAppManager {
         }
         Ok(QuicFrame { stream_type, body })
     }
-
-    pub async fn accept_loop(
-        endpoint: &Endpoint,
-        on_pairing: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
-        on_clipboard: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
-        on_media: impl Fn(Vec<u8>) -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
-        on_poll: impl Fn() -> BoxFuture<Vec<u8>> + Send + Sync + 'static,
-        on_unpair: impl Fn() -> BoxFuture<()> + Send + Sync + 'static,
-    ) -> Result<(), KyberError> {
-        let pairing_cb = Arc::new(on_pairing);
-        let clipboard_cb = Arc::new(on_clipboard);
-        let media_cb = Arc::new(on_media);
-        let poll_cb = Arc::new(on_poll);
-        let unpair_cb = Arc::new(on_unpair);
-        loop {
-            let incoming = endpoint.accept().await;
-            match incoming {
-                Some(connecting) => {
-                    let pairing_cb = pairing_cb.clone();
-                    let clipboard_cb = clipboard_cb.clone();
-                    let media_cb = media_cb.clone();
-                    let poll_cb = poll_cb.clone();
-                    let unpair_cb = unpair_cb.clone();
-                    tokio::spawn(async move {
-                        match connecting.await {
-                            Ok(connection) => {
-                                info!(
-                                    "QUIC connection established: {}",
-                                    connection.remote_address()
-                                );
-                                let pairing_cb = pairing_cb.clone();
-                                let clipboard_cb = clipboard_cb.clone();
-                                let media_cb = media_cb.clone();
-                                let poll_cb = poll_cb.clone();
-                                let unpair_cb = unpair_cb.clone();
-                                while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                                    let pairing_cb = pairing_cb.clone();
-                                    let clipboard_cb = clipboard_cb.clone();
-                                    let media_cb = media_cb.clone();
-                                    let poll_cb = poll_cb.clone();
-                                    let unpair_cb = unpair_cb.clone();
-                                    tokio::spawn(async move {
-                                        match Self::recv_frame(&mut recv).await {
-                                            Ok(frame) => {
-                                                let response = match frame.stream_type {
-                                                    STREAM_PAIRING => {
-                                                        let result = pairing_cb(frame.body).await;
-                                                        QuicFrame {
-                                                            stream_type: STREAM_PAIRING,
-                                                            body: result,
-                                                        }
-                                                    }
-                                                    STREAM_CLIPBOARD => {
-                                                        let result = clipboard_cb(frame.body).await;
-                                                        QuicFrame {
-                                                            stream_type: STREAM_CLIPBOARD,
-                                                            body: result,
-                                                        }
-                                                    }
-                                                    STREAM_MEDIA => {
-                                                        let result = media_cb(frame.body).await;
-                                                        QuicFrame {
-                                                            stream_type: STREAM_MEDIA,
-                                                            body: result,
-                                                        }
-                                                    }
-                                                    STREAM_POLL => {
-                                                        let result = poll_cb().await;
-                                                        QuicFrame {
-                                                            stream_type: STREAM_POLL,
-                                                            body: result,
-                                                        }
-                                                    }
-                                                    STREAM_UNPAIR => {
-                                                        unpair_cb().await;
-                                                        QuicFrame {
-                                                            stream_type: STREAM_UNPAIR,
-                                                            body: vec![],
-                                                        }
-                                                    }
-                                                    _ => QuicFrame {
-                                                        stream_type: 0xFF,
-                                                        body: b"Unknown stream type".to_vec(),
-                                                    },
-                                                };
-                                                let _ =
-                                                    Self::send_frame(&mut send, &response).await;
-                                            }
-                                            Err(e) => {
-                                                warn!("QUIC recv frame error: {e}")
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                            Err(e) => warn!("QUIC connection handshake failed: {e}"),
-                        }
-                    });
-                }
-                None => break,
-            }
-        }
-        Ok(())
-    }
 }
+

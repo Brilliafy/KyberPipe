@@ -16,7 +16,26 @@ fn read_copyq_clipboard() -> Result<String, String> {
     Err("CopyQ returned empty or non-success".to_string())
 }
 
+/// Maximum clipboard payload size: 10 MiB
+const MAX_CLIPBOARD_SIZE: usize = 10 * 1024 * 1024;
+
 fn write_copyq_clipboard(text: &str) -> Result<(), String> {
+    // Validate input: reject oversized or non-UTF-8 content
+    if text.len() > MAX_CLIPBOARD_SIZE {
+        return Err(format!(
+            "Clipboard payload too large: {} bytes (max {})",
+            text.len(),
+            MAX_CLIPBOARD_SIZE
+        ));
+    }
+    // Verify valid UTF-8 content
+    if text.is_empty() {
+        return Err("Clipboard payload is empty".to_string());
+    }
+    if text.chars().any(|c| c == '\0') {
+        return Err("Clipboard payload contains null bytes".to_string());
+    }
+
     let mut child = std::process::Command::new("copyq")
         .args(["add", "-"])
         .stdin(std::process::Stdio::piped())
@@ -28,14 +47,12 @@ fn write_copyq_clipboard(text: &str) -> Result<(), String> {
         stdin
             .write_all(text.as_bytes())
             .map_err(|e| format!("Failed to write to copyq stdin: {e}"))?;
+        // Drop stdin to signal EOF to copyq
+        drop(stdin);
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for copyq: {e}"))?;
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(5))
+        .ok_or_else(|| "CopyQ timed out".to_string())?;
     if status.success() {
-        let _ = std::process::Command::new("copyq")
-            .args(["select", "0"])
-            .status();
         Ok(())
     } else {
         Err("CopyQ returned non-success".to_string())
@@ -47,11 +64,11 @@ pub fn sync_clipboard(
     text: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<bool, String> {
-    if state.dedup.is_suppressed(&text) {
+    if state.is_suppressed_duplicate(&text) {
         state.add_log("[Clipboard] Suppressed duplicate or loop-back clipboard sync".to_string());
         return Ok(false);
     }
-    state.dedup.record_text(&text);
+    state.record_clipboard_text(&text);
     crate::portal::sync_clipboard_text(&text)?;
     state.add_log(format!(
         "[Clipboard] Synced: \"{}\"",
@@ -60,25 +77,48 @@ pub fn sync_clipboard(
     Ok(true)
 }
 
+/// Whether an interactive display session is available. arboard's platform
+/// backends block indefinitely trying to reach a Wayland/X11 compositor when
+/// none exists (headless CI, ssh, tty) — which would hang the QUIC poll loop.
+fn has_display_session() -> bool {
+    std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("DISPLAY").is_ok()
+}
+
+/// Run `f` in a thread with a hard timeout, returning None on timeout. The
+/// underlying thread is detached (and dies with the process); this guarantees a
+/// blocking clipboard backend can never wedge the caller.
+pub(crate) fn with_timeout<T: Send + 'static>(
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("clipboard-read".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok()
+}
+
 #[tauri::command]
 pub fn read_real_clipboard() -> Result<String, String> {
-    match arboard::Clipboard::new() {
-        Ok(mut clipboard) => match clipboard.get_text() {
-            Ok(text) => Ok(text),
-            Err(e) => {
-                if let Ok(text) = read_copyq_clipboard() {
-                    return Ok(text);
-                }
-                Err(format!("Failed to read clipboard natively: {e}"))
-            }
-        },
-        Err(e) => {
-            if let Ok(text) = read_copyq_clipboard() {
+    if has_display_session() {
+        // Bounded native read: never let a wedged compositor connection block
+        // the poll handler.
+        if let Some(Ok(text)) = with_timeout(std::time::Duration::from_secs(3), || {
+            arboard::Clipboard::new().and_then(|mut c| c.get_text())
+        }) {
+            if !text.is_empty() {
                 return Ok(text);
             }
-            Err(format!("Failed to open native clipboard: {e}"))
         }
     }
+    // Fallbacks (bounded subprocesses).
+    if let Ok(text) = read_copyq_clipboard() {
+        return Ok(text);
+    }
+    read_clipboard_fallback()
 }
 
 #[tauri::command]
@@ -109,41 +149,66 @@ pub fn write_real_clipboard(text: String) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn read_clipboard_fallback() -> Result<String, String> {
-    if let Ok(output) = std::process::Command::new("wl-paste").arg("-n").output() {
-        if output.status.success() {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                if !text.is_empty() {
-                    return Ok(text);
-                }
-            }
-        }
-    }
-    if let Ok(output) = std::process::Command::new("xclip")
-        .args(["-selection", "clipboard", "-o"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                if !text.is_empty() {
-                    return Ok(text);
-                }
-            }
-        }
-    }
-    if let Ok(output) = std::process::Command::new("xsel")
-        .args(["-o", "-b"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                if !text.is_empty() {
-                    return Ok(text);
-                }
+    // Run each helper with a hard timeout — `wl-paste`/`xclip`/`xsel` block
+    // forever on a headless session and would otherwise hang the poll handler.
+    let run = |args: Vec<String>| -> Option<String> {
+        with_timeout(std::time::Duration::from_secs(3), move || {
+            std::process::Command::new(&args[0])
+                .args(&args[1..])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout).ok()
+                    } else {
+                        None
+                    }
+                })
+        })
+        .flatten()
+    };
+    for candidate in [
+        vec!["wl-paste".to_string(), "-n".to_string()],
+        vec![
+            "xclip".to_string(),
+            "-selection".to_string(),
+            "clipboard".to_string(),
+            "-o".to_string(),
+        ],
+        vec!["xsel".to_string(), "-o".to_string(), "-b".to_string()],
+    ] {
+        if let Some(text) = run(candidate) {
+            if !text.trim().is_empty() {
+                return Ok(text);
             }
         }
     }
     read_copyq_clipboard()
+}
+
+/// Wait for a clipboard helper subprocess with a hard timeout. `wl-copy`,
+/// `xclip`, `xsel` and `copyq` can block forever on a headless/foreign
+/// session (e.g. trying to connect to a Wayland compositor that is not there),
+/// which would otherwise hang the QUIC poll/clipboard handlers indefinitely.
+/// On timeout the child is killed and treated as a failure.
+fn wait_with_timeout(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
@@ -158,10 +223,12 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if let Ok(status) = child.wait() {
+            if let Some(status) = wait_with_timeout(&mut child, std::time::Duration::from_secs(5)) {
                 if status.success() {
                     return Ok(());
                 }
+            } else {
+                last_err = Some("wl-copy timed out (no display session)".to_string());
             }
         }
         Err(e) => last_err = Some(e.to_string()),
@@ -177,10 +244,12 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if let Ok(status) = child.wait() {
+            if let Some(status) = wait_with_timeout(&mut child, std::time::Duration::from_secs(5)) {
                 if status.success() {
                     return Ok(());
                 }
+            } else {
+                last_err = Some("xclip timed out (no display session)".to_string());
             }
         }
         Err(e) => last_err = Some(e.to_string()),
@@ -196,10 +265,12 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if let Ok(status) = child.wait() {
+            if let Some(status) = wait_with_timeout(&mut child, std::time::Duration::from_secs(5)) {
                 if status.success() {
                     return Ok(());
                 }
+            } else {
+                last_err = Some("xsel timed out (no display session)".to_string());
             }
         }
         Err(e) => last_err = Some(e.to_string()),
@@ -211,21 +282,5 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
 }
 
 pub fn read_real_clipboard_internal() -> Result<String, String> {
-    match arboard::Clipboard::new() {
-        Ok(mut clipboard) => match clipboard.get_text() {
-            Ok(text) => Ok(text),
-            Err(_) => {
-                if let Ok(text) = read_copyq_clipboard() {
-                    return Ok(text);
-                }
-                read_clipboard_fallback()
-            }
-        },
-        Err(_) => {
-            if let Ok(text) = read_copyq_clipboard() {
-                return Ok(text);
-            }
-            read_clipboard_fallback()
-        }
-    }
+    read_real_clipboard()
 }

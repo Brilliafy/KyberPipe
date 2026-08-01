@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
@@ -103,7 +104,7 @@ class WifiDirectManager(private val context: Context) {
             addAction(WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             context.registerReceiver(receiver, filter)
         }
@@ -181,23 +182,29 @@ class WifiDirectManager(private val context: Context) {
             return ""
         }
         val linkProps = connectivityManager.getLinkProperties(connectivityManager.activeNetwork) ?: return ""
-        // Find the IPv4 address specifically on the p2p or wifi interface
-        for (addr in linkProps.linkAddresses) {
-            val inetAddr = addr.address
-            if (inetAddr is java.net.Inet4Address) {
-                val ipStr = inetAddr.hostAddress ?: continue
-                // Return the first valid private IPv4 address (p2p or wifi subnet)
-                if (ipStr.startsWith("192.168.") || ipStr.startsWith("10.")) {
-                    return ipStr
+        val linkAddresses = linkProps.linkAddresses
+        if (linkAddresses is List<*>) {
+            for (item in linkAddresses) {
+                val addr = item as? android.net.LinkAddress ?: continue
+                val inetAddr = addr.address
+                if (inetAddr is java.net.Inet4Address) {
+                    val ipStr = inetAddr.hostAddress ?: continue
+                    // Return the first valid private IPv4 address (p2p or wifi subnet)
+                    if (ipStr.startsWith("192.168.") || ipStr.startsWith("10.")) {
+                        return ipStr
+                    }
                 }
             }
         }
         // Fallback: try to find a route on p2p interface
-        for (route in linkProps.routes) {
-            val inetAddr = route.destination?.address ?: continue
-            if (inetAddr is java.net.Inet4Address && inetAddr.hostAddress?.startsWith("192.168.") == true) {
-                // The gateway IP (destination) may give us the subnet hint
-                return inetAddr.hostAddress ?: ""
+        val routes = linkProps.routes
+        if (routes is List<*>) {
+            for (route in routes) {
+                val r = route as? android.net.RouteInfo ?: continue
+                val inetAddr = r.destination?.address ?: continue
+                if (inetAddr is java.net.Inet4Address && inetAddr.hostAddress?.startsWith("192.168.") == true) {
+                    return inetAddr.hostAddress ?: ""
+                }
             }
         }
         return ""

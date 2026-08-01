@@ -2,30 +2,52 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq, uniffi::Error)]
 pub enum KyberError {
-    #[error("Crypto error: {0}")]
+    #[error("[CRYPTO_ERROR] {0}")]
     CryptoError(String),
 
-    #[error("Key generation failed: {0}")]
+    #[error("[KEY_GEN_FAILED] {0}")]
     KeyGenerationFailed(String),
 
-    #[error("Encapsulation failed: {0}")]
+    #[error("[ENCAPSULATION_FAILED] {0}")]
     EncapsulationFailed(String),
 
-    #[error("Decapsulation failed: {0}")]
+    #[error("[DECAPSULATION_FAILED] {0}")]
     DecapsulationFailed(String),
 
-    #[error("Encryption failed: {0}")]
+    #[error("[ENCRYPTION_FAILED] {0}")]
     EncryptionFailed(String),
 
-    #[error("Decryption failed: {0}")]
+    #[error("[DECRYPTION_FAILED] {0}")]
     DecryptionFailed(String),
 
-    #[error("Serialization error: {0}")]
+    #[error("[SERIALIZATION_ERROR] {0}")]
     SerializationError(String),
 
-    #[error("Network error: {0}")]
+    #[error("[NETWORK_ERROR] {0}")]
     NetworkError(String),
 
-    #[error("Invalid key length: expected {expected}, got {got}")]
+    #[error("[SESSION_DESYNC] {0}")]
+    SessionDesynchronized(String),
+
+    #[error("[INVALID_KEY_LENGTH] expected {expected}, got {got}")]
     InvalidKeyLength { expected: u64, got: u64 },
+}
+
+impl KyberError {
+    /// Machine-readable error code for UI-level error categorization.
+    /// Use this instead of string-matching on error messages.
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            KyberError::CryptoError(_) => "CRYPTO_ERROR",
+            KyberError::KeyGenerationFailed(_) => "KEY_GEN_FAILED",
+            KyberError::EncapsulationFailed(_) => "ENCAPSULATION_FAILED",
+            KyberError::DecapsulationFailed(_) => "DECAPSULATION_FAILED",
+            KyberError::EncryptionFailed(_) => "ENCRYPTION_FAILED",
+            KyberError::DecryptionFailed(_) => "DECRYPTION_FAILED",
+            KyberError::SerializationError(_) => "SERIALIZATION_ERROR",
+            KyberError::NetworkError(_) => "NETWORK_ERROR",
+            KyberError::SessionDesynchronized(_) => "SESSION_DESYNC",
+            KyberError::InvalidKeyLength { .. } => "INVALID_KEY_LENGTH",
+        }
+    }
 }

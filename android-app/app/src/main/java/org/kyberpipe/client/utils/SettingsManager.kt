@@ -2,9 +2,90 @@ package org.kyberpipe.client.utils
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 
+/**
+ * Split settings storage: security-critical values use EncryptedSharedPreferences
+ * (Android Keystore-backed AES-256-GCM), while non-sensitive UI prefs use plain storage.
+ */
 class SettingsManager(context: Context) {
+    // Encrypted prefs for security-critical data (session key, paired state)
+    private val securePrefs: SharedPreferences = run {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context,
+            "kyberpipe_secure_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    // Plain prefs for non-sensitive UI settings
     private val prefs: SharedPreferences = context.getSharedPreferences("kyberpipe_prefs", Context.MODE_PRIVATE)
+
+    // ── Security-critical settings (encrypted) ──
+
+    var sessionKey: String
+        get() = securePrefs.getString("session_key", "") ?: ""
+        set(value) = securePrefs.edit().putString("session_key", value).apply()
+
+    var isPaired: Boolean
+        get() = securePrefs.getBoolean("is_paired", false)
+        set(value) = securePrefs.edit().putBoolean("is_paired", value).apply()
+
+    var pairedHostIp: String
+        get() = securePrefs.getString("paired_host_ip", "") ?: ""
+        set(value) = securePrefs.edit().putString("paired_host_ip", value).apply()
+    var peerRatchetIdentity: String
+        get() = securePrefs.getString("peer_ratchet_identity", "") ?: ""
+        set(value) = securePrefs.edit().putString("peer_ratchet_identity", value).apply()
+
+    /// Server TLS certificate pin (64-char hex SHA-256). Stored ONLY after the
+    /// user confirms the SAS out-of-band — never on first connect (TOFU MitM
+    /// hazard).
+    var serverCertPin: String
+        get() = securePrefs.getString("server_cert_pin", "") ?: ""
+        set(value) = securePrefs.edit().putString("server_cert_pin", value).apply()
+
+    /// Base64-encoded encrypted ratchet snapshot for persistence across restarts
+    /// (exported via ratchetExportSession and wrapped by the app).
+    var ratchetSnapshot: String
+        get() = securePrefs.getString("ratchet_snapshot", "") ?: ""
+        set(value) = securePrefs.edit().putString("ratchet_snapshot", value).apply()
+
+    /// Per-install client identity certificate (DER, base64) generated at
+    /// pairing time. Presented on every post-pairing QUIC connection so the
+    /// desktop authorizes this device by certificate hash — never by IP
+    /// (audit finding #8).
+    var clientIdentityCert: String
+        get() = securePrefs.getString("client_identity_cert", "") ?: ""
+        set(value) = securePrefs.edit().putString("client_identity_cert", value).apply()
+
+    /// Per-install client identity private key (DER PKCS#8, base64). Stored in
+    /// EncryptedSharedPreferences (Android Keystore-backed AES-256-GCM).
+    var clientIdentityKey: String
+        get() = securePrefs.getString("client_identity_key", "") ?: ""
+        set(value) = securePrefs.edit().putString("client_identity_key", value).apply()
+
+    /// SHA-256 (hex) fingerprint of the client identity certificate — the
+    /// value echoed to the desktop during pairing so it pins OUR identity.
+    var clientIdentityCertHash: String
+        get() = securePrefs.getString("client_identity_cert_hash", "") ?: ""
+        set(value) = securePrefs.edit().putString("client_identity_cert_hash", value).apply()
+
+    /// The QR pairing nonce issued by the desktop for THIS pairing attempt.
+    /// Echoed in the pairing payload so the server can reject blind races from
+    /// arbitrary LAN peers (audit finding #20).
+    var pendingPairingNonce: String
+        get() = securePrefs.getString("pending_pairing_nonce", "") ?: ""
+        set(value) = securePrefs.edit().putString("pending_pairing_nonce", value).apply()
+
+
+    // ── Non-sensitive UI settings (plain) ──
 
     var deviceName: String
         get() = prefs.getString("device_name", "Android Companion") ?: "Android Companion"
@@ -22,10 +103,6 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("paired_device_picture", "") ?: ""
         set(value) = prefs.edit().putString("paired_device_picture", value).apply()
 
-    var pairedHostIp: String
-        get() = prefs.getString("paired_host_ip", "") ?: ""
-        set(value) = prefs.edit().putString("paired_host_ip", value).apply()
-
     var ddnsHostname: String
         get() = prefs.getString("ddns_hostname", "") ?: ""
         set(value) = prefs.edit().putString("ddns_hostname", value).apply()
@@ -37,10 +114,6 @@ class SettingsManager(context: Context) {
     var enableDdns: Boolean
         get() = prefs.getBoolean("enable_ddns", false)
         set(value) = prefs.edit().putBoolean("enable_ddns", value).apply()
-
-    var isPaired: Boolean
-        get() = prefs.getBoolean("is_paired", false)
-        set(value) = prefs.edit().putBoolean("is_paired", value).apply()
 
     var fileAccessGrantedPhone: Boolean
         get() = prefs.getBoolean("file_access_granted_phone", false)
@@ -58,14 +131,14 @@ class SettingsManager(context: Context) {
         get() {
             if (!prefs.contains("amoled_mode")) {
                 val manufacturer = android.os.Build.MANUFACTURER.lowercase()
-                val isOled = manufacturer.contains("samsung") || 
-                             manufacturer.contains("google") || 
-                             manufacturer.contains("oneplus") || 
-                             manufacturer.contains("xiaomi") || 
-                             manufacturer.contains("oppo") || 
-                             manufacturer.contains("vivo") || 
-                             manufacturer.contains("sony") || 
-                             manufacturer.contains("huawei") || 
+                val isOled = manufacturer.contains("samsung") ||
+                             manufacturer.contains("google") ||
+                             manufacturer.contains("oneplus") ||
+                             manufacturer.contains("xiaomi") ||
+                             manufacturer.contains("oppo") ||
+                             manufacturer.contains("vivo") ||
+                             manufacturer.contains("sony") ||
+                             manufacturer.contains("huawei") ||
                              manufacturer.contains("motorola") ||
                              manufacturer.contains("nothing") ||
                              manufacturer.contains("asus")
@@ -87,8 +160,4 @@ class SettingsManager(context: Context) {
     var notificationPermissionShown: Boolean
         get() = prefs.getBoolean("notification_permission_shown", false)
         set(value) = prefs.edit().putBoolean("notification_permission_shown", value).apply()
-
-    var sessionKey: String
-        get() = prefs.getString("session_key", "") ?: ""
-        set(value) = prefs.edit().putString("session_key", value).apply()
 }

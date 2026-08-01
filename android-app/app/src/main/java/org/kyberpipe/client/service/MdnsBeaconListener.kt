@@ -30,6 +30,7 @@ class MdnsBeaconListener(private val scope: CoroutineScope) {
         listenJob = scope.launch(Dispatchers.IO) {
             try {
                 val socket = DatagramSocket(beaconPort)
+                socket.reuseAddress = true
                 socket.broadcast = true
                 socket.soTimeout = 3000
                 Log.d(tag, "Beacon listener started on port $beaconPort")
@@ -45,6 +46,15 @@ class MdnsBeaconListener(private val scope: CoroutineScope) {
                             val parts = payload.split(":", limit = 4)
                             if (parts.size >= 3) {
                                 val declIp = parts[1]
+                                // Validate beacon timestamp (anti-replay)
+                                if (parts.size >= 3) {
+                                    val beaconTs = parts[2].toLongOrNull() ?: 0L
+                                    val now = System.currentTimeMillis() / 1000
+                                    if (kotlin.math.abs(now - beaconTs) > 60) {
+                                        Log.w(tag, "Stale beacon rejected (age=${now - beaconTs}s)")
+                                        continue
+                                    }
+                                }
                                 val srcIp = packet.address.hostAddress ?: ""
                                 // Validate beacon source IP matches declared IP — prevents
                                 // trivial IP spoofing where an attacker claims a different host.
