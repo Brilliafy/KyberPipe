@@ -1,15 +1,22 @@
 pub mod automation;
+mod bip39_words;
 pub mod clipboard;
 pub mod crypto;
+pub mod info;
 pub mod network;
+pub mod network_tauri;
 pub mod notifications;
 pub mod pairing;
-pub mod system;
+pub mod security;
+pub mod settings;
 
 pub use automation::*;
 pub use clipboard::*;
 pub use crypto::*;
+pub use info::*;
 pub use network::*;
+pub use network_tauri::*;
 pub use notifications::*;
 pub use pairing::*;
-pub use system::*;
+pub use security::*;
+pub use settings::*;

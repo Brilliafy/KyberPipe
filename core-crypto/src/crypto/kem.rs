@@ -44,6 +44,14 @@ pub fn encapsulate_hybrid(
     let ephem_x25519_pk = X25519PublicKey::from(&ephem_x25519_sk);
     let peer_x25519_pk = X25519PublicKey::from(*peer_x25519_pk_bytes);
     let x25519_ss = ephem_x25519_sk.diffie_hellman(&peer_x25519_pk);
+    // Contributory behavior check: a low-order X25519 point produces an
+    // all-zero shared secret. Reject it so the peer cannot force a known
+    // (non-random) DH component into the hybrid secret.
+    if x25519_ss.as_bytes().iter().all(|&b| b == 0) {
+        return Err(KyberError::EncapsulationFailed(
+            "Peer X25519 public key is a low-order point — shared secret is all zero".into(),
+        ));
+    }
     let peer_mlkem_pk = kyber768::PublicKey::from_bytes(peer_mlkem_pk_bytes).map_err(|_| {
         KyberError::EncapsulationFailed("Invalid ML-KEM-768 public key bytes".into())
     })?;
@@ -79,6 +87,13 @@ pub fn decapsulate_hybrid(
     let ephem_x25519_pk = X25519PublicKey::from(ephem_x25519_arr);
     let my_x25519_sk = X25519StaticSecret::from(*my_x25519_sk_bytes);
     let x25519_ss = my_x25519_sk.diffie_hellman(&ephem_x25519_pk);
+    // Contributory behavior check — reject all-zero shared secrets from
+    // low-order ephemeral points.
+    if x25519_ss.as_bytes().iter().all(|&b| b == 0) {
+        return Err(KyberError::DecapsulationFailed(
+            "Ephemeral X25519 public key is a low-order point — shared secret is all zero".into(),
+        ));
+    }
     let mlkem_ct = kyber768::Ciphertext::from_bytes(mlkem_ct_bytes).map_err(|_| {
         KyberError::DecapsulationFailed("Invalid ML-KEM-768 ciphertext bytes".into())
     })?;

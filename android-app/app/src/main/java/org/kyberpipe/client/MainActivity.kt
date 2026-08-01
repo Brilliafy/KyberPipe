@@ -1,52 +1,22 @@
 package org.kyberpipe.client
 
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.togetherWith
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.EaseInOutQuart
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
-import org.json.JSONObject
 import org.kyberpipe.client.components.*
+import org.kyberpipe.client.crash.CrashLogger
+import org.kyberpipe.client.deeplink.DeepLinkHandler
 import org.kyberpipe.client.service.PipeService
-import org.kyberpipe.client.service.WifiDirectManager
-import org.kyberpipe.client.service.MdnsBeaconListener
-import org.kyberpipe.client.service.BeaconHost
 import org.kyberpipe.client.utils.PermissionHelper
+import org.kyberpipe.client.utils.SessionKeyManager
 import org.kyberpipe.client.utils.SettingsManager
-import org.kyberpipe.client.utils.bindToWifiNetwork
-import org.kyberpipe.client.utils.bindToWifiNetwork
-import org.kyberpipe.client.utils.onFirewallDropDetected
-import uniffi.core_crypto.*
-import java.io.ByteArrayInputStream
-import java.util.zip.InflaterInputStream
+import org.kyberpipe.client.utils.UriUtils
 
 class MainActivity : ComponentActivity() {
 
@@ -59,7 +29,7 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
-            val base64 = convertUriToBase64(it)
+            val base64 = UriUtils.toBase64(contentResolver, it)
             settingsManager.devicePicture = base64
         }
     }
@@ -68,15 +38,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         settingsManager = SettingsManager(this)
 
-        // Zero-Trust Local Crash Logger setup
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            saveCrashLog(throwable)
-            android.os.Process.killProcess(android.os.Process.myPid())
-            System.exit(10)
-        }
+        CrashLogger.install(this)
+
+        // Restore persisted crypto state across process restarts so a kill does
+        // not force a full re-pair (ratchet snapshot + session-key handle).
+        restorePersistedCryptoState()
 
         // Handle initial intent
-        handleIntent(intent)
+        val result = DeepLinkHandler.parse(intent)
+        if (result.valid && result.data != null) {
+            deepLinkData.value = result.data
+        }
 
         setContent {
             var themeMode by remember { mutableStateOf(settingsManager.themeMode) }
@@ -101,38 +73,40 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleIntent(intent)
-    }
-
-    private fun handleIntent(intent: Intent?) {
-        val uri = intent?.data ?: return
-        val scheme = uri.scheme ?: ""
-        val host = uri.host ?: ""
-
-        // Validate URI origin — prevent malicious apps from injecting
-        // spoofed pairing data via arbitrary intents.
-        val validOrigin = when (scheme) {
-            "kyberpipe" -> host == "pair"
-            "https" -> host == "brilliafy.github.io" && uri.path?.startsWith("/kyberpipe/pair") == true
-            else -> false
-        }
-        if (!validOrigin) {
-            Log.w("KyberpipeIntent", "Rejected deep link from untrusted origin: $scheme://$host${uri.path}")
-            return
-        }
-
-        val dataParam = uri.getQueryParameter("data")
-        if (dataParam != null && dataParam.isNotEmpty()) {
-            deepLinkData.value = dataParam
-        } else {
-            deepLinkData.value = uri.toString()
+        val result = DeepLinkHandler.parse(intent)
+        if (result.valid && result.data != null) {
+            deepLinkData.value = result.data
         }
     }
 
-    fun getLatestCrashLog(): String? {
-        val file = java.io.File(filesDir, "crash_log.txt")
-        return if (file.exists()) file.readText() else null
+    /**
+     * Restore the ratchet session (from the persisted snapshot) and the session
+     * key handle after a process restart.
+     */
+    private fun restorePersistedCryptoState() {
+        val peer = settingsManager.peerRatchetIdentity
+        if (peer.isNotEmpty()) {
+            val snapshot = settingsManager.ratchetSnapshot
+            if (snapshot.isNotEmpty()) {
+                try {
+                    val bytes = android.util.Base64.decode(snapshot, android.util.Base64.NO_WRAP)
+                    uniffi.core_crypto.ratchetImportSession(peer, bytes)
+                } catch (e: Exception) {
+                    android.util.Log.w("KyberpipeRestore", "Ratchet restore failed: ${e.message}")
+                }
+            }
+        }
+        val sessionKey = settingsManager.sessionKey
+        if (sessionKey.isNotEmpty()) {
+            try {
+                SessionKeyManager.initFromHex(sessionKey)
+            } catch (e: Exception) {
+                android.util.Log.w("KyberpipeRestore", "Session key restore failed: ${e.message}")
+            }
+        }
     }
+
+    fun getLatestCrashLog(): String? = CrashLogger.getLatestCrashLog(this)
 
     fun shareTextFile(filename: String, content: String) {
         try {
@@ -147,55 +121,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveCrashLog(throwable: Throwable) {
-        try {
-            val sw = java.io.StringWriter()
-            val pw = java.io.PrintWriter(sw)
-            throwable.printStackTrace(pw)
-            val fullTrace = sw.toString()
-            
-            // Anonymize device identifiers or sensitive values
-            val anonymized = anonymizeAndroidCrashLog(fullTrace)
-            
-            val file = java.io.File(filesDir, "crash_log.txt")
-            file.writeText(anonymized)
-        } catch (e: Exception) {
-            Log.e("KyberPipe", "Failed to write crash log", e)
-        }
-    }
-
-    private fun anonymizeAndroidCrashLog(rawTrace: String): String {
-        var scrubbed = rawTrace
-        // Scrub phone numbers (10+ digits)
-        scrubbed = scrubbed.replace(Regex("\\+?[0-9]{10,}"), "[MASKED_PHONE_NUMBER]")
-        // Scrub email addresses
-        scrubbed = scrubbed.replace(Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"), "[MASKED_EMAIL]")
-        // Scrub IP addresses
-        scrubbed = scrubbed.replace(Regex("\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b"), "[MASKED_IP]")
-        // Scrub Android device serials/identifying fingerprints if any leak
-        scrubbed = scrubbed.replace(Build.FINGERPRINT, "[MASKED_FINGERPRINT]")
-        scrubbed = scrubbed.replace(Build.MODEL, "[MASKED_MODEL]")
-        scrubbed = scrubbed.replace(Build.DEVICE, "[MASKED_DEVICE]")
-        scrubbed = scrubbed.replace(Build.MANUFACTURER, "[MASKED_MANUFACTURER]")
-        return scrubbed
-    }
-
     private fun requestInitialPermissions() {
         if (!PermissionHelper.isNotificationListenerEnabled(this)) {
             PermissionHelper.requestNotificationListenerPermission(this)
-        }
-    }
-
-    private fun convertUriToBase64(uri: Uri): String {
-        return try {
-            val inputStream = contentResolver.openInputStream(uri)
-            val bytes = inputStream?.readBytes()
-            inputStream?.close()
-            if (bytes != null) {
-                "data:image/jpeg;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            } else ""
-        } catch (e: Exception) {
-            ""
         }
     }
 
@@ -219,770 +147,4 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable
-fun KyberpipeTheme(
-    themeMode: String,
-    amoledMode: Boolean,
-    content: @Composable () -> Unit
-) {
-    val isSystemDark = androidx.compose.foundation.isSystemInDarkTheme()
-    val isDark = when (themeMode) {
-        "light" -> false
-        "dark" -> true
-        else -> isSystemDark
-    }
 
-    val colors = if (isDark) {
-        darkColorScheme(
-            primary = Color(0xFF06B6D4),
-            secondary = Color(0xFF6366F1),
-            background = if (amoledMode) Color(0xFF000000) else Color(0xFF0B0D17),
-            surface = if (amoledMode) Color(0xFF050505) else Color(0xFF161B2E),
-            onPrimary = Color.White,
-            onBackground = Color(0xFFF1F5F9)
-        )
-    } else {
-        lightColorScheme(
-            primary = Color(0xFF06B6D4),
-            secondary = Color(0xFF6366F1),
-            background = Color(0xFFF1F5F9),
-            surface = Color.White,
-            onPrimary = Color.White,
-            onBackground = Color(0xFF0F172A)
-        )
-    }
-
-    MaterialTheme(colorScheme = colors, content = content)
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MainScreen(
-    settings: SettingsManager,
-    initialPairingConfig: String?,
-    onClearInitialPairingConfig: () -> Unit,
-    onAvatarPickerClick: () -> Unit,
-    onStartService: () -> Unit,
-    onStopService: () -> Unit,
-    onThemeChanged: (String, Boolean) -> Unit
-) {
-    var currentTab by remember { mutableStateOf(TabItem.HOME) }
-    var keyPair by remember { mutableStateOf<PqKeyPair?>(null) }
-    var ambientLux by remember { mutableStateOf(250.0f) }
-
-    // Zero-Trust Local Logging state
-    val localLogs = remember { mutableStateListOf("[Engine] Local companion active") }
-    val addLog = { msg: String ->
-        localLogs.add(msg)
-        if (localLogs.size > 100) {
-            localLogs.removeAt(0)
-        }
-    }
-
-    // Connectivity State Machine
-    var connectionStatus by remember { mutableStateOf("DISCONNECTED") }
-    var connectionMethod by remember { mutableStateOf("None") }
-    var connectionColor by remember { mutableStateOf(Color.Red) }
-    var attemptCount by remember { mutableStateOf(0) }
-    val maxAttempts = 5
-    var clipboardSyncJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-
-    // Toggles
-    var wifiDirectActive by remember { mutableStateOf(true) }
-    var lanActive by remember { mutableStateOf(false) }
-    var wireguardActive by remember { mutableStateOf(true) }
-    var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
-    var pairingConfigInput by remember { mutableStateOf("") }
-    var sasCodeDisplay by remember { mutableStateOf("") }
-    var sessionKey by remember { mutableStateOf("") }
-    var kemCiphertext by remember { mutableStateOf("") }
-    var p2pIp by remember { mutableStateOf("") }
-
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val activity = context as MainActivity
-
-    val notifStore = remember { org.kyberpipe.client.utils.NotificationStore(context) }
-
-    // Clipboard and Notification feeds (Real data synced)
-    val clipboardList = remember { mutableStateListOf<AndroidClipboardRecord>() }
-    val notificationsList = remember { 
-        mutableStateListOf<AndroidNotificationRecord>().apply {
-            addAll(notifStore.loadNotifications())
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        bindToWifiNetwork(connectivityManager)
-        onFirewallDropDetected = {
-            addLog("[Network] Firewall drop detected — desktop firewall blocking port 9876")
-            connectionStatus = "DISCONNECTED (Firewall blocked)"
-            connectionMethod = "None"
-            connectionColor = Color.Yellow
-        }
-        notifStore.purgeOldRecords(settings.purgeDays, notificationsList)
-    }
-
-    // Auto-sync notifications every 30 seconds
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(30000)
-            val stored = notifStore.loadNotifications()
-            val changed = notifStore.mergeSync(notificationsList, stored)
-            if (changed) {
-                addLog("[Sync] Notifications auto-synced with local store")
-            }
-        }
-    }
-
-    // Wi-Fi Direct P2P Manager
-    val p2pManager = remember { WifiDirectManager(context) }
-    DisposableEffect(Unit) {
-        p2pManager.initialize(
-            onState = { state ->
-                p2pIp = state.groupOwnerIp
-                if (state.isConnected && state.groupOwnerIp.isNotEmpty()) {
-                    wifiDirectActive = true
-                    addLog("[P2P] Wi-Fi Direct connected via ${state.groupOwnerIp}")
-                }
-            },
-            onPeers = { macs ->
-                addLog("[P2P] Discovered ${macs.size} peers")
-            }
-        )
-        onDispose { p2pManager.destroy() }
-    }
-
-    // mDNS/LAN Beacon Listener
-    val beaconListener = remember { MdnsBeaconListener(coroutineScope) }
-    LaunchedEffect(Unit) {
-        beaconListener.start { host: BeaconHost ->
-            addLog("[mDNS] Discovered ${host.deviceName} @ ${host.localIp}")
-            if (pairingConfigInput.isEmpty() && host.localIp.isNotEmpty()) {
-                settings.pairedHostIp = host.localIp
-                p2pManager.findAndConnect(host.hostPkHex)
-            }
-        }
-    }
-    DisposableEffect(Unit) {
-        onDispose { beaconListener.stop() }
-    }
-
-    // When pairing config changes, try Wi-Fi Direct connection if MAC is present
-    LaunchedEffect(pairingConfigInput) {
-        if (pairingConfigInput.isNotEmpty() && pairingConfigInput.startsWith("{")) {
-            try {
-                val json = JSONObject(pairingConfigInput)
-                val wifiDirectMac = json.optString("wifi_direct_mac", "")
-                if (wifiDirectMac.isNotEmpty()) {
-                    addLog("[P2P] Attempting Wi-Fi Direct connection to $wifiDirectMac")
-                    p2pManager.findAndConnect(wifiDirectMac)
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    // Load initial deep link config
-    LaunchedEffect(initialPairingConfig) {
-        if (initialPairingConfig != null && initialPairingConfig.isNotEmpty()) {
-            pairingConfigInput = initialPairingConfig
-            currentTab = TabItem.SETTINGS
-            onClearInitialPairingConfig()
-            Toast.makeText(context, "Pairing config loaded from deep link!", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // Hook notification listeners
-    DisposableEffect(Unit) {
-        val receiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                if (intent?.action == "org.kyberpipe.client.NOTIFICATION_INTERCEPTED") {
-                    val title = intent.getStringExtra("title") ?: ""
-                    val text = intent.getStringExtra("text") ?: ""
-                    val pkg = intent.getStringExtra("packageName") ?: ""
-                    val ts = intent.getLongExtra("timestamp", System.currentTimeMillis())
-                    
-                    val newRecord = AndroidNotificationRecord(
-                        id = "notif_${ts}_${pkg.hashCode()}",
-                        title = title,
-                        text = text,
-                        appPackage = pkg,
-                        timestamp = ts,
-                        type = "local"
-                    )
-                    notificationsList.add(0, newRecord)
-                    notifStore.saveNotifications(notificationsList)
-                    addLog("[Notification] Intercepted from $pkg: $title")
-                }
-            }
-        }
-        val filter = android.content.IntentFilter("org.kyberpipe.client.NOTIFICATION_INTERCEPTED")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(receiver, filter)
-        }
-        onDispose {
-            context.unregisterReceiver(receiver)
-        }
-    }
-
-    // Load keys & setup listeners
-    LaunchedEffect(Unit) {
-        try {
-            keyPair = generatePqKeypair()
-            addLog("[PQC] Loaded cryptographic provider successfully")
-        } catch (e: Exception) {
-            e.printStackTrace()
-            addLog("[PQC] Failed to load keypair: ${e.message}")
-        }
-
-        // Hook real Android Clipboard
-        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboardManager.addPrimaryClipChangedListener {
-            val clipData = clipboardManager.primaryClip
-            if (clipData != null && clipData.itemCount > 0) {
-                val text = clipData.getItemAt(0).text?.toString() ?: ""
-                if (text.isNotEmpty()) {
-                    val exists = clipboardList.any { it.text == text }
-                    if (!exists) {
-                        clipboardList.add(
-                            0,
-                            AndroidClipboardRecord(
-                                id = "clip_${System.currentTimeMillis()}",
-                                text = text,
-                                source = "local",
-                                timestamp = System.currentTimeMillis()
-                            )
-                        )
-                        addLog("[Clipboard] Intercepted new primary clip (${text.length} chars)")
-
-                                if (settings.isPaired) {
-                            val hostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
-                            if (hostIp.isNotEmpty() && sessionKey.isNotEmpty()) {
-                                val encrypted = encryptPayloadWithKey(sessionKey, text)
-                                val jsonBody = JSONObject().put("encrypted", JSONObject()
-                                    .put("nonce_hex", encrypted.nonceHex)
-                                                .put("ciphertext_hex", encrypted.ciphertextHex)
-                                            ).toString()
-                                        // Clipboard sync with debounce + single in-flight.
-                                        clipboardSyncJob?.cancel()
-                                        clipboardSyncJob = kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                                            delay(500)
-                                            if (!isActive) return@launch
-                                            try {
-                                                uniffi.core_crypto.quicSendAndRecv(0x02.toUByte(), jsonBody)
-                                            } catch (e: Exception) {
-                                                addLog("[Clipboard] QUIC sync failed: ${e.message}")
-                                            }
-                                        }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        addLog("[Service] Hooked primary clipboard listener")
-    }
-
-    // Light Sensor Listener
-    DisposableEffect(Unit) {
-        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                event?.let {
-                    ambientLux = it.values[0]
-                }
-            }
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-        lightSensor?.let {
-            sensorManager.registerListener(listener, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
-        onDispose {
-            sensorManager.unregisterListener(listener)
-        }
-    }
-
-    // Auto failover Connection Logic
-    val evaluateConnection = {
-        coroutineScope.launch {
-            if (!settings.isPaired) {
-                connectionStatus = "DISCONNECTED (No paired device)"
-                connectionMethod = "None"
-                connectionColor = Color.Red
-                addLog("[Network] Idle: Waiting for pairing credentials")
-                return@launch
-            }
-
-            val hostToTry = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
-            if (hostToTry == null) {
-                connectionStatus = "DISCONNECTED (No host IP)"
-                connectionMethod = "None"
-                connectionColor = Color.Red
-                addLog("[Network] No host IP available")
-                return@launch
-            }
-
-            connectionStatus = "CONNECTING..."
-            connectionColor = Color.Yellow
-            addLog("[Network] Testing connection to $hostToTry:9876")
-
-            val reachable = withContext(Dispatchers.Default) {
-                try {
-                    val result = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), "")
-                    result.isNotEmpty()
-                } catch (_: Exception) {
-                    false
-                }
-            }
-
-            if (reachable) {
-                connectionStatus = "ACTIVE"
-                connectionMethod = "LAN"
-                connectionColor = Color.Green
-                attemptCount = 0
-                addLog("[Network] Host reachable at $hostToTry:9876")
-            } else {
-                connectionStatus = "DISCONNECTED (Unreachable)"
-                connectionMethod = "None"
-                connectionColor = Color.Red
-                addLog("[Network] Host $hostToTry:9876 not reachable")
-            }
-        }
-    }
-
-    LaunchedEffect(wifiDirectActive, lanActive, settings.isPaired) {
-        evaluateConnection()
-    }
-
-    LaunchedEffect(settings.isPaired) {
-        while (true) {
-            delay(2500)
-            if (settings.isPaired) {
-                val targetHostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
-                if (targetHostIp.isEmpty()) continue
-
-                val responseText = withContext(Dispatchers.Default) {
-                    var result: String? = null
-                    try {
-                        val text = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), "")
-                        if (text.isNotEmpty()) {
-                            result = text
-                        }
-                    } catch (_: Exception) {
-                    }
-                    result
-                }
-
-                if (responseText != null) {
-                    try {
-                        val json = JSONObject(responseText)
-                        val pcIsPaired = json.optBoolean("is_paired", true)
-                        if (!pcIsPaired) {
-                            settings.isPaired = false
-                            settings.pairedDeviceName = ""
-                            connectionStatus = "DISCONNECTED (Host unpaired)"
-                            connectionMethod = "None"
-                            connectionColor = Color.Red
-                        } else {
-                            // Mirror exactly what the desktop reports
-                            val status = json.optString("connection_status", "ACTIVE")
-                            val method = json.optString("connection_method", "LAN")
-                            val colorStr = json.optString("connection_color", "green")
-
-                            connectionStatus = status
-                            connectionMethod = method
-                            connectionColor = when (colorStr) {
-                                "green" -> Color.Green
-                                "yellow" -> Color.Yellow
-                                else -> Color.Red
-                            }
-
-                            val latestClipEncrypted = json.optJSONObject("latest_clip_encrypted")
-                            val latestClip = if (latestClipEncrypted != null && sessionKey.isNotEmpty()) {
-                                try {
-                                    val nonce = latestClipEncrypted.getString("nonce_hex")
-                                    val ct = latestClipEncrypted.getString("ciphertext_hex")
-                                    decryptPayloadWithKey(sessionKey, nonce, ct)
-                                } catch (_: Exception) {
-                                    ""
-                                }
-                            } else ""
-                            if (latestClip.isNotEmpty()) {
-                                val exists = clipboardList.any { it.text == latestClip }
-                                if (!exists) {
-                                    clipboardList.add(
-                                        0,
-                                        AndroidClipboardRecord(
-                                            id = "clip_${System.currentTimeMillis()}",
-                                            text = latestClip,
-                                            source = "remote",
-                                            timestamp = System.currentTimeMillis()
-                                        )
-                                    )
-                                    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", latestClip))
-                                    addLog("[Clipboard] Received remote clip (${latestClip.length} chars)")
-                                }
-                            }
-
-                            if (json.has("pending_media_action") && !json.isNull("pending_media_action")) {
-                                val pendingActIndex = json.optInt("pending_media_action", -1)
-                                if (pendingActIndex != -1) {
-                                    org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(pendingActIndex)
-                                    addLog("[Media] Triggered media action index $pendingActIndex from PC")
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e("KyberpipePoll", "Parse poll response error: ${e.message}")
-                    }
-                } else {
-                    // Poll failed — desktop not reachable
-                    connectionStatus = "DISCONNECTED (Unreachable)"
-                    connectionMethod = "None"
-                    connectionColor = Color.Red
-                }
-            }
-        }
-    }
-
-    // First Connection Modal (Dynamic profile nickname on connect)
-    var showFirstConnectModal by remember { mutableStateOf(false) }
-    var tempPcName by remember { mutableStateOf("") }
-    var tempHostIp by remember { mutableStateOf("") }
-
-    val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
-        val hostPkHex = json.optString("pqc_pub", json.optString("host_identity_pk_hex", ""))
-        val wireguardPkHex = json.optString("x25519_pub", json.optString("wireguard_pk_hex", ""))
-        if (hostPkHex.isNotEmpty() && wireguardPkHex.isNotEmpty()) {
-            tempHostIp = json.optString("local_ip", json.optString("p2p_ip", ""))
-            p2pIp = json.optString("p2p_ip", "")
-            val method = json.optString("method", "")
-            if (method == "p2p") {
-                val ssid = json.optString("ssid", "")
-                val pass = json.optString("pass", "")
-                if (ssid.isNotEmpty()) {
-                    try {
-                        val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                        @Suppress("DEPRECATION")
-                        val wifiConfig = android.net.wifi.WifiConfiguration().apply {
-                            SSID = "\"$ssid\""
-                            preSharedKey = "\"$pass\""
-                            allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
-                        }
-                        @Suppress("DEPRECATION")
-                        val netId = wifiManager.addNetwork(wifiConfig)
-                        if (netId != -1) {
-                            @Suppress("DEPRECATION")
-                            wifiManager.disconnect()
-                            @Suppress("DEPRECATION")
-                            wifiManager.enableNetwork(netId, true)
-                            @Suppress("DEPRECATION")
-                            wifiManager.reconnect()
-                            addLog("[P2P] Connecting to P2P network: $ssid")
-                        }
-                    } catch (e: Exception) {
-                        addLog("[P2P] Failed to connect to P2P: ${e.message}")
-                    }
-                }
-            }
-            val kemResponse = encapsulatePqSecret(wireguardPkHex, hostPkHex)
-            val myPkHex = keyPair?.mlkemPkHex ?: ""
-            val computedSas = generateSasCode(hostPkHex, myPkHex, kemResponse.sharedSecretHex)
-            sasCodeDisplay = computedSas
-            kemCiphertext = kemResponse.ciphertextHex
-            // Do NOT set sessionKey or isPaired yet — the host must first receive
-            // the ciphertext and derive its own session key.
-            var hostAccepted = false
-            if (tempHostIp.isNotEmpty()) {
-                try {
-                    val jsonBody = JSONObject()
-                        .put("name", settings.deviceName)
-                        .put("ciphertext_hex", kemCiphertext)
-                        .put("client_pk_hex", myPkHex)
-                        .toString()
-                    val response = uniffi.core_crypto.quicSendAndRecv(0x01.toUByte(), jsonBody)
-                    val respJson = try { JSONObject(response) } catch (_: Exception) { null }
-                    val status = respJson?.optString("status", "")
-                    if (status == "pairing_pending_sas") {
-                        // Derive session key using the host public key as salt
-                        // instead of hardcoded "kyberpipe-sync-v1". Each pairing
-                        // session gets a unique KDF context, preventing shared
-                        // secret reuse across sessions.
-                        sessionKey = deriveSessionKey(kemResponse.sharedSecretHex, hostPkHex)
-                        addLog("[Pairing] Host received ciphertext, pending SAS confirmation")
-                        hostAccepted = true
-                    } else {
-                        addLog("[Pairing] Host rejected handshake: $response")
-                    }
-                } catch (e: Exception) {
-                    addLog("[Pairing] QUIC send failed: ${e.message}")
-                }
-            }
-            if (hostAccepted) {
-                tempPcName = "Linux Desktop workstation"
-                showFirstConnectModal = true
-                addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
-            }
-        } else {
-            addLog("[Pairing] Invalid QR: missing PQC public keys")
-            Toast.makeText(context, "Invalid QR: missing cryptographic keys", Toast.LENGTH_LONG).show()
-        }
-    }
-
-
-    val handlePairingHandshake = {
-        val rawInput = pairingConfigInput.trim()
-        when {
-            rawInput.isEmpty() -> {
-                Toast.makeText(context, "Please scan the QR code from the desktop app", Toast.LENGTH_SHORT).show()
-            }
-            rawInput.startsWith("{") -> {
-                // Raw JSON pasted directly
-                try {
-                    performKemHandshake(JSONObject(rawInput))
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    addLog("[Pairing] Error: Handshake verification failed (${e.message})")
-                }
-            }
-            else -> {
-                // Base64(zlib) encoded QR payload (from QR scanner or deep link)
-                try {
-                    val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
-                    val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
-                    addLog("[Pairing] Decompressed QR payload (${jsonStr.length} chars)")
-                    performKemHandshake(JSONObject(jsonStr))
-                } catch (_: Exception) {
-                    Toast.makeText(context, "Invalid pairing data — scan QR from desktop or use the share link", Toast.LENGTH_LONG).show()
-                    addLog("[Pairing] Error: Could not decode pairing payload")
-                }
-            }
-        }
-    }
-
-    val onCopyStacktrace = {
-        val crashLog = activity.getLatestCrashLog()
-        if (crashLog != null) {
-            val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe Stacktrace", crashLog))
-            Toast.makeText(context, "Copied anonymized stacktrace", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(context, "No crash log found", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    val onExportDiagnosticLogs = {
-        val logText = localLogs.joinToString("\n")
-        activity.shareTextFile("diagnostic_logs.txt", logText)
-    }
-
-    val onExportCrashLog = {
-        val crashLog = activity.getLatestCrashLog()
-        if (crashLog != null) {
-            activity.shareTextFile("anonymous_crash_log.txt", crashLog)
-        } else {
-            Toast.makeText(context, "No crash log found", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    val hasCrashLog = activity.getLatestCrashLog() != null
-
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            BottomNavigationBar(
-                selectedTab = currentTab,
-                onTabSelected = { currentTab = it }
-            )
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-        ) {
-            AnimatedContent(
-                targetState = currentTab,
-                transitionSpec = {
-                    (fadeIn(animationSpec = tween(250, easing = EaseInOutQuart)) + 
-                     scaleIn(initialScale = 0.96f, animationSpec = tween(250, easing = EaseInOutQuart)))
-                        .togetherWith(
-                            fadeOut(animationSpec = tween(150, easing = EaseInOutQuart)) + 
-                            scaleOut(targetScale = 0.96f, animationSpec = tween(150, easing = EaseInOutQuart))
-                        )
-                },
-                label = "TabTransition"
-            ) { targetTab ->
-                when (targetTab) {
-                    TabItem.HOME -> {
-                        OverviewTab(
-                            connectionStatus = connectionStatus,
-                            connectionMethod = connectionMethod,
-                            connectionColor = connectionColor,
-                            ambientLux = ambientLux,
-                            isPaired = settings.isPaired,
-                            settings = settings,
-                            clipboardItems = clipboardList,
-                            notificationsItems = notificationsList,
-                            onRetryConnection = {
-                                attemptCount = 0
-                                evaluateConnection()
-                            },
-                            onNavigateToFiles = { currentTab = TabItem.FILES },
-                            onNavigateToClipboard = { currentTab = TabItem.CLIPBOARD },
-                            onNavigateToNotifications = { currentTab = TabItem.NOTIFICATIONS },
-                            onNavigateToSettings = { currentTab = TabItem.SETTINGS },
-                            onPairMockDevice = { nodeName ->
-                                tempPcName = nodeName
-                                showFirstConnectModal = true
-                            },
-                    pairingConfigInput = pairingConfigInput,
-                    onPairingConfigChange = { pairingConfigInput = it },
-                    onTriggerHandshake = handlePairingHandshake
-                    )
-                    }
-                    TabItem.FILES -> {
-                        FileManagerTab(
-                            isConnected = connectionColor == Color.Green,
-                            settings = settings,
-                            onPermissionRequest = { PermissionHelper.requestStoragePermissions(activity) },
-                            onGrantLocalAccessToggle = { settings.fileAccessGrantedPhone = it },
-                            onFileAction = { item ->
-                            }
-                        )
-                    }
-                    TabItem.CLIPBOARD -> {
-                        ClipboardTab(
-                            clipboardItems = clipboardList,
-                            isConnected = connectionColor == Color.Green,
-                            onAddClipboard = { text ->
-                                clipboardList.add(
-                                    0,
-                                    AndroidClipboardRecord(
-                                        id = "clip_${System.currentTimeMillis()}",
-                                        text = text,
-                                        source = "local",
-                                        timestamp = System.currentTimeMillis()
-                                    )
-                                )
-                            },
-                            onCopyClipboard = { text ->
-                                val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
-                                Toast.makeText(context, "Copied to phone clipboard", Toast.LENGTH_SHORT).show()
-                            },
-                            onDeleteClipboard = { id ->
-                                clipboardList.removeAll { it.id == id }
-                            },
-                            onConnectRequest = { currentTab = TabItem.SETTINGS }
-                        )
-                    }
-                    TabItem.NOTIFICATIONS -> {
-                        NotificationsTab(
-                            notifications = notificationsList,
-                            isConnected = connectionColor == Color.Green,
-                            onDismiss = { id ->
-                                val idx = notificationsList.indexOfFirst { it.id == id }
-                                if (idx != -1) {
-                                    val item = notificationsList[idx]
-                                    notificationsList[idx] = item.copy(isDismissed = true, updatedAt = System.currentTimeMillis())
-                                    notifStore.saveNotifications(notificationsList)
-                                    addLog("[Notification] Dismissed $id. Sync queued.")
-                                }
-                            },
-                            onConnectRequest = { currentTab = TabItem.SETTINGS }
-                        )
-                    }
-                    TabItem.SETTINGS -> {
-                        SettingsTab(
-                            settings = settings,
-                            keyPair = keyPair,
-                            pairingConfigInput = pairingConfigInput,
-                            onPairingConfigChange = { pairingConfigInput = it },
-                            onTriggerHandshake = handlePairingHandshake,
-                            onAvatarPickerClick = onAvatarPickerClick,
-                            onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
-                            wifiDirectActive = wifiDirectActive,
-                            lanActive = lanActive,
-                            wireguardActive = wireguardActive,
-                            onWifiDirectToggled = { wifiDirectActive = it },
-                            onLanToggled = { lanActive = it },
-                            onWireguardToggled = { wireguardActive = it },
-                            localLogs = localLogs,
-                            onCopyStacktrace = onCopyStacktrace,
-                            onExportDiagnosticLogs = onExportDiagnosticLogs,
-                            onExportCrashLog = onExportCrashLog,
-                            hasCrashLog = hasCrashLog,
-                            onPanicTriggered = {
-                                try {
-                                    triggerPanicHardwareWipe()
-                                    settings.isPaired = false
-                                    connectionStatus = "SELF_DESTRUCTED"
-                                    connectionColor = Color.Red
-                                    Toast.makeText(context, "Keys zeroized!", Toast.LENGTH_LONG).show()
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                        )
-                    }
-                }
-            }
-        }
-
-        // Profile input Modal on Pairing
-        if (showFirstConnectModal) {
-            AlertDialog(
-                onDismissRequest = { showFirstConnectModal = false },
-                title = { Text("PC Node Pairing Verified") },
-                text = {
-                    Column {
-                        Text("Pairing successful! Assign a visual nickname for this PC node:", fontSize = 13.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = tempPcName,
-                            onValueChange = { tempPcName = it },
-                            label = { Text("Visual Nickname") },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                focusedLabelColor = MaterialTheme.colorScheme.onSurface,
-                                unfocusedLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                cursorColor = MaterialTheme.colorScheme.onSurface
-                            )
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            val realIp = p2pIp.takeIf { it.isNotEmpty() }
-                                ?: tempHostIp.takeIf { it.isNotEmpty() }
-                                ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
-                            if (realIp != null) {
-                                // kemCiphertext was already sent to host in performKemHandshake.
-                                // Now mark locally as paired — host will promote pending session
-                                // key after SAS confirmation on desktop side.
-                                settings.pairedDeviceName = tempPcName
-                                settings.isPaired = true
-                                settings.pairedHostIp = realIp
-                                showFirstConnectModal = false
-                            }
-                            // Do NOT call evaluateConnection here — the polling loop
-                            // will detect the PC's /api/poll response and update status.
-                        }
-                    ) {
-                        Text("Confirm & Connect")
-                    }
-                }
-            )
-        }
-    }
-}

@@ -42,7 +42,16 @@ pub fn get_default_interface() -> String {
         for line in route.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 && parts.get(1) == Some(&"00000000") {
-                return parts[0].to_string();
+                let iface = parts[0].to_string();
+                // Validate: Linux interface names are [a-zA-Z0-9_:.-]{1,15}
+                if !iface.is_empty()
+                    && iface.len() <= 15
+                    && iface.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '.' || c == '-'
+                    })
+                {
+                    return iface;
+                }
             }
         }
     }
@@ -52,7 +61,15 @@ pub fn get_default_interface() -> String {
             if iface == "lo" {
                 continue;
             }
-            return iface;
+            // Validate interface name
+            if !iface.is_empty()
+                && iface.len() <= 15
+                && iface.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '.' || c == '-'
+                })
+            {
+                return iface;
+            }
         }
     }
     String::new()

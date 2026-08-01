@@ -88,6 +88,11 @@ pub enum KyberMessage {
     PathResponse { response_token: String },
     Ping { timestamp: u64 },
     Pong { timestamp: u64 },
+    RekeyAck { seq: u64 },
+    /// Explicit session resync. The sender of this message communicates its
+    /// current send/recv sequence counter so the peer can re-derive skipped
+    /// chain keys after a gap exceeded `max_skip`. Always ratchet-encrypted.
+    Synchronize { send_count: u64 },
 }
 
 impl KyberMessage {
@@ -100,26 +105,7 @@ impl KyberMessage {
     }
 }
 
-/// Sphinx Onion Packet stub — not yet implemented.
-/// Returns an error to prevent silent use of mock values.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SphinxOnionPacket {
-    pub hop_address: String,
-    pub ephemeral_pubkey: Vec<u8>,
-    pub encrypted_routing_header: Vec<u8>,
-    pub inner_payload_ciphertext: Vec<u8>,
-}
 
-impl SphinxOnionPacket {
-    pub fn create_onion_layer(
-        _dest_address: String,
-        _inner_payload: &[u8],
-    ) -> Result<Self, KyberError> {
-        Err(KyberError::CryptoError(
-            "Sphinx onion routing not yet implemented — would use mock values".into(),
-        ))
-    }
-}
 
 /// Core payload wrappers carried across QUIC streams
 pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {

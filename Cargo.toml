@@ -11,3 +11,10 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+# FFI safety: panics in UniFFI/JNI-exported functions must never unwind across
+# the C ABI (undefined behavior). Abort instead — the panic hook still runs
+# (writing the crash report) before abort. Tests keep unwind so failure
+# isolation works.
+[profile.release]
+panic = "abort"

@@ -44,15 +44,8 @@ pub fn push_sms_packet(
         timestamp,
     };
     state.add_log(format!("[SMS] Received from {sender}"));
-    if let Ok(mut hist) = state.sms_history.lock() {
-        if hist.len() >= 50 {
-            hist.remove(0);
-        }
-        hist.push(pkt);
-        hist.clone()
-    } else {
-        vec![]
-    }
+    state.add_sms_packet(pkt);
+    state.get_sms_history()
 }
 
 #[tauri::command]
@@ -86,15 +79,8 @@ pub async fn push_notification_packet(
     state.add_log(format!(
         "[Notification Sync] {app_package}: {title} - {text}"
     ));
-    if let Ok(mut hist) = state.notification_history.lock() {
-        if hist.len() >= 50 {
-            hist.remove(0);
-        }
-        hist.push(pkt);
-        Ok(hist.clone())
-    } else {
-        Ok(vec![])
-    }
+    state.add_notification(pkt);
+    Ok(state.get_notifications())
 }
 
 #[tauri::command]
@@ -157,11 +143,7 @@ pub fn send_hardware_command(
 
 #[tauri::command]
 pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
-    let mut act = state
-        .pending_media_action
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *act = Some(action_index);
+    state.set_pending_media_action(Some(action_index));
     state.add_log(format!(
         "[Media] Desktop triggered action index: {action_index}"
     ));
@@ -169,9 +151,5 @@ pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::syn
 
 #[tauri::command]
 pub fn get_media_state(state: State<'_, std::sync::Arc<AppState>>) -> crate::state::MediaState {
-    state
-        .media_state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    state.get_media_state()
 }

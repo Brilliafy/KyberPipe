@@ -10,9 +10,7 @@ export interface SystemInfo {
 
 export interface KeyPair {
   x25519_pk_hex: string;
-  x25519_sk_hex: string;
   mlkem_pk_hex: string;
-  mlkem_sk_hex: string;
 }
 
 export interface MediaAction {
@@ -120,19 +118,16 @@ export function useConnection() {
   const saveSettings = async () => {
     try {
       await invoke("save_settings", {
-        settings: {
-          deviceName: deviceName.value,
-          devicePicture: devicePicture.value,
-          pairedDeviceName: pairedDeviceName.value,
-          pairedDevicePicture: pairedDevicePicture.value,
-          ddnsHostname: ddnsHostname.value,
-          enableUpnp: enableUpnp.value,
-          enableDdns: enableDdns.value,
-          isPaired: isPaired.value,
-          themeMode: themeMode.value,
-          pathwayOrder: pathwayOrder.value,
-          wireguardActive: true,
-        }
+        deviceName: deviceName.value,
+        devicePicture: devicePicture.value,
+        pairedDeviceName: pairedDeviceName.value,
+        pairedDevicePicture: pairedDevicePicture.value,
+        ddnsHostname: ddnsHostname.value,
+        enableUpnp: enableUpnp.value,
+        enableDdns: enableDdns.value,
+        themeMode: themeMode.value,
+        pathwayOrder: pathwayOrder.value,
+        wireguardActive: true,
       });
     } catch (e) {
       console.error("Save settings error:", e);
@@ -147,6 +142,8 @@ export function useConnection() {
       connectionColor.value = res.color;
     } catch (e) {
       console.error(e);
+      connectionStatus.value = "UNKNOWN";
+      connectionColor.value = "red";
     }
   };
 
@@ -166,12 +163,12 @@ export function useConnection() {
     remoteMethod.value = "";
     localActive.value = false;
     remoteActive.value = false;
+    await invoke("delete_connection");
     await invoke("set_connection_status_full", {
       status: "DISCONNECTED",
       method: "None",
       color: "red"
     });
-    await saveSettings();
   };
 
   const loadPairingConfig = async () => {

@@ -15,9 +15,7 @@ import {
 
 interface KeyPair {
   x25519_pk_hex: string;
-  x25519_sk_hex: string;
   mlkem_pk_hex: string;
-  mlkem_sk_hex: string;
 }
 
 defineProps<{
@@ -243,8 +241,7 @@ const handleFileChange = (event: Event) => {
       </div>
 
       <div class="key-field" style="margin-top: 1rem; margin-bottom: 1.5rem;">
-        <label style="font-size: 0.85rem; color: var(--text-secondary);">NIST ML-KEM-768 Secret Key (Hex):</label>
-        <textarea readonly rows="3" class="code-box" style="width: 100%; margin-top: 0.25rem;">{{ keyPair.mlkem_sk_hex }}</textarea>
+        <label style="font-size: 0.85rem; color: var(--text-secondary);">Secret keys are held exclusively in the native Rust keystore — they never enter the webview.</label>
       </div>
 
       <button class="btn btn-primary" @click="emit('regenerateKeys')">

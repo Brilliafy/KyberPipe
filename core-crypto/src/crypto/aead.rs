@@ -3,7 +3,6 @@ use chacha20poly1305::{
     aead::{Aead, AeadInPlace, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use std::sync::OnceLock;
 
 /// Encrypt payload data with ChaCha20-Poly1305 AEAD and optional AAD.
 /// When aad is provided (e.g., rekey parameters), it is bound into the
@@ -18,7 +17,6 @@ pub fn encrypt_chacha20(
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_arr = Nonce::from_slice(nonce);
     if aad.is_empty() {
-        // Optimized path without AAD — matches old API for backward compat
         cipher.encrypt(nonce_arr, plaintext).map_err(|e| {
             KyberError::EncryptionFailed(format!("ChaCha20Poly1305 encrypt error: {e}"))
         })
@@ -45,7 +43,6 @@ pub fn decrypt_chacha20(
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_arr = Nonce::from_slice(nonce);
     if aad.is_empty() {
-        // Optimized path without AAD — matches old API for backward compat
         cipher.decrypt(nonce_arr, ciphertext).map_err(|e| {
             KyberError::DecryptionFailed(format!("ChaCha20Poly1305 decrypt error: {e}"))
         })
@@ -66,18 +63,20 @@ pub fn decrypt_chacha20(
     }
 }
 
-/// Generate a 96-bit nonce from a 64-bit sequence counter.
-/// Bytes 0-3 encode a random per-process session identifier to prevent
-/// key+nonce reuse across process restarts. Bytes 4-11 encode the counter.
-pub fn generate_nonce_from_seq(seq: u64) -> [u8; 12] {
+/// Generate a 96-bit nonce from a 64-bit sequence counter and a domain/generation identifier.
+/// Bytes 0-3 encode a per-key session ID (derived from the session key via HKDF)
+/// combined with the generation number via wrapping addition. This provides domain
+/// separation across both different session keys and different rekey generations.
+/// Bytes 4-11 encode the monotonically increasing counter.
+pub fn generate_nonce_from_seq(seq: u64, sid_or_generation: u32) -> [u8; 12] {
+    debug_assert!(
+        sid_or_generation < u32::MAX,
+        "Ratchet generation {} exceeds u32::MAX — nonce domain separation compromised",
+        sid_or_generation
+    );
     let mut nonce = [0u8; 12];
-    nonce[0..4].copy_from_slice(&nonce_session_id().to_be_bytes());
+    nonce[0..4].copy_from_slice(&sid_or_generation.to_be_bytes());
     let seq_bytes = seq.to_be_bytes();
     nonce[4..12].copy_from_slice(&seq_bytes);
     nonce
-}
-
-fn nonce_session_id() -> u32 {
-    static SID: OnceLock<u32> = OnceLock::new();
-    *SID.get_or_init(rand::random)
 }

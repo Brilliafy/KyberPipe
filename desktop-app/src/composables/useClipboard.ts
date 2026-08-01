@@ -11,10 +11,19 @@ export interface ClipboardRecord {
 export function useClipboard() {
   const clipboardItems = ref<ClipboardRecord[]>([]);
   const lastSyncStatus = ref("");
+  let pollFailureCount = 0;
+  const MAX_POLL_FAILURES = 5;
+  const backendHealthy = ref(true);
 
   const pollClipboard = async () => {
+    if (pollFailureCount >= MAX_POLL_FAILURES) {
+      backendHealthy.value = false;
+      return;
+    }
     try {
       const text = await invoke<string>("read_real_clipboard");
+      pollFailureCount = 0;
+      backendHealthy.value = true;
       if (text && text.trim() !== "") {
         const exists = clipboardItems.value.some(item => item.text === text);
         if (!exists) {
@@ -27,7 +36,10 @@ export function useClipboard() {
           await invoke("sync_clipboard", { text });
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      pollFailureCount++;
+      backendHealthy.value = pollFailureCount < MAX_POLL_FAILURES;
+    }
   };
 
   const handleAddClipboard = async (text: string) => {
@@ -77,6 +89,7 @@ export function useClipboard() {
   return {
     clipboardItems,
     lastSyncStatus,
+    backendHealthy,
     pollClipboard,
     handleAddClipboard,
     handleCopyClipboard,

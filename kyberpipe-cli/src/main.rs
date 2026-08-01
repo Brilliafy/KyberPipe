@@ -37,8 +37,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Flight Data Recorder: Inactive (Zero Overhead Mode)");
         }
         Commands::Send { payload } => {
+            // Attempt a REAL encrypted send through the QUIC bridge. If no
+            // connection/pairing is established, fail honestly instead of
+            // printing "Sent" for a payload that never left the machine.
             println!("🔒 Encapsulating payload with PQ-Double Ratchet...");
-            println!("Sent: '{}' (44 bytes payload block)", payload);
+            match core_crypto::quic_send_and_recv(0x02, serde_json::json!({ "plaintext": payload }).to_string()) {
+                Ok(resp) => println!("Sent via QUIC: {resp}"),
+                Err(e) => {
+                    eprintln!("SEND FAILED: {e}");
+                    eprintln!("Hint: pair the desktop app first and ensure the QUIC bridge is connected.");
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Stream => {
             let mut stdin = io::stdin();
@@ -52,7 +62,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "🔒 Non-TTY input detected ({} bytes). Streaming over QUIC...",
                     buffer.len()
                 );
-                println!("Sent: {}", text.trim());
+                match core_crypto::quic_send_and_recv(0x02, serde_json::json!({ "plaintext": text.trim() }).to_string()) {
+                    Ok(resp) => println!("Streamed via QUIC: {resp}"),
+                    Err(e) => {
+                        eprintln!("STREAM FAILED: {e}");
+                        std::process::exit(1);
+                    }
+                }
             } else {
                 println!("Error: Non-TTY stdin pipe input required. Example: cat file.txt | kyberpipe stream");
             }
