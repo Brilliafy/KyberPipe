@@ -31,8 +31,17 @@ class SmsReceiver : BroadcastReceiver() {
             }
 
             val sender = sms.originatingAddress ?: "Unknown"
-            val body = sms.messageBody ?: ""
+            val rawBody = sms.messageBody ?: ""
             val timestamp = sms.timestampMillis
+
+            // Cap forwarded SMS body length (audit finding #14): never push
+            // oversized content over QUIC.
+            val body = if (rawBody.length > MAX_FORWARDED_BODY_CHARS) {
+                Log.d("KyberpipeSmsReceiver", "Truncating SMS body from ${rawBody.length} to $MAX_FORWARDED_BODY_CHARS chars (audit finding #14)")
+                rawBody.take(MAX_FORWARDED_BODY_CHARS)
+            } else {
+                rawBody
+            }
 
             Log.i("KyberpipeSmsReceiver", "Intercepted SMS from $sender (${body.length} chars)")
 
@@ -47,7 +56,9 @@ class SmsReceiver : BroadcastReceiver() {
                 // SMS flood or dead peer previously spawned an unbounded
                 // thread/connection storm).
                 val settings = org.kyberpipe.client.utils.SettingsManager(ctx)
-                if (settings.isPaired) {
+                // Forward only when paired AND the user has explicitly enabled
+                // SMS forwarding (audit finding #14 — opt-in, default OFF).
+                if (settings.isPaired && settings.smsForwardingEnabled) {
                     val encrypted = org.kyberpipe.client.utils.SessionKeyManager.encrypt(jsonPacket)
                     if (encrypted != null) {
                         val payload = org.json.JSONObject().put("encrypted", org.json.JSONObject()
@@ -64,8 +75,23 @@ class SmsReceiver : BroadcastReceiver() {
     }
 
     companion object {
+        /// Maximum forwarded SMS body length in chars (audit finding #14).
+        private const val MAX_FORWARDED_BODY_CHARS = 4096
+
         /// Dispatch outbound SMS from Desktop command via Android SmsManager
         fun sendOutboundSms(context: Context, recipient: String, body: String) {
+            // Audit finding #14: outbound SMS is opt-in AND the recipient must
+            // be a valid E.164 number — never prompt for (or send to) an
+            // unvalidated recipient.
+            val settings = org.kyberpipe.client.utils.SettingsManager(context)
+            if (!settings.outboundSmsEnabled) {
+                Log.w("KyberpipeSmsReceiver", "Outbound SMS dropped: outboundSmsEnabled is false (audit finding #14)")
+                return
+            }
+            if (!isValidE164Number(recipient)) {
+                Log.w("KyberpipeSmsReceiver", "Outbound SMS dropped: invalid E.164 recipient \"$recipient\" (audit finding #14)")
+                return
+            }
             // Create approval notification instead of sending directly
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val channelId = "sms_approval"
@@ -82,6 +108,11 @@ class SmsReceiver : BroadcastReceiver() {
             val denyIntent = Intent(context, SmsApprovalReceiver::class.java).apply {
                 action = "DENY_SMS"
             }
+            // The approval prompt MUST show the exact number and the message
+            // body before the user approves (audit finding #14): the title
+            // displays the full recipient, the content previews the body.
+            // SmsApprovalReceiver re-validates the number as E.164 before
+            // actually sending.
             val notification = Notification.Builder(context, channelId)
                 .setContentTitle("Send SMS to $recipient?")
                 .setContentText(body.take(100))
@@ -98,24 +129,95 @@ class SmsReceiver : BroadcastReceiver() {
     }
 }
 
-/// Single-threaded SMS forwarder (audit finding #11). Serializes every
+/// Single-threaded SMS forwarder (audit finding #11 + #7). Serializes every
 /// STREAM_SMS send so an SMS burst or an unreachable desktop cannot spawn an
-/// unbounded thread/connection storm. Applies exponential backoff (1s→30s) on
-/// persistent failures and kills-and-respawns the QUIC bridge on failure.
+/// unbounded thread/connection storm. Audit finding #7 fixes:
+///  - BOUNDED queue: ArrayBlockingQueue(64) + DiscardOldestPolicy — no
+///    unbounded growth; the OLDEST queued SMS is dropped in favor of the newest
+///    (SMS content is ephemeral; the newest message is the most relevant).
+///  - At most 2 attempts per task (initial + one retry after 1s) — no
+///    4-attempt blocking backoff loop; a dead desktop is detected by the
+///    poll loop (quicConnect in the task body), not by piling up blocked tasks.
+///  - 30s outage coalescing gate: while a task recently failed, new SMS are
+///    dropped instead of queued, so the bounded queue cannot accumulate.
+///  - 60/min rate limit (audit finding #14) — excess forwards are dropped.
 object SmsForwarder {
     private const val TAG = "KyberpipeSmsForwarder"
-    private val executor: java.util.concurrent.ExecutorService =
-        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r, "kyberpipe-sms-sender").apply { isDaemon = true }
-        }
+
+    /// Bounded single-thread executor (audit finding #7). One daemon worker
+    /// thread; at most 64 tasks may wait. When the queue is full,
+    /// DiscardOldestPolicy drops the oldest queued SMS and enqueues the new
+    /// one — the queue can never grow past 64 + 1 running.
+    private val executor: java.util.concurrent.ThreadPoolExecutor =
+        java.util.concurrent.ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+            java.util.concurrent.ArrayBlockingQueue(64),
+            java.util.concurrent.ThreadFactory { r ->
+                Thread(r, "kyberpipe-sms-sender").apply { isDaemon = true }
+            },
+            java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
+        )
+
+    /// Serializes the actual quicSendAndRecv calls (QUIC bridge is single-stream).
     private val lock = Object()
 
+    /// Static outage gate (audit finding #7): timestamp of the most recent
+    /// failed task. While the desktop looks unreachable, new SMS are dropped
+    /// instead of enqueued so the bounded queue cannot accumulate during an
+    /// outage. The poll loop keeps the connection warm and detects recovery.
+    @Volatile
+    private var lastFailureAt: Long = 0L
+
+    /// Failure cooldown: skip enqueuing for 30s after a failure.
+    private const val FAILURE_COOLDOWN_MS = 30_000L
+
+    /// Simple sliding-window rate limiter (audit finding #14): at most
+    /// MAX_FORWARDS_PER_MINUTE forwards per 60s window; excess is dropped.
+    private const val MAX_FORWARDS_PER_MINUTE = 60
+    private const val RATE_WINDOW_MS = 60_000L
+    private val rateLock = Object()
+    private val forwardTimestamps = ArrayDeque<Long>()
+
+    private fun desktopRecentlyFailed(): Boolean =
+        System.currentTimeMillis() - lastFailureAt < FAILURE_COOLDOWN_MS
+
+    /// Returns true if the forward is within the per-minute budget, recording
+    /// the current timestamp under the window counter.
+    private fun allowForward(): Boolean = synchronized(rateLock) {
+        val now = System.currentTimeMillis()
+        while (forwardTimestamps.isNotEmpty() && now - forwardTimestamps.first() >= RATE_WINDOW_MS) {
+            forwardTimestamps.removeFirst()
+        }
+        if (forwardTimestamps.size >= MAX_FORWARDS_PER_MINUTE) {
+            false
+        } else {
+            forwardTimestamps.addLast(now)
+            true
+        }
+    }
+
     fun enqueue(context: android.content.Context, payload: String) {
+        // Coalesce during outages (audit finding #7): don't queue work for a
+        // desktop that recently failed.
+        if (desktopRecentlyFailed()) {
+            Log.d(TAG, "Dropping SMS: desktop recently unreachable (audit finding #7)")
+            return
+        }
+        // Rate limit (audit finding #14).
+        if (!allowForward()) {
+            Log.d(TAG, "Dropping SMS: forward rate limit ($MAX_FORWARDS_PER_MINUTE/min) exceeded (audit finding #14)")
+            return
+        }
         executor.execute {
-            var backoffMs = 1000L
+            // At most 2 attempts per task (audit finding #7): initial send +
+            // one retry after 1s. No unbounded blocking backoff — a stuck task
+            // must not pile up behind a dead desktop.
             var attempt = 0
             var forwarded = false
-            while (attempt < 4 && !forwarded) {
+            while (attempt < 2 && !forwarded) {
                 try {
                     val settings = org.kyberpipe.client.utils.SettingsManager(context)
                     val hostIp = settings.pairedHostIp
@@ -139,18 +241,27 @@ object SmsForwarder {
                 } catch (e: Exception) {
                     Log.e(TAG, "SMS QUIC forward failed (attempt $attempt): ${e.message}")
                     attempt++
-                    if (attempt >= 4) break
-                    try {
-                        Thread.sleep(backoffMs)
-                    } catch (_: InterruptedException) {
+                    if (attempt >= 2) {
+                        lastFailureAt = System.currentTimeMillis()
                         break
                     }
-                    backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+                    try {
+                        Thread.sleep(1_000L)
+                    } catch (_: InterruptedException) {
+                        lastFailureAt = System.currentTimeMillis()
+                        break
+                    }
                 }
             }
         }
     }
 }
+
+/// E.164 phone-number validation (audit finding #14), shared by
+/// SmsReceiver.sendOutboundSms and SmsApprovalReceiver: optional leading '+',
+/// first digit 1-9, then 6-14 digits.
+internal fun isValidE164Number(recipient: String): Boolean =
+    Regex("^\\+?[1-9][0-9]{6,14}$").matches(recipient)
 
 /** Byte array → lowercase hex. */
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

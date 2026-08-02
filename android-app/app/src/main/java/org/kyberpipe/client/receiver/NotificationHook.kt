@@ -34,6 +34,10 @@ class NotificationHook : NotificationListenerService() {
         private var activeMediaPackage: String? = null
         private var activeMediaActions: List<Pair<Int, android.app.PendingIntent>>? = null
 
+        /// Maximum forwarded notification title/text length in chars
+        /// (audit finding #14).
+        private const val MAX_NOTIFICATION_TEXT_CHARS = 2048
+
         /** SharedFlow for notification events — replaces exported broadcast receiver. */
         private val _notificationEvents = MutableSharedFlow<NotificationEvent>(extraBufferCapacity = 64)
         val notificationEvents: SharedFlow<NotificationEvent> = _notificationEvents.asSharedFlow()
@@ -174,8 +178,15 @@ class NotificationHook : NotificationListenerService() {
 
     private fun handleMediaNotification(sbn: StatusBarNotification) {
         val extras = sbn.notification?.extras ?: return
-        val title = extras.getCharSequence("android.title")?.toString() ?: ""
-        val artist = extras.getCharSequence("android.text")?.toString() ?: ""
+        // Cap forwarded notification title/text (audit finding #14): never push
+        // oversized content over QUIC.
+        val rawTitle = extras.getCharSequence("android.title")?.toString() ?: ""
+        val rawArtist = extras.getCharSequence("android.text")?.toString() ?: ""
+        val title = rawTitle.take(MAX_NOTIFICATION_TEXT_CHARS)
+        val artist = rawArtist.take(MAX_NOTIFICATION_TEXT_CHARS)
+        if (rawTitle.length > MAX_NOTIFICATION_TEXT_CHARS || rawArtist.length > MAX_NOTIFICATION_TEXT_CHARS) {
+            Log.d("KyberpipeMedia", "Truncated media notification text to $MAX_NOTIFICATION_TEXT_CHARS chars (audit finding #14)")
+        }
         
         var albumArtBase64 = ""
         val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -222,7 +233,10 @@ class NotificationHook : NotificationListenerService() {
         }
 
         val settings = org.kyberpipe.client.utils.SettingsManager(applicationContext)
-        if (settings.isPaired) {
+        // Forward over QUIC only when paired AND the user explicitly enabled
+        // notification forwarding (audit finding #14 — opt-in, default OFF).
+        // The SharedFlow emit in onNotificationPosted is local-only and stays.
+        if (settings.isPaired && settings.notificationForwardingEnabled) {
             val jsonMedia = org.json.JSONObject()
                 .put("title", title)
                 .put("artist", artist)

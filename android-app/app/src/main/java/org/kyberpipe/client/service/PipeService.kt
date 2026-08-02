@@ -124,7 +124,12 @@ class PipeService : Service() {
         syncJob?.cancel()
         syncJob = null
         val settings = org.kyberpipe.client.utils.SettingsManager(this)
-        if (!settings.isPaired) return
+        // Poll while paired OR while a pairing confirmation is pending (two-phase
+        // commit, audit finding #6): after the user confirms the SAS on the phone,
+        // isPaired stays false until the desktop confirms. The engine must keep
+        // polling during that window so the desktop's confirmation is learned even
+        // in the background.
+        if (!settings.isPaired && !settings.pendingPairingConfirmation) return
         val hostIp = settings.pairedHostIp
         if (hostIp.isEmpty()) return
         val peer = settings.peerRatchetIdentity
@@ -146,96 +151,131 @@ class PipeService : Service() {
             }
             while (isActive) {
                 try {
-                    // Producer for the Synchronize recovery path (audit #4):
-                    // tell the desktop where our send chain is so it can resync
-                    // its receiving chain after a network handoff.
-                    var syncSendCount = ""
+                    // Authenticated Synchronize producer (audit finding #4): the
+                    // phone sends its ratchet-encrypted Synchronize packet instead
+                    // of a plaintext counter, so the desktop can resync its
+                    // receiving chain without trusting a wire value.
+                    var requestBody = ""
                     if (peer.isNotEmpty()) {
                         try {
-                            syncSendCount = uniffi.core_crypto.ratchetSendCount(peer).toString()
+                            // Binary TLV framing (audit finding #12): the full
+                            // ratchet message incl. any rekey payload, so the
+                            // desktop can process it rekey-aware.
+                            val syncTlv = uniffi.core_crypto.ratchetSynchronizePacketBinary(peer)
+                            requestBody = org.json.JSONObject().put(
+                                "sync",
+                                org.json.JSONObject().put(
+                                    "tlv_b64",
+                                    android.util.Base64.encodeToString(syncTlv, android.util.Base64.NO_WRAP)
+                                )
+                            ).toString()
                         } catch (_: Exception) {}
-                    }
-                    val requestBody = if (syncSendCount.isNotEmpty()) {
-                        org.json.JSONObject().put("sync_send_count", syncSendCount).toString()
-                    } else {
-                        ""
                     }
                     val resp = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
                     // Any successful poll resets the backoff.
                     backoffMs = 1000L
                     val json = try { JSONObject(resp) } catch (_: Exception) { null }
                     if (json != null) {
+                        // Two-phase pairing commit (audit finding #6): if we are
+                        // still awaiting the desktop's SAS confirmation, commit
+                        // isPaired only when the desktop reports is_paired=true.
+                        if (settings.pendingPairingConfirmation) {
+                            if (json.optBoolean("is_paired", false)) {
+                                settings.isPaired = true
+                                settings.pendingPairingConfirmation = false
+                                Log.i("KyberpipeService", "Desktop confirmed SAS — pairing committed")
+                            } else if (resp.contains("Not paired", ignoreCase = true)) {
+                                settings.pendingPairingConfirmation = false
+                                Log.w("KyberpipeService", "Desktop rejected pairing — not confirmed")
+                            }
+                        }
                         val clip = json.optJSONObject("latest_clip_encrypted")
                         if (clip != null) {
-                            val enc = clip.optJSONObject("encrypted_ratchet") ?: clip
-                            val nonce = enc.getString("nonce_hex").hexToByteArray()
-                            val ct = enc.getString("ciphertext_hex").hexToByteArray()
-                            // Route through the REKEY-AWARE decrypt path so DH/KEM
-                            // rekey payloads are processed (audit finding #1 — the
-                            // phone previously dropped rekey fields and the desktop
-                            // TTL-committed, permanently desyncing the session).
-                            val text = if (peer.isNotEmpty()) {
-                                try {
-                                    val rekeyX = enc.optString("rekey_x25519_pk_hex", "")
-                                        .takeIf { it.isNotEmpty() }?.hexToByteArray()
-                                    val rekeyM = enc.optString("rekey_mlkem_pk_hex", "")
-                                        .takeIf { it.isNotEmpty() }?.hexToByteArray()
-                                    val rekeyCt = enc.optString("rekey_ciphertext_hex", "")
-                                        .takeIf { it.isNotEmpty() }?.hexToByteArray()
+                            // Binary TLV wire format (audit finding #12): ratchet
+                            // payloads arrive as a single base64 TLV blob inside
+                            // {"encrypted_ratchet": {"tlv_b64": "..."}} and the
+                            // binary decrypt is rekey-aware inside Rust, so the
+                            // legacy hex rekey fields / ratchetDecryptWithRekeyMessage
+                            // path is gone.
+                            val enc = clip.optJSONObject("encrypted_ratchet")
+                            if (enc != null) {
+                                val tlv = android.util.Base64.decode(
+                                    enc.getString("tlv_b64"), android.util.Base64.NO_WRAP
+                                )
+                                var text: String? = null
+                                if (peer.isNotEmpty()) {
                                     try {
-                                        String(
-                                            uniffi.core_crypto.ratchetDecryptWithRekeyMessage(
-                                                peer, nonce, ct, rekeyCt, rekeyX, rekeyM
-                                            ),
+                                        text = String(
+                                            uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
                                             Charsets.UTF_8
                                         )
-                                    } catch (_: Exception) {
-                                        // Session may be desynchronized (a dropped
-                                        // burst during network handoff). The desktop's
-                                        // poll response carries its send counter —
-                                        // resync the receiving chain and retry once.
-                                        // Consumer for the Synchronize path (audit #4).
-                                        val desktopCount =
-                                            json.optLong("ratchet_send_count", -1L)
-                                        if (desktopCount > 0) {
+                                    } catch (e: Exception) {
+                                        // Ratchet decrypt failed — the desktop may be
+                                        // ahead of our receiving chain after a network
+                                        // handoff. Its poll response carries an
+                                        // authenticated Synchronize packet (audit
+                                        // finding #4) — AEAD-verified, rate-limited and
+                                        // budget-bounded inside Rust — so process it
+                                        // and retry the binary decrypt ONCE.
+                                        val sync = json.optJSONObject("sync")
+                                        if (sync != null) {
                                             try {
-                                                val recv =
-                                                    uniffi.core_crypto.ratchetRecvCount(peer).toLong()
-                                                if (desktopCount > recv + 100) {
-                                                    Log.w(
-                                                        "KyberpipeService",
-                                                        "Receive chain desync (recv=$recv desktop=$desktopCount) — resyncing"
-                                                    )
-                                                    uniffi.core_crypto.ratchetSynchronizeSession(
-                                                        peer, desktopCount.toULong()
-                                                    )
-                                                }
-                                            } catch (_: Exception) {}
+                                                // The desktop's Synchronize packet
+                                                // is a binary TLV (audit finding
+                                                // #12) — rekey-aware processing
+                                                // inside Rust.
+                                                val syncTlv = android.util.Base64.decode(
+                                                    sync.getString("tlv_b64"), android.util.Base64.NO_WRAP
+                                                )
+                                                uniffi.core_crypto.ratchetProcessSynchronize(peer, syncTlv)
+                                                text = String(
+                                                    uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
+                                                    Charsets.UTF_8
+                                                )
+                                            } catch (e2: Exception) {
+                                                // Still failing: log and continue — do
+                                                // NOT loop forever (audit finding #4).
+                                                Log.w(
+                                                    "KyberpipeService",
+                                                    "Synchronize recovery failed: ${e2.message}"
+                                                )
+                                            }
+                                        } else {
+                                            Log.d("KyberpipeService", "Ratchet decrypt failed (no sync): ${e.message}")
                                         }
-                                        String(
-                                            uniffi.core_crypto.ratchetDecryptWithRekeyMessage(
-                                                peer, nonce, ct, rekeyCt, rekeyX, rekeyM
-                                            ),
-                                            Charsets.UTF_8
-                                        )
                                     }
-                                } catch (_: Exception) {
-                                    org.kyberpipe.client.utils.SessionKeyManager.decrypt(nonce, ct)
+                                }
+                                if (!text.isNullOrEmpty()) {
+                                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
                                 }
                             } else {
-                                org.kyberpipe.client.utils.SessionKeyManager.decrypt(nonce, ct)
-                            }
-                            if (!text.isNullOrEmpty()) {
-                                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                cm.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
+                                // Legacy non-ratchet shape (unchanged): the object
+                                // itself carries session-key encrypted
+                                // nonce_hex/ciphertext_hex (session-key path).
+                                try {
+                                    val nonce = clip.getString("nonce_hex").hexToByteArray()
+                                    val ct = clip.getString("ciphertext_hex").hexToByteArray()
+                                    val text = org.kyberpipe.client.utils.SessionKeyManager.decrypt(nonce, ct)
+                                    if (!text.isNullOrEmpty()) {
+                                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", text))
+                                    }
+                                } catch (e: Exception) {
+                                    Log.d("KyberpipeService", "Legacy clip decrypt failed: ${e.message}")
+                                }
                             }
                         }
                         val ack = json.optJSONObject("rekey_ack_encrypted")
                         if (ack != null && peer.isNotEmpty()) {
                             try {
-                                val nonce = ack.getString("nonce_hex").hexToByteArray()
-                                val ct = ack.getString("ciphertext_hex").hexToByteArray()
-                                val pt = uniffi.core_crypto.ratchetDecryptMessage(peer, nonce, ct)
+                                // Binary TLV wire format (audit finding #12): the ack
+                                // arrives as {"tlv_b64": "..."} and the binary decrypt
+                                // is rekey-aware inside Rust.
+                                val tlv = android.util.Base64.decode(
+                                    ack.getString("tlv_b64"), android.util.Base64.NO_WRAP
+                                )
+                                val pt = uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv)
                                 val ptJson = JSONObject(String(pt, Charsets.UTF_8))
                                 // RekeyAck serializes as {"type":"RekeyAck","payload":{"seq":N}}
                                 // — parse the type/payload shape (audit finding #3).
@@ -248,12 +288,15 @@ class PipeService : Service() {
                             }
                         }
                     }
-                    // Persist the ratchet snapshot after any mutation.
+                    // Persist the ratchet snapshot after any mutation. The snapshot
+                    // is AEAD-wrapped with an INDEPENDENT at-rest wrap key before
+                    // Base64 persistence (audit finding #13): raw ratchet state is
+                    // never stored in plaintext.
                     if (peer.isNotEmpty()) {
                         try {
                             val snap = uniffi.core_crypto.ratchetExportSession(peer)
                             if (snap != null) {
-                                settings.ratchetSnapshot = android.util.Base64.encodeToString(snap, android.util.Base64.NO_WRAP)
+                                persistRatchetSnapshotWrapped(settings, snap)
                             }
                         } catch (_: Exception) {}
                     }
@@ -268,6 +311,41 @@ class PipeService : Service() {
                 }
                 delay(2500)
             }
+        }
+    }
+
+    /**
+     * AEAD-wrap the ratchet snapshot with an INDEPENDENT at-rest wrap key and
+     * persist it as Base64 (audit finding #13). The wrap key is 32 random bytes
+     * kept in EncryptedSharedPreferences, separate from the session key, so a
+     * session-key compromise does not expose stored ratchet state. The stored
+     * value is Base64("{nonce_hex}:{ct_hex}") — never raw ratchet bytes.
+     * On any failure the snapshot is NOT persisted (never plaintext at rest).
+     */
+    private fun persistRatchetSnapshotWrapped(
+        settings: org.kyberpipe.client.utils.SettingsManager,
+        snap: ByteArray
+    ) {
+        try {
+            var wrapKeyHex = settings.ratchetSnapshotKey
+            if (wrapKeyHex.isEmpty()) {
+                val wrapKey = ByteArray(32)
+                java.security.SecureRandom().nextBytes(wrapKey)
+                wrapKeyHex = wrapKey.toHexString()
+                settings.ratchetSnapshotKey = wrapKeyHex
+            }
+            val wrapped = uniffi.core_crypto.encryptPayloadWithHandle(
+                wrapKeyHex.hexToByteArray(), snap
+            )
+            val nonceHex = wrapped.nonce.toHexString()
+            val ctHex = wrapped.ciphertext.toHexString()
+            settings.ratchetSnapshot = android.util.Base64.encodeToString(
+                "$nonceHex:$ctHex".toByteArray(Charsets.UTF_8),
+                android.util.Base64.NO_WRAP
+            )
+        } catch (e: Exception) {
+            // Never store plaintext — skip persistence on failure.
+            Log.w("KyberpipeService", "Ratchet snapshot persist skipped: ${e.message}")
         }
     }
 
@@ -386,3 +464,7 @@ private fun String.hexToByteArray(): ByteArray {
         ((Character.digit(this[i * 2], 16) shl 4) + Character.digit(this[i * 2 + 1], 16)).toByte()
     }
 }
+
+/** Byte array → lowercase hex string (mirrors MainScreen's private extension). */
+private fun ByteArray.toHexString(): String =
+    joinToString("") { "%02x".format(it.toInt() and 0xFF) }

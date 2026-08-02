@@ -204,6 +204,16 @@ fun CameraPreview(
             .build()
     }
 
+    // Audit finding #10: hold executors and the ML Kit scanner as remembered fields so they
+    // live for the composable's lifetime and are shut down exactly once on dispose.
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val captureExecutor = remember { Executors.newSingleThreadExecutor() }
+    val barcodeScanner = remember {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+        )
+    }
+
     // Two-finger pinch to zoom gesture detector
     val scaleDetector = remember {
         ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -219,13 +229,9 @@ fun CameraPreview(
 
     // Real-time continuous ML Kit barcode scanner
     LaunchedEffect(Unit) {
-        val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-        val scanner = BarcodeScanning.getClient(options)
-        val analysisExec = Executors.newSingleThreadExecutor()
-
-        imageAnalysis.setAnalyzer(analysisExec) { imageProxy ->
+        // Audit finding #10: reuse the remembered scanner and analysis executor
+        // (no per-effect creation)
+        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
             if (isScanned) {
                 imageProxy.close()
                 return@setAnalyzer
@@ -243,7 +249,7 @@ fun CameraPreview(
                 frameWidth = w
                 frameHeight = h
 
-                scanner.process(inputImage)
+                barcodeScanner.process(inputImage)
                     .addOnSuccessListener { barcodes ->
                         if (barcodes.isNotEmpty()) {
                             val barcode = barcodes.first()
@@ -300,11 +306,11 @@ fun CameraPreview(
     LaunchedEffect(manualScanRequested) {
         if (!manualScanRequested) return@LaunchedEffect
         onLoading(true)
-        val exec = Executors.newSingleThreadExecutor()
-        imageCapture.takePicture(exec, object : ImageCapture.OnImageCapturedCallback() {
+        // Audit finding #10: reuse the remembered capture executor (no per-invocation executor)
+        imageCapture.takePicture(captureExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(proxy: androidx.camera.core.ImageProxy) {
                 val rot = proxy.imageInfo.rotationDegrees
-                runFallbackDecoders(proxy, rot) { result ->
+                runFallbackDecoders(barcodeScanner, proxy, rot) { result ->
                     Handler(Looper.getMainLooper()).post {
                         if (!result.isNullOrEmpty()) {
                             onQrScanned(result)
@@ -315,7 +321,6 @@ fun CameraPreview(
                     proxy.close()
                     onLoading(false)
                     onScanComplete()
-                    exec.shutdown()
                 }
             }
             override fun onError(e: ImageCaptureException) {
@@ -324,7 +329,6 @@ fun CameraPreview(
                 }
                 onLoading(false)
                 onScanComplete()
-                exec.shutdown()
             }
         })
     }
@@ -352,6 +356,18 @@ fun CameraPreview(
 
         onDispose {
             Log.d("QrCodeScanner", "dispose camera preview")
+            // Audit finding #10: release the camera, analysis/capture executors, and ML Kit scanner
+            analysisExecutor.shutdown()
+            captureExecutor.shutdown()
+            barcodeScanner.close()
+            val disposeProviderFuture = ProcessCameraProvider.getInstance(context)
+            disposeProviderFuture.addListener({
+                try {
+                    disposeProviderFuture.get().unbindAll()
+                } catch (e: Exception) {
+                    Log.e("QrCodeScanner", "camera unbindAll failed on dispose", e)
+                }
+            }, ContextCompat.getMainExecutor(context))
         }
     }
 
@@ -711,14 +727,12 @@ private fun decodeJpegToGrayscale(jpeg: ByteArray, sampleSize: Int): Triple<Byte
     }
 }
 
-private fun runFallbackDecoders(proxy: androidx.camera.core.ImageProxy, rot: Int, callback: (String?) -> Unit) {
+private fun runFallbackDecoders(scanner: com.google.mlkit.vision.barcode.BarcodeScanner, proxy: androidx.camera.core.ImageProxy, rot: Int, callback: (String?) -> Unit) {
     val img = proxy.image ?: return callback(null)
     try {
         // 1. Try ML Kit on high-res media image first
+        // Audit finding #10: reuse the remembered scanner (no per-call BarcodeScanning.getClient)
         val inputImage = InputImage.fromMediaImage(img, rot)
-        val scanner = BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
-        )
         scanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
                 val mlResult = barcodes.firstOrNull()?.rawValue

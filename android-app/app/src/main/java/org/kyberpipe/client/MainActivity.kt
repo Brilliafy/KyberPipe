@@ -89,8 +89,27 @@ class MainActivity : ComponentActivity() {
             val snapshot = settingsManager.ratchetSnapshot
             if (snapshot.isNotEmpty()) {
                 try {
-                    val bytes = android.util.Base64.decode(snapshot, android.util.Base64.NO_WRAP)
-                    uniffi.core_crypto.ratchetImportSession(peer, bytes)
+                    // Audit finding #13: the snapshot is wrapped at rest with an
+                    // INDEPENDENT Keystore-backed key (not the session key).
+                    // Stored format: Base64("{nonce_hex}:{ciphertext_hex}").
+                    val wrapKeyHex = settingsManager.ratchetSnapshotKey
+                    if (wrapKeyHex.isNotEmpty()) {
+                        val stored =
+                            android.util.Base64.decode(snapshot, android.util.Base64.NO_WRAP)
+                                .toString(Charsets.UTF_8)
+                        val sep = stored.indexOf(':')
+                        if (sep > 0) {
+                            val nonce = stored.substring(0, sep).hexToByteArraySafe()
+                            val ct = stored.substring(sep + 1).hexToByteArraySafe()
+                            val wrapKey = wrapKeyHex.hexToByteArraySafe()
+                            if (nonce != null && ct != null && wrapKey != null) {
+                                val bytes = uniffi.core_crypto.decryptPayloadWithHandle(
+                                    wrapKey, nonce, ct
+                                )
+                                uniffi.core_crypto.ratchetImportSession(peer, bytes)
+                            }
+                        }
+                    }
                 } catch (e: Exception) {
                     android.util.Log.w("KyberpipeRestore", "Ratchet restore failed: ${e.message}")
                 }
@@ -144,6 +163,18 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         mainScope.cancel()
+    }
+}
+
+/** Hex string → byte array, or null on malformed input (audit finding #13). */
+private fun String.hexToByteArraySafe(): ByteArray? {
+    if (length % 2 != 0) return null
+    return try {
+        ByteArray(length / 2) { i ->
+            ((Character.digit(this[i * 2], 16) shl 4) + Character.digit(this[i * 2 + 1], 16)).toByte()
+        }
+    } catch (e: Exception) {
+        null
     }
 }
 
