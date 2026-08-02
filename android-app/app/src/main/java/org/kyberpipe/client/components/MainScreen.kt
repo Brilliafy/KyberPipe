@@ -126,6 +126,15 @@ fun MainScreen(
     var kemCiphertext by remember { mutableStateOf("") }
     var p2pIp by remember { mutableStateOf("") }
 
+    // QR-bound server cert hash (audit finding #15): preferred pin over runtime
+    // capture. UI mirror of settings.pendingPairingConfirmation for the
+    // two-phase pairing commit (audit finding #6) — isPaired must NOT flip to
+    // true until the desktop confirms the SAS. Declared before the poll loop
+    // below, which drives the commit/timeout transitions.
+    var qrServerCertHash by remember { mutableStateOf("") }
+    var pairingConfirmedPending by remember { mutableStateOf(false) }
+    var pairingPendingStartedAt by remember { mutableStateOf(0L) }
+
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val activity = context as org.kyberpipe.client.MainActivity
@@ -396,7 +405,23 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         while (isActive) {
             delay(2500)
-            if (settings.isPaired) {
+            // Poll while paired OR while a pairing confirmation is pending:
+            // after SAS confirm the phone stays isPaired=false until the desktop
+            // confirms (two-phase commit, audit finding #6).
+            if (settings.isPaired || settings.pendingPairingConfirmation) {
+                // Timeout: if the desktop never confirms the SAS within ~60s,
+                // abandon the pending confirmation and keep isPaired false.
+                if (settings.pendingPairingConfirmation && pairingPendingStartedAt > 0 &&
+                    System.currentTimeMillis() - pairingPendingStartedAt > 60_000L
+                ) {
+                    settings.pendingPairingConfirmation = false
+                    pairingConfirmedPending = false
+                    pairingPendingStartedAt = 0L
+                    connectionStatus = "DISCONNECTED (Pairing not confirmed)"
+                    connectionMethod = "None"
+                    connectionColor = Color.Red
+                    addLog("[Pairing] Pairing not confirmed by desktop (timeout)")
+                }
                 val targetHostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
                 if (targetHostIp.isEmpty()) continue
 
@@ -439,6 +464,26 @@ fun MainScreen(
                 }
 
                 if (responseText != null) {
+                    // Two-phase commit (audit finding #6): while awaiting desktop
+                    // SAS confirmation, commit isPaired ONLY when the desktop
+                    // reports is_paired=true; on an explicit "Not paired" rejection
+                    // the pending confirmation is abandoned (isPaired stays false).
+                    if (settings.pendingPairingConfirmation) {
+                        val confirmJson = try { JSONObject(responseText) } catch (_: Exception) { null }
+                        val pcPaired = confirmJson?.optBoolean("is_paired", false) ?: false
+                        if (pcPaired) {
+                            settings.isPaired = true
+                            settings.pendingPairingConfirmation = false
+                            pairingConfirmedPending = false
+                            pairingPendingStartedAt = 0L
+                            addLog("[Pairing] Desktop confirmed SAS — pairing committed")
+                        } else if (responseText.contains("Not paired", ignoreCase = true)) {
+                            settings.pendingPairingConfirmation = false
+                            pairingConfirmedPending = false
+                            pairingPendingStartedAt = 0L
+                            addLog("[Pairing] Pairing not confirmed by desktop")
+                        }
+                    }
                     try {
                         val json = JSONObject(responseText)
                         val pcIsPaired = json.optBoolean("is_paired", true)
@@ -610,6 +655,10 @@ fun MainScreen(
             if (qrNonce.isNotEmpty()) {
                 settings.pendingPairingNonce = qrNonce
             }
+            // QR-bound server cert hash (audit finding #5/#15): prefer it over
+            // runtime capture for the SAS-confirm pin and the bootstrap QUIC
+            // connect below. Empty string = legacy accept-any.
+            qrServerCertHash = json.optString("server_cert_hash", "")
             val method = json.optString("method", "")
             if (method == "p2p") {
                 val ssid = json.optString("ssid", "")
@@ -650,15 +699,35 @@ fun MainScreen(
             // Initialize the ratchet session NOW (single handshake path), keyed by
             // the host PK fingerprint — the same identity every later decrypt uses.
             val peerIdentity = hostPkHex
+            val kp = keyPair
             try {
                 uniffi.core_crypto.ratchetRemoveSession(peerIdentity)
-                uniffi.core_crypto.ratchetInitSession(
-                    peerIdentity,
-                    kemResponse.sharedSecret,
-                    false,
-                    wireguardPkHex.hexToByteArray(),
-                    hostPkHex.hexToByteArray()
-                )
+                if (kp != null) {
+                    // Rekey keypair mismatch (audit finding #1): init the ratchet
+                    // with OUR OWN pairing keypair so the DH/KEM chains and the
+                    // desktop's rekey proposals share the same secret state. Peer
+                    // keys are the desktop's wireguard x25519 pk and host mlkem pk.
+                    uniffi.core_crypto.ratchetInitSessionWithKeypair(
+                        peerIdentity,
+                        kemResponse.sharedSecret,
+                        false,
+                        kp.x25519Pk,
+                        kp.x25519Sk,
+                        kp.mlkemPk,
+                        kp.mlkemSk,
+                        wireguardPkHex.hexToByteArray(),
+                        hostPkHex.hexToByteArray()
+                    )
+                } else {
+                    addLog("[Pairing] keyPair null — falling back to legacy ratchet init")
+                    uniffi.core_crypto.ratchetInitSession(
+                        peerIdentity,
+                        kemResponse.sharedSecret,
+                        false,
+                        wireguardPkHex.hexToByteArray(),
+                        hostPkHex.hexToByteArray()
+                    )
+                }
                 settings.peerRatchetIdentity = peerIdentity
                 addLog("[Pairing] Ratchet session initialized (peer=$peerIdentity)")
             } catch (e: Exception) {
@@ -671,11 +740,11 @@ fun MainScreen(
             if (tempHostIp.isNotEmpty()) {
                 try {
                     // Establish the QUIC bridge to the desktop BEFORE sending any
-                    // stream. Bootstrap pairing uses the allow-private connect
-                    // (audit #6 — the SSRF guard previously blocked private-IP
-                    // connects with an empty pin, making LAN pairing unreachable).
+                    // stream. Bootstrap pairing pins the server cert from the QR
+                    // (audit finding #15); empty pin = legacy accept-any
+                    // allow-private connect (the SSRF guard — audit #6).
                     try {
-                        uniffi.core_crypto.quicConnectPairingBootstrap(tempHostIp, 9876.toUShort())
+                        uniffi.core_crypto.quicConnectPairingBootstrap(tempHostIp, 9876.toUShort(), qrServerCertHash)
                         addLog("[Pairing] QUIC bridge connected to $tempHostIp:9876")
                     } catch (connectErr: Exception) {
                         addLog("[Pairing] QUIC connect: ${connectErr.message}")
@@ -963,7 +1032,11 @@ fun MainScreen(
                                 ?: tempHostIp.takeIf { it.isNotEmpty() }
                                 ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
                             if (realIp != null) {
-                                // Finalize cryptographic commit ONLY after manual user validation of SAS
+                                // Finalize cryptographic commit ONLY after manual user validation of SAS.
+                                // Two-phase commit (audit finding #6): the phone must NOT claim
+                                // isPaired before the desktop confirms the SAS — it may reject the
+                                // code or time out. We persist everything except the commit signal
+                                // and let the poll loop commit once the desktop reports is_paired.
                                 // Canonical salt — SAME bytes as the desktop (audit finding #2).
                                 sessionKey = uniffi.core_crypto.deriveSessionKey(
                                     pendingSharedSecret.hexToByteArray(),
@@ -974,22 +1047,34 @@ fun MainScreen(
 
                                 // Pin the server TLS certificate ONLY after the user
                                 // confirmed the SAS — never on first connect (TOFU MitM
-                                // hazard). Every future connection uses this pin.
-                                try {
-                                    val pin = uniffi.core_crypto.quicCaptureServerCertHash()
-                                    if (pin != null) {
+                                // hazard). Prefer the QR-bound hash (audit finding #15);
+                                // fall back to runtime capture for QRs without a hash.
+                                val pin = qrServerCertHash.takeIf { it.isNotEmpty() }
+                                    ?: uniffi.core_crypto.quicCaptureServerCertHash()
+                                if (pin != null && pin.isNotEmpty()) {
+                                    try {
                                         uniffi.core_crypto.quicStoreServerPin(pin)
                                         settings.serverCertPin = pin
                                         addLog("[Pairing] Server cert pinned after SAS confirmation")
+                                    } catch (pinErr: Exception) {
+                                        addLog("[Pairing] Cert pin store failed: ${pinErr.message}")
                                     }
-                                } catch (pinErr: Exception) {
-                                    addLog("[Pairing] Cert pin capture failed: ${pinErr.message}")
+                                } else {
+                                    addLog("[Pairing] No server cert pin available")
                                 }
 
                                 settings.pairedDeviceName = tempPcName
-                                settings.isPaired = true
+                                // NOT committed yet — wait for the desktop's SAS
+                                // confirmation (two-phase commit, audit finding #6).
+                                settings.isPaired = false
+                                settings.pendingPairingConfirmation = true
+                                pairingConfirmedPending = true
+                                pairingPendingStartedAt = System.currentTimeMillis()
                                 settings.pairedHostIp = realIp
                                 showFirstConnectModal = false
+                                connectionStatus = "Waiting for desktop confirmation"
+                                connectionMethod = "None"
+                                connectionColor = Color.Yellow
                                 // Restart the background engine so the sync loop
                                 // starts even if PipeService was already running
                                 // when pairing completed (audit finding #12).

@@ -57,6 +57,13 @@ class SettingsManager(context: Context) {
         get() = securePrefs.getString("ratchet_snapshot", "") ?: ""
         set(value) = securePrefs.edit().putString("ratchet_snapshot", value).apply()
 
+    /// Independent at-rest wrap key (hex, 32 random bytes) used to AEAD-wrap the
+    /// ratchet snapshot before Base64 persistence (audit finding #13). Kept
+    /// separate from the session key in EncryptedSharedPreferences.
+    var ratchetSnapshotKey: String
+        get() = securePrefs.getString("ratchet_snapshot_key", "") ?: ""
+        set(value) = securePrefs.edit().putString("ratchet_snapshot_key", value).apply()
+
     /// Per-install client identity certificate (DER, base64) generated at
     /// pairing time. Presented on every post-pairing QUIC connection so the
     /// desktop authorizes this device by certificate hash — never by IP
@@ -83,6 +90,44 @@ class SettingsManager(context: Context) {
     var pendingPairingNonce: String
         get() = securePrefs.getString("pending_pairing_nonce", "") ?: ""
         set(value) = securePrefs.edit().putString("pending_pairing_nonce", value).apply()
+
+    /// True while the phone awaits the desktop's SAS confirmation before
+    /// committing `isPaired`. Gates the two-phase pairing commit (audit finding
+    /// #6): the phone must not claim "paired" while the desktop may still reject
+    /// the SAS code or time out.
+    var pendingPairingConfirmation: Boolean
+        get() = securePrefs.getBoolean("pending_pairing_confirmation", false)
+        set(value) = securePrefs.edit().putBoolean("pending_pairing_confirmation", value).apply()
+
+    /// Server cert hash bound to the pairing QR (audit finding #15). Prefer it
+    /// over runtime capture when the QR carries it; bootstrap QUIC connects use
+    /// it to pin the server certificate during pairing.
+    var pendingServerCertHash: String
+        get() = securePrefs.getString("pending_server_cert_hash", "") ?: ""
+        set(value) = securePrefs.edit().putString("pending_server_cert_hash", value).apply()
+
+
+    // ── Forwarding consent gates (encrypted; audit finding #14) ──
+    // ALL DEFAULT FALSE: forwarding stays disabled until the user explicitly
+    // opts in. Each gate is checked by the corresponding sender before any
+    // content leaves the device (SmsReceiver / NotificationHook / outbound SMS).
+
+    /// Master consent for forwarding received SMS to the paired desktop.
+    var smsForwardingEnabled: Boolean
+        get() = securePrefs.getBoolean("sms_forwarding_enabled", false)
+        set(value) = securePrefs.edit().putBoolean("sms_forwarding_enabled", value).apply()
+
+    /// Master consent for forwarding notification (media) content to the
+    /// paired desktop over QUIC.
+    var notificationForwardingEnabled: Boolean
+        get() = securePrefs.getBoolean("notification_forwarding_enabled", false)
+        set(value) = securePrefs.edit().putBoolean("notification_forwarding_enabled", value).apply()
+
+    /// Consent for sending OUTBOUND SMS from the paired desktop (delivered via
+    /// the approval notification in SmsReceiver.sendOutboundSms).
+    var outboundSmsEnabled: Boolean
+        get() = securePrefs.getBoolean("outbound_sms_enabled", false)
+        set(value) = securePrefs.edit().putBoolean("outbound_sms_enabled", value).apply()
 
 
     // ── Non-sensitive UI settings (plain) ──

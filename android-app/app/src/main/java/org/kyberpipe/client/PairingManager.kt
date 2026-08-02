@@ -55,7 +55,8 @@ object PairingManager {
 
     /// Connect to the desktop with the per-install identity certificate.
     /// Post-pairing connects pass the pin AND the identity cert so the server
-    /// authorizes by cert hash (audit findings #6/#8).
+    /// authorizes by cert hash (audit findings #6/#8). `certPin` is the
+    /// post-SAS serverCertPin persisted at SAS confirmation (audit #15).
     fun connectWithIdentity(
         hostIp: String,
         port: UShort,
@@ -96,6 +97,10 @@ object PairingManager {
         val p2pIp = json.optString("p2p_ip", "")
         val deviceName = json.optString("name", "Linux Desktop workstation")
         val pairingNonce = json.optString("pairing_nonce_hex", "")
+        // QR-bound server cert hash (audit finding #5/#15): when the QR carries
+        // it, this is the pin we trust for the bootstrap QUIC connect instead of
+        // capturing the cert from the first connection (TOFU).
+        val qrServerCertHash = json.optString("server_cert_hash", "")
 
         // Handle P2P Wi-Fi connection
         val method = json.optString("method", "")
@@ -119,13 +124,32 @@ object PairingManager {
         try {
             val peerIdentity = hostPkHex // Use host PK as peer identity
             uniffi.core_crypto.ratchetRemoveSession(peerIdentity)
-            uniffi.core_crypto.ratchetInitSession(
-                peerIdentity,
-                kemResponse.sharedSecret,
-                false, // Android is not the initiator
-                hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
-                hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
-            )
+            if (keyPair != null) {
+                // Rekey keypair mismatch (audit finding #1): init the ratchet with
+                // OUR OWN pairing keypair so the DH/KEM chains and the desktop's
+                // rekey proposals share the same secret state. Peer keys are the
+                // desktop's wireguard x25519 pk and host mlkem pk, as before.
+                uniffi.core_crypto.ratchetInitSessionWithKeypair(
+                    peerIdentity,
+                    kemResponse.sharedSecret,
+                    false, // Android is not the initiator
+                    keyPair.x25519Pk,
+                    keyPair.x25519Sk,
+                    keyPair.mlkemPk,
+                    keyPair.mlkemSk,
+                    hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
+                    hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
+                )
+            } else {
+                // Fallback to the legacy keypair-less init (no local keypair).
+                uniffi.core_crypto.ratchetInitSession(
+                    peerIdentity,
+                    kemResponse.sharedSecret,
+                    false, // Android is not the initiator
+                    hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
+                    hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init ratchet session: ${e.message}")
         }
@@ -140,6 +164,11 @@ object PairingManager {
                 if (pairingNonce.isNotEmpty()) {
                     settingsManager.pendingPairingNonce = pairingNonce
                 }
+                // QR-bound server cert hash (audit finding #5/#15): pass it down
+                // to sendCiphertext's bootstrap QUIC connect so the server cert
+                // is pinned from the QR, not blindly accepted. Empty when the QR
+                // carried no hash (legacy accept-any bootstrap).
+                settingsManager.pendingServerCertHash = qrServerCertHash
             } catch (_: Exception) {}
         }
 
@@ -160,18 +189,23 @@ object PairingManager {
     /// use) and returns the response status string, or null on failure.
     fun sendCiphertext(hostIp: String, deviceName: String, kemCiphertext: String, clientPkHex: String, x25519PkHex: String, context: android.content.Context? = null): String? {
         return try {
+            val settings = context?.let { SettingsManager(it) }
             // Establish the QUIC bridge to the desktop before sending any stream.
-            // Bootstrap pairing uses the allow-private connect (the SSRF guard
-            // previously blocked private-IP connects with an empty pin — audit #6).
+            // Bootstrap pairing pins the server cert from the QR when the desktop
+            // included one (audit finding #5/#15); empty pin = legacy accept-any
+            // allow-private connect (the SSRF guard — audit #6).
             try {
-                uniffi.core_crypto.quicConnectPairingBootstrap(hostIp, 9876.toUShort())
+                uniffi.core_crypto.quicConnectPairingBootstrap(
+                    hostIp,
+                    9876.toUShort(),
+                    settings?.pendingServerCertHash ?: ""
+                )
             } catch (connectErr: Exception) {
                 Log.e(TAG, "QUIC connect failed: ${connectErr.message}")
             }
             var certHash = ""
             var nonceHex = ""
-            if (context != null) {
-                val settings = SettingsManager(context)
+            if (settings != null) {
                 certHash = settings.clientIdentityCertHash
                 nonceHex = settings.pendingPairingNonce
             }
