@@ -192,9 +192,18 @@ pub fn get_tofu_cert_hash() -> Option<String> {
     TRUSTED_SERVER_PIN.lock().ok().and_then(|h| h.clone())
 }
 
-/// Store the trusted server cert pin (after SAS confirmation).
+/// Store the trusted server cert pin (after SAS confirmation). An EMPTY hash
+/// clears the pin (used by the panic self-destruct path so the trusted-server
+/// identity does not survive a key wipe — audit finding #16).
 pub fn store_tofu_cert_hash(hash: String) {
     if let Ok(mut h) = TRUSTED_SERVER_PIN.lock() {
+        if hash.is_empty() {
+            *h = None;
+            if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
+                let _ = entry.delete_credential();
+            }
+            return;
+        }
         *h = Some(hash.clone());
         // Store in OS keychain only — no plaintext file fallback.
         if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
@@ -211,6 +220,26 @@ pub fn capture_server_cert_hash_no_store(conn: &quinn::Connection) -> Option<Str
     let certs = conn.peer_identity()?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
     let cert = certs.first()?;
     Some(hex::encode(sha2::Sha256::digest(cert.as_ref())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding #16: self-destruct must clear the trusted-server TLS pin.
+    /// `store_tofu_cert_hash("")` must clear the in-memory pin (the keyring
+    /// entry deletion depends on an OS backend and is exercised on systems
+    /// where one is available).
+    #[test]
+    fn store_empty_hash_clears_pin() {
+        store_tofu_cert_hash("a".repeat(64));
+        assert!(get_tofu_cert_hash().is_some());
+        store_tofu_cert_hash(String::new());
+        assert!(
+            get_tofu_cert_hash().is_none(),
+            "an empty stored hash must clear the trusted pin"
+        );
+    }
 }
 
 /// Generate a per-install client identity certificate (self-signed) used by

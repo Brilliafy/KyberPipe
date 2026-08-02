@@ -99,8 +99,13 @@ pub fn quic_connect_impl(
 pub fn quic_connect_pairing_bootstrap_impl(
     host: String,
     port: u16,
+    pinned_cert_hash_hex: String,
 ) -> Result<bool, KyberError> {
-    quic_connect_with_mode(&host, port, String::new(), true, None)
+    // `quic_connect_with_mode` structurally validates the pin when non-empty
+    // (audit finding #15): a bootstrap connection WITH a pin verifies the server
+    // certificate against the QR-bound hash, so a MITM cannot present its own
+    // certificate and become the pinned identity.
+    quic_connect_with_mode(&host, port, pinned_cert_hash_hex, true, None)
 }
 
 /// Post-pairing connect that additionally presents a client identity
