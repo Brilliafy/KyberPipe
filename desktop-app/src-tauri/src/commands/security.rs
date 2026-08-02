@@ -51,11 +51,13 @@ pub struct TelemetryMetrics {
 
 #[tauri::command]
 pub fn get_telemetry_metrics(state: State<'_, std::sync::Arc<AppState>>) -> TelemetryMetrics {
-    // Honest metrics: report the actual transport state instead of zeros.
+    // Honest metrics (audit finding #25): report the ACTUAL transport state.
+    // No RTT/packet counters are instrumented, so 0.0/0 are reported rather
+    // than a fabricated "5.0ms" that implied real telemetry.
     let is_connected = core_crypto::quic_bridge::is_quic_connected();
     let connection = state.get_connection();
     TelemetryMetrics {
-        rtt_ms: if is_connected { 5.0 } else { 0.0 },
+        rtt_ms: 0.0, // not instrumented — honest zero, no fabricated latency
         transport_path: if is_connected {
             connection.method.clone()
         } else {
@@ -63,7 +65,6 @@ pub fn get_telemetry_metrics(state: State<'_, std::sync::Arc<AppState>>) -> Tele
         },
         packets_sent: 0,
         packets_received: 0,
-        // No per-script wall-clock instrumentation yet — report honestly.
         last_script_execution_ms: 0.0,
     }
 }
@@ -73,17 +74,14 @@ pub fn toggle_neural_anomaly_engine(
     enabled: bool,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
-    let status_str = if enabled {
-        "ENABLED (eBPF ONNX Engine Active)"
-    } else {
-        "DISABLED (Battery & Performance Optimized)"
-    };
+    // Audit finding #25: this was a log-only STUB that claimed an "eBPF ONNX
+    // Engine" was active. There is no such engine — the toggle is retained for
+    // frontend API compatibility but must not create a false feature surface.
     state.add_log(format!(
-        "[Neural Anomaly Engine] Status changed to: {status_str}"
+        "[Neural Anomaly] Preference toggled to {} (no on-device engine — placeholder only)",
+        if enabled { "enabled" } else { "disabled" }
     ));
-    Ok(format!(
-        "Neuromorphic On-Device Anomaly Engine is now {status_str}"
-    ))
+    Ok("Local placeholder preference stored — no on-device anomaly engine is bundled.".to_string())
 }
 
 #[tauri::command]
@@ -119,27 +117,23 @@ pub fn init_sentry_desktop_telemetry(
 }
 
 #[tauri::command]
-pub fn bind_pkcs11_yubikey_hardware_token(
-    slot_id: u32,
-    token: String,
-) -> Result<String, String> {
+pub fn bind_pkcs11_yubikey_hardware_token(slot_id: u32, token: String) -> Result<String, String> {
     if !consume_privilege_token("bind_pkcs11_yubikey_hardware_token", &token) {
         return Err("Privileged action requires a fresh confirmation token".into());
     }
     // Resolve pkcs11-tool to a FIXED absolute path (audit finding #14b): a
     // PATH lookup allows a compromised renderer's environment to substitute a
     // malicious binary. The binary is resolved once per process and cached.
-    static PKCS11_TOOL: LazyLock<Option<std::path::PathBuf>> =
-        LazyLock::new(|| {
-            [
-                "/usr/bin/pkcs11-tool",
-                "/bin/pkcs11-tool",
-                "/usr/local/bin/pkcs11-tool",
-            ]
-            .iter()
-            .map(std::path::PathBuf::from)
-            .find(|p| p.exists())
-        });
+    static PKCS11_TOOL: LazyLock<Option<std::path::PathBuf>> = LazyLock::new(|| {
+        [
+            "/usr/bin/pkcs11-tool",
+            "/bin/pkcs11-tool",
+            "/usr/local/bin/pkcs11-tool",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+    });
     let Some(tool) = PKCS11_TOOL.as_deref() else {
         return Err(
             "pkcs11-tool not found in standard locations. Install opensc to use hardware tokens."
@@ -163,16 +157,14 @@ pub fn bind_pkcs11_yubikey_hardware_token(
         ));
     }
     // Extract the token serial number as proof of a REAL token operation.
-    let serial = listing
-        .lines()
-        .find_map(|l| {
-            let t = l.trim();
-            if t.starts_with("serial number") || t.starts_with("Serial") {
-                Some(t.to_string())
-            } else {
-                None
-            }
-        });
+    let serial = listing.lines().find_map(|l| {
+        let t = l.trim();
+        if t.starts_with("serial number") || t.starts_with("Serial") {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    });
     // Status-only return: never expose raw tool output to the renderer
     // (audit finding #14b — info disclosure). Honest wording: this verifies the
     // token, it does NOT wrap KyberPipe keys (no key operation is performed).
@@ -232,12 +224,14 @@ pub fn trigger_panic_self_destruct(
     // Destroy the desktop session key handle AND every other live handle — the
     // old path only destroyed DESKTOP_SESSION_KEY_HANDLE, leaving the key bytes
     // of other handles registered in memory (audit finding #16).
-    let handle = crate::handlers::DESKTOP_SESSION_KEY_HANDLE.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let handle =
+        crate::handlers::DESKTOP_SESSION_KEY_HANDLE.swap(0, std::sync::atomic::Ordering::AcqRel);
     if handle != 0 {
         core_crypto::session_key_destroy(handle);
     }
     core_crypto::session_key_destroy_all();
-    crate::handlers::IS_SESSION_KEY_AUTHENTICATED.store(false, std::sync::atomic::Ordering::Release);
+    crate::handlers::IS_SESSION_KEY_AUTHENTICATED
+        .store(false, std::sync::atomic::Ordering::Release);
 
     // Clear all ratchet sessions — chain keys must not survive self-destruct
     core_crypto::ratchet_clear_all_sessions();
@@ -254,7 +248,10 @@ pub fn trigger_panic_self_destruct(
     state.add_log(
         "[PANIC DESTRUCTION] Memory zeroized & Hardware KeyStore invalidated!".to_string(),
     );
-    Ok("Hardware master key destroyed, all ratchet sessions cleared, and key material zeroized.".to_string())
+    Ok(
+        "Hardware master key destroyed, all ratchet sessions cleared, and key material zeroized."
+            .to_string(),
+    )
 }
 
 #[tauri::command]

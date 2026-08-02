@@ -104,7 +104,8 @@ pub fn delete_connection(
     if handle != 0 {
         core_crypto::session_key_destroy(handle);
     }
-    crate::handlers::IS_SESSION_KEY_AUTHENTICATED.store(false, std::sync::atomic::Ordering::Release);
+    crate::handlers::IS_SESSION_KEY_AUTHENTICATED
+        .store(false, std::sync::atomic::Ordering::Release);
     state.set_session_key(crate::state::SecureString::new(String::new()));
     state.clear_all_pairing();
     {
@@ -115,7 +116,11 @@ pub fn delete_connection(
     }
     state.save_settings();
     crate::ratchet_store::clear_ratchet_store();
-    state.set_connection("DISCONNECTED".to_string(), "None".to_string(), "red".to_string());
+    state.set_connection(
+        "DISCONNECTED".to_string(),
+        "None".to_string(),
+        "red".to_string(),
+    );
     state.add_log("[Connection] Deleted — all pairing state cleared".to_string());
     Ok(())
 }
@@ -124,8 +129,15 @@ pub fn delete_connection(
 pub fn grant_file_access(
     is_desktop: bool,
     granted: bool,
+    token: String,
     state: State<'_, std::sync::Arc<AppState>>,
-) -> crate::state::AppSettings {
+) -> Result<crate::state::AppSettings, String> {
+    // Privileged state mutation — requires a fresh user-gesture token
+    // (audit finding #20: the token pattern must apply uniformly to
+    // privileged/destructive commands).
+    if !crate::commands::security::consume_privilege_token("grant_file_access", &token) {
+        return Err("Privileged action requires a fresh confirmation token".into());
+    }
     {
         let mut s = state.settings.lock();
         if is_desktop {
@@ -135,7 +147,7 @@ pub fn grant_file_access(
         }
     }
     state.save_settings();
-    state.settings.lock().clone()
+    Ok(state.settings.lock().clone())
 }
 
 #[derive(Serialize)]
@@ -182,11 +194,7 @@ pub fn list_mock_files(
         format!("{home}/Documents"),
         format!("{home}/Desktop"),
     ] {
-        let name = dir
-            .rsplit('/')
-            .next()
-            .unwrap_or(&dir)
-            .to_string();
+        let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
         if std::path::Path::new(&dir).exists() {
             items.push(LocalFileItem {
                 name,
@@ -232,7 +240,13 @@ pub fn list_mock_files(
 }
 
 #[tauri::command]
-pub fn open_local_file(path: String) -> Result<(), String> {
+pub fn open_local_file(path: String, token: String) -> Result<(), String> {
+    // Destructive/privileged action — requires a fresh user-gesture token
+    // (audit finding #20: uniform privilege gating; this previously sat flat
+    // next to read-only queries with no gate).
+    if !crate::commands::security::consume_privilege_token("open_local_file", &token) {
+        return Err("Privileged action requires a fresh confirmation token".into());
+    }
     if path.contains("..") || path.contains("~") {
         return Err("Path traversal blocked: relative path components not permitted".into());
     }
@@ -258,11 +272,9 @@ pub fn open_local_file(path: String) -> Result<(), String> {
     let canonical = std::fs::canonicalize(&resolved)
         .map_err(|_| format!("Cannot resolve path: {}", resolved))?;
     let canonical_path = std::path::Path::new(&canonical);
-    if !allowed_dirs.iter().any(|d| {
-        match std::fs::canonicalize(d) {
-            Ok(allowed_canonical) => canonical_path.starts_with(&allowed_canonical),
-            Err(_) => false,
-        }
+    if !allowed_dirs.iter().any(|d| match std::fs::canonicalize(d) {
+        Ok(allowed_canonical) => canonical_path.starts_with(&allowed_canonical),
+        Err(_) => false,
     }) {
         return Err("Access denied: path must be under Downloads, Documents, Desktop, or kyberpipe directory".into());
     }

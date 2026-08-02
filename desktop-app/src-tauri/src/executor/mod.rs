@@ -1,6 +1,5 @@
 pub mod boa_sandbox;
 pub mod fallback;
-pub mod wasm;
 pub mod worker;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

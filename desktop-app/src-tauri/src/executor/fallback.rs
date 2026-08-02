@@ -1,6 +1,6 @@
+use super::ScriptExecutionResult;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use super::ScriptExecutionResult;
 
 /// THE single allowlist for fallback automation scripts (audit finding #19).
 /// `execute_fallback_script` (the Tauri command) and `run_fallback_subprocess`
@@ -77,7 +77,10 @@ pub fn run_fallback_subprocess(script_path: &str, lux: f64) -> ScriptExecutionRe
         .stderr(Stdio::piped())
         .env_clear()
         .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
-        .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_default())
+        .env(
+            "WAYLAND_DISPLAY",
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+        )
         .spawn()
     {
         Ok(mut child) => {

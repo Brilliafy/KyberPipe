@@ -31,6 +31,7 @@ import kotlinx.coroutines.*
 import org.json.JSONObject
 import org.kyberpipe.client.receiver.NotificationHook
 import org.kyberpipe.client.service.BeaconHost
+import org.kyberpipe.client.service.KyberPipePollEngine
 import org.kyberpipe.client.service.MdnsBeaconListener
 import org.kyberpipe.client.service.WifiDirectManager
 import org.kyberpipe.client.utils.NotificationStore
@@ -87,6 +88,7 @@ fun KyberpipeTheme(
 fun MainScreen(
     settings: SettingsManager,
     initialPairingConfig: String?,
+    initialPairingConfigWarning: String? = null,
     onClearInitialPairingConfig: () -> Unit,
     onAvatarPickerClick: () -> Unit,
     onStartService: () -> Unit,
@@ -220,14 +222,51 @@ fun MainScreen(
         }
     }
 
+    // Audit finding #22: pairing data arriving from a LINK must be confirmed by
+    // the user before it is consumed. A warning (missing pairing token / cert
+    // pin) makes the payload suspicious and is surfaced explicitly.
+    var linkPairingPending by remember { mutableStateOf(initialPairingConfig != null) }
+    var linkPairingWarning by remember { mutableStateOf(initialPairingConfigWarning) }
+
     // Load initial deep link config
     LaunchedEffect(initialPairingConfig) {
         if (initialPairingConfig != null && initialPairingConfig.isNotEmpty()) {
-            pairingConfigInput = initialPairingConfig
-            currentTab = TabItem.SETTINGS
+            linkPairingPending = true
+            linkPairingWarning = initialPairingConfigWarning
             onClearInitialPairingConfig()
-            Toast.makeText(context, "Pairing config loaded from deep link!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Pairing link received", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // Confirmation dialog for link-initiated pairing (audit finding #22):
+    // surface the origin + any warning and require an explicit confirm before
+    // the payload is loaded into the pairing flow.
+    if (linkPairingPending) {
+        AlertDialog(
+            onDismissRequest = { linkPairingPending = false },
+            title = { Text("Pairing initiated from a link") },
+            text = {
+                Text(
+                    (linkPairingWarning?.let { "$it\n\n" } ?: "") +
+                        "Verify the host identity before continuing. Only proceed if you trust the " +
+                        "source of this link and the desktop it points to."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cfg = initialPairingConfig
+                    if (cfg != null && cfg.isNotEmpty()) {
+                        pairingConfigInput = cfg
+                        currentTab = TabItem.SETTINGS
+                        addLog("[Pairing] Pairing config loaded from confirmed deep link")
+                    }
+                    linkPairingPending = false
+                }) { Text("I trust this link — continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = { linkPairingPending = false }) { Text("Cancel") }
+            }
+        )
     }
 
     // Hook notification listeners
@@ -402,235 +441,72 @@ fun MainScreen(
         evaluateConnection()
     }
 
+    // ── Single poll loop (audit findings #8/#15/#29) ────────────────────────
+    // The poll loop now lives in ONE place: KyberPipePollEngine, which the
+    // background service owns. The foreground SUBSCRIBES to its updates instead
+    // of running a second loop against the same ratchet session (the old
+    // foreground loop raced the service loop, used the legacy hex wire format
+    // the desktop no longer emits, and dropped rekey acks — findings #1/#3/#15).
+    // Everything decrypted/parsed below already happened inside the engine with
+    // binary-TLV, rekey-aware decryption; we only mirror the result into UI state.
     LaunchedEffect(Unit) {
-        while (isActive) {
-            delay(2500)
-            // Poll while paired OR while a pairing confirmation is pending:
-            // after SAS confirm the phone stays isPaired=false until the desktop
-            // confirms (two-phase commit, audit finding #6).
-            if (settings.isPaired || settings.pendingPairingConfirmation) {
-                // Timeout: if the desktop never confirms the SAS within ~60s,
-                // abandon the pending confirmation and keep isPaired false.
-                if (settings.pendingPairingConfirmation && pairingPendingStartedAt > 0 &&
-                    System.currentTimeMillis() - pairingPendingStartedAt > 60_000L
-                ) {
-                    settings.pendingPairingConfirmation = false
-                    pairingConfirmedPending = false
-                    pairingPendingStartedAt = 0L
-                    connectionStatus = "DISCONNECTED (Pairing not confirmed)"
-                    connectionMethod = "None"
-                    connectionColor = Color.Red
-                    addLog("[Pairing] Pairing not confirmed by desktop (timeout)")
+        // Ensure the engine is running while the UI is visible (idempotent —
+        // the service also starts it; only service teardown stops it).
+        KyberPipePollEngine.start(context)
+        KyberPipePollEngine.updates.collect { update ->
+            // 60s timeout mirror for the pending two-phase pairing confirmation
+            // (audit finding #6) — the engine keeps polling during the window.
+            if (settings.pendingPairingConfirmation && pairingPendingStartedAt > 0 &&
+                System.currentTimeMillis() - pairingPendingStartedAt > 60_000L
+            ) {
+                settings.pendingPairingConfirmation = false
+                pairingConfirmedPending = false
+                pairingPendingStartedAt = 0L
+                connectionStatus = "DISCONNECTED (Pairing not confirmed)"
+                connectionMethod = "None"
+                connectionColor = Color.Red
+                addLog("[Pairing] Pairing not confirmed by desktop (timeout)")
+            }
+            connectionStatus = update.status
+            connectionMethod = update.method
+            connectionColor = when (update.color) {
+                "green" -> Color.Green
+                "yellow" -> Color.Yellow
+                else -> Color.Red
+            }
+            if (update.pairingConfirmed) {
+                pairingConfirmedPending = false
+                pairingPendingStartedAt = 0L
+                addLog("[Pairing] Desktop confirmed SAS — pairing committed")
+            }
+            if (!update.isPaired) {
+                settings.isPaired = false
+                settings.pairedDeviceName = ""
+                connectionStatus = "DISCONNECTED (Host unpaired)"
+                connectionMethod = "None"
+                connectionColor = Color.Red
+            }
+            val latestClip = update.remoteClipboard
+            if (!latestClip.isNullOrEmpty()) {
+                val exists = clipboardList.any { it.text == latestClip }
+                if (!exists) {
+                    clipboardList.add(
+                        0,
+                        AndroidClipboardRecord(
+                            id = "clip_${System.currentTimeMillis()}",
+                            text = latestClip,
+                            source = "remote",
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", latestClip))
+                    addLog("[Clipboard] Received remote clip (${latestClip.length} chars)")
                 }
-                val targetHostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
-                if (targetHostIp.isEmpty()) continue
-
-                val responseText = withContext(Dispatchers.Default) {
-                    var result: String? = null
-                    try {
-                        // Ensure the QUIC bridge is established before polling.
-                        // Post-pairing connects present the per-install identity
-                        // cert (audit finding #8) so the server authorizes by
-                        // certificate — never by IP.
-                        try {
-                            org.kyberpipe.client.PairingManager.connectWithIdentity(
-                                targetHostIp, 9876.toUShort(), settings.serverCertPin, context
-                            )
-                        } catch (_: Exception) {
-                            try {
-                                uniffi.core_crypto.quicConnect(targetHostIp, 9876.toUShort(), settings.serverCertPin)
-                            } catch (_: Exception) {}
-                        }
-                        // Producer for the Synchronize recovery path (audit #4).
-                        var syncSendCount = ""
-                        val peer0 = settings.peerRatchetIdentity
-                        if (peer0.isNotEmpty()) {
-                            try {
-                                syncSendCount = uniffi.core_crypto.ratchetSendCount(peer0).toString()
-                            } catch (_: Exception) {}
-                        }
-                        val requestBody = if (syncSendCount.isNotEmpty()) {
-                            org.json.JSONObject().put("sync_send_count", syncSendCount).toString()
-                        } else {
-                            ""
-                        }
-                        val text = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
-                        if (text.isNotEmpty()) {
-                            result = text
-                        }
-                    } catch (_: Exception) {
-                    }
-                    result
-                }
-
-                if (responseText != null) {
-                    // Two-phase commit (audit finding #6): while awaiting desktop
-                    // SAS confirmation, commit isPaired ONLY when the desktop
-                    // reports is_paired=true; on an explicit "Not paired" rejection
-                    // the pending confirmation is abandoned (isPaired stays false).
-                    if (settings.pendingPairingConfirmation) {
-                        val confirmJson = try { JSONObject(responseText) } catch (_: Exception) { null }
-                        val pcPaired = confirmJson?.optBoolean("is_paired", false) ?: false
-                        if (pcPaired) {
-                            settings.isPaired = true
-                            settings.pendingPairingConfirmation = false
-                            pairingConfirmedPending = false
-                            pairingPendingStartedAt = 0L
-                            addLog("[Pairing] Desktop confirmed SAS — pairing committed")
-                        } else if (responseText.contains("Not paired", ignoreCase = true)) {
-                            settings.pendingPairingConfirmation = false
-                            pairingConfirmedPending = false
-                            pairingPendingStartedAt = 0L
-                            addLog("[Pairing] Pairing not confirmed by desktop")
-                        }
-                    }
-                    try {
-                        val json = JSONObject(responseText)
-                        val pcIsPaired = json.optBoolean("is_paired", true)
-                        if (!pcIsPaired) {
-                            settings.isPaired = false
-                            settings.pairedDeviceName = ""
-                            connectionStatus = "DISCONNECTED (Host unpaired)"
-                            connectionMethod = "None"
-                            connectionColor = Color.Red
-                        } else {
-                            // Mirror exactly what the desktop reports
-                            val status = json.optString("connection_status", "ACTIVE")
-                            val method = json.optString("connection_method", "LAN")
-                            val colorStr = json.optString("connection_color", "green")
-
-                            connectionStatus = status
-                            connectionMethod = method
-                            connectionColor = when (colorStr) {
-                                "green" -> Color.Green
-                                "yellow" -> Color.Yellow
-                                else -> Color.Red
-                            }
-
-                            val latestClipEncrypted = json.optJSONObject("latest_clip_encrypted")
-                            val latestClip = if (latestClipEncrypted != null) {
-                                try {
-                                    // Desktop wraps ratchet payloads in {"encrypted_ratchet": {...}};
-                                    // legacy session-key payloads are the object itself.
-                                    val enc = latestClipEncrypted.optJSONObject("encrypted_ratchet")
-                                        ?: latestClipEncrypted
-                                    val nonce = enc.getString("nonce_hex").hexToByteArray()
-                                    val ct = enc.getString("ciphertext_hex").hexToByteArray()
-                                    val peer = settings.peerRatchetIdentity
-                                    if (peer.isNotEmpty()) {
-                                        try {
-                                            // REKEY-AWARE decrypt path (audit finding #1):
-                                            // forward the rekey fields so DH/KEM
-                                            // proposals are adopted and ACKed.
-                                            val rekeyX = enc.optString("rekey_x25519_pk_hex", "")
-                                                .takeIf { it.isNotEmpty() }?.hexToByteArray()
-                                            val rekeyM = enc.optString("rekey_mlkem_pk_hex", "")
-                                                .takeIf { it.isNotEmpty() }?.hexToByteArray()
-                                            val rekeyCt = enc.optString("rekey_ciphertext_hex", "")
-                                                .takeIf { it.isNotEmpty() }?.hexToByteArray()
-                                            try {
-                                                String(
-                                                    uniffi.core_crypto.ratchetDecryptWithRekeyMessage(
-                                                        peer, nonce, ct, rekeyCt, rekeyX, rekeyM
-                                                    ),
-                                                    Charsets.UTF_8
-                                                )
-                                            } catch (_: Exception) {
-                                                // Synchronize recovery (audit #4): the
-                                                // desktop's send counter lets us resync
-                                                // the receiving chain after a handoff gap.
-                                                val desktopCount =
-                                                    json.optLong("ratchet_send_count", -1L)
-                                                if (desktopCount > 0) {
-                                                    try {
-                                                        val recv = uniffi.core_crypto.ratchetRecvCount(peer).toLong()
-                                                        if (desktopCount > recv + 100) {
-                                                            uniffi.core_crypto.ratchetSynchronizeSession(
-                                                                peer, desktopCount.toULong()
-                                                            )
-                                                        }
-                                                    } catch (_: Exception) {}
-                                                }
-                                                String(
-                                                    uniffi.core_crypto.ratchetDecryptWithRekeyMessage(
-                                                        peer, nonce, ct, rekeyCt, rekeyX, rekeyM
-                                                    ),
-                                                    Charsets.UTF_8
-                                                )
-                                            }
-                                        } catch (ratchetErr: Exception) {
-                                            SessionKeyManager.decrypt(nonce, ct) ?: ""
-                                        }
-                                    } else {
-                                        SessionKeyManager.decrypt(nonce, ct) ?: ""
-                                    }
-                                } catch (_: Exception) {
-                                    ""
-                                }
-                            } else ""
-                            if (latestClip.isNotEmpty()) {
-                                val exists = clipboardList.any { it.text == latestClip }
-                                if (!exists) {
-                                    clipboardList.add(
-                                        0,
-                                        AndroidClipboardRecord(
-                                            id = "clip_${System.currentTimeMillis()}",
-                                            text = latestClip,
-                                            source = "remote",
-                                            timestamp = System.currentTimeMillis()
-                                        )
-                                    )
-                                    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboardManager.setPrimaryClip(android.content.ClipData.newPlainText("Kyberpipe", latestClip))
-                                    addLog("[Clipboard] Received remote clip (${latestClip.length} chars)")
-                                }
-                            }
-
-                            if (json.has("pending_media_action") && !json.isNull("pending_media_action")) {
-                                val pendingActIndex = json.optInt("pending_media_action", -1)
-                                if (pendingActIndex != -1) {
-                                    NotificationHook.triggerMediaAction(pendingActIndex)
-                                    addLog("[Media] Triggered media action index $pendingActIndex from PC")
-                                }
-                            }
-                            
-                            val rekeyAckEncrypted = json.optJSONObject("rekey_ack_encrypted")
-                            if (rekeyAckEncrypted != null) {
-                                try {
-                                    val nonce = rekeyAckEncrypted.getString("nonce_hex").hexToByteArray()
-                                    val ct = rekeyAckEncrypted.getString("ciphertext_hex").hexToByteArray()
-                                    // The ratchet peer identity is the host PK fingerprint, NOT the
-                                    // human-readable device nickname.
-                                    val peer = settings.peerRatchetIdentity
-                                    if (peer.isNotEmpty()) {
-                                        val ptBytes = uniffi.core_crypto.ratchetDecryptMessage(
-                                            peer,
-                                            nonce,
-                                            ct
-                                        )
-                                        val ptJson = org.json.JSONObject(String(ptBytes, Charsets.UTF_8))
-                                        // RekeyAck serializes as {"type":"RekeyAck","payload":{"seq":N}}
-                                        // — parse the type/payload shape (audit finding #3).
-                                        if (ptJson.optString("type") == "RekeyAck") {
-                                            val seq = ptJson.getJSONObject("payload").getLong("seq")
-                                            uniffi.core_crypto.ratchetProcessRekeyAck(peer, seq.toULong())
-                                            Log.i("KyberpipePoll", "Processed RekeyAck for seq $seq")
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("KyberpipePoll", "Failed to decrypt rekey ack", e)
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e("KyberpipePoll", "Parse poll response error: ${e.message}")
-                    }
-                } else {
-                    // Poll failed — desktop not reachable
-                    connectionStatus = "DISCONNECTED (Unreachable)"
-                    connectionMethod = "None"
-                    connectionColor = Color.Red
-                }
+            }
+            update.pendingMediaAction?.let { idx ->
+                NotificationHook.triggerMediaAction(idx)
+                addLog("[Media] Triggered media action index $idx from PC")
             }
         }
     }

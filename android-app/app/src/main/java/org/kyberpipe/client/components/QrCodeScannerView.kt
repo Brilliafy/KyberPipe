@@ -706,6 +706,27 @@ fun CameraPreview(
     }
 }
 
+/// Audit finding #17: guard the manual-JNI QR decode. The native export may be
+/// missing on a misbuilt ABI (UnsatisfiedLinkError — an Error, not an
+/// Exception) or the decoder may throw on malformed buffers; a crash here takes
+/// down the camera UI. Return null ("no code") instead, matching the fallback
+/// contract. The decode itself runs on the caller's background thread (capture
+/// executor / ML Kit executor) — never the Compose main thread.
+private fun guardedNativeQrDecode(
+    yBytes: ByteArray,
+    width: Int,
+    height: Int,
+    stride: Int,
+    rotation: Int
+): String? {
+    return try {
+        QrNative.decodeQrCode(yBytes, width, height, stride, rotation)
+    } catch (t: Throwable) {
+        Log.e("QrCodeScanner", "Native QR decode unavailable/failed: ${t.message}")
+        null
+    }
+}
+
 private fun decodeJpegToGrayscale(jpeg: ByteArray, sampleSize: Int): Triple<ByteArray, Int, Int>? {
     return try {
         val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
@@ -769,7 +790,7 @@ private fun runZxingAndRqrrFallback(img: android.media.Image, proxy: androidx.ca
             val fullRes = decodeJpegToGrayscale(jpeg, 1)
             if (fullRes != null) {
                 val (gray, bw, bh) = fullRes
-                val rqrrResult = QrNative.decodeQrCode(gray, bw, bh, bw, rot)
+                val rqrrResult = guardedNativeQrDecode(gray, bw, bh, bw, rot)
                 if (!rqrrResult.isNullOrEmpty()) {
                     Log.w("QrCodeScanner", "Captured photo rqrr DECODED ${rqrrResult.length} chars")
                     return callback(rqrrResult)
@@ -783,7 +804,7 @@ private fun runZxingAndRqrrFallback(img: android.media.Image, proxy: androidx.ca
             yBuf.rewind()
             val yRaw = ByteArray(stride * proxy.height)
             yBuf.get(yRaw, 0, minOf(yBuf.remaining(), stride * proxy.height))
-            val rqrrResult = QrNative.decodeQrCode(yRaw, proxy.width, proxy.height, stride, rot)
+            val rqrrResult = guardedNativeQrDecode(yRaw, proxy.width, proxy.height, stride, rot)
             if (!rqrrResult.isNullOrEmpty()) {
                 Log.w("QrCodeScanner", "Captured photo rqrr YUV DECODED ${rqrrResult.length} chars")
                 return callback(rqrrResult)

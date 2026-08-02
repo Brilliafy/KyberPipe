@@ -84,15 +84,27 @@ pub enum KyberMessage {
     NotificationAction(NotificationActionPacket),
     HardwareCommand(HardwareCommandPacket),
     FileChunk(FileChunkPacket),
-    PathChallenge { challenge_token: String },
-    PathResponse { response_token: String },
-    Ping { timestamp: u64 },
-    Pong { timestamp: u64 },
-    RekeyAck { seq: u64 },
+    PathChallenge {
+        challenge_token: String,
+    },
+    PathResponse {
+        response_token: String,
+    },
+    Ping {
+        timestamp: u64,
+    },
+    Pong {
+        timestamp: u64,
+    },
+    RekeyAck {
+        seq: u64,
+    },
     /// Explicit session resync. The sender of this message communicates its
     /// current send/recv sequence counter so the peer can re-derive skipped
     /// chain keys after a gap exceeded `max_skip`. Always ratchet-encrypted.
-    Synchronize { send_count: u64 },
+    Synchronize {
+        send_count: u64,
+    },
 }
 
 impl KyberMessage {
@@ -104,8 +116,6 @@ impl KyberMessage {
         serde_json::from_str(json_str).map_err(|e| KyberError::SerializationError(e.to_string()))
     }
 }
-
-
 
 /// Core payload wrappers carried across QUIC streams
 pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {

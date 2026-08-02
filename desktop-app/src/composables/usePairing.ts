@@ -72,18 +72,30 @@ export function usePairing(deps: PairingDeps) {
   /// in every pairing QR payload: the phone echoes the nonce so the server's
   /// blind-race check passes, and pins the QR-bound cert hash so a bootstrap
   /// MITM cannot become the permanent trusted identity.
+  ///
+  /// AUDIT FINDING #15: an empty cert hash is NOT acceptable — pairing without
+  /// a QR-bound pin lets a LAN MITM terminate the bootstrap TLS, forward the
+  /// KEM, and hold every session key while the SAS still matches. Any failure
+  /// (command error OR empty result) THROWS, so the QR is never built without
+  /// the pin and the pairing fails loudly instead of silently.
   const fetchQrBindingFields = async (): Promise<Record<string, string>> => {
     let nonce = "";
-    let serverCertHash = "";
     try {
       nonce = (await invoke<string>("get_pairing_nonce")) || "";
     } catch (e) {
       console.warn("get_pairing_nonce failed:", e);
     }
+    let serverCertHash = "";
     try {
       serverCertHash = (await invoke<string>("get_server_cert_hash")) || "";
     } catch (e) {
-      console.warn("get_server_cert_hash failed:", e);
+      console.error("get_server_cert_hash failed:", e);
+    }
+    if (!serverCertHash) {
+      throw new Error(
+        "Pairing aborted: no QR-bound server certificate hash available — " +
+          "cannot build a MITM-safe pairing QR. Restart the desktop app and retry."
+      );
     }
     return {
       pairing_nonce_hex: nonce,
@@ -262,14 +274,22 @@ export function usePairing(deps: PairingDeps) {
   const submitManualPairing = async () => {
     const ip = manualIpInput.value.trim();
     if (!ip) return;
-    await buildPairingQr({
-      method: "manual_ip",
-      host: ip,
-      port: parseInt(manualPortInput.value) || 9876,
-      pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-      x25519_pub: keyPair.value?.x25519_pk_hex || "",
-    });
-    showManualIpDialog.value = false;
+    // Audit finding #13: any failure (e.g. no cert hash for the QR) must not
+    // leave half-updated UI state or an unhandled rejection — surface it and
+    // keep the dialog open so the user can retry.
+    try {
+      await buildPairingQr({
+        method: "manual_ip",
+        host: ip,
+        port: parseInt(manualPortInput.value) || 9876,
+        pqc_pub: keyPair.value?.mlkem_pk_hex || "",
+        x25519_pub: keyPair.value?.x25519_pk_hex || "",
+      });
+      showManualIpDialog.value = false;
+    } catch (e) {
+      console.error("Manual pairing QR build failed:", e);
+      alert("Pairing QR could not be built: " + e);
+    }
   };
 
 
@@ -284,23 +304,41 @@ export function usePairing(deps: PairingDeps) {
       return;
     }
 
-    const res = await invoke<any>("get_connection_status_full");
-    if (res.color === "green") {
+    // Audit finding #13: guard every invoke so a rejection (keyring locked,
+    // command unavailable in dev) cannot produce an unhandled promise
+    // rejection or leave the UI half-updated.
+    let res: any = null;
+    try {
+      res = await invoke<any>("get_connection_status_full");
+    } catch (e) {
+      console.error("get_connection_status_full failed:", e);
+      return;
+    }
+    if (res?.color === "green") {
       return; // Already connected
     }
 
-    await invoke("set_connection_status_full", {
-      status: "WAITING FOR COMPANION",
-      method: "None",
-      color: "yellow",
-    });
+    try {
+      await invoke("set_connection_status_full", {
+        status: "WAITING FOR COMPANION",
+        method: "None",
+        color: "yellow",
+      });
+    } catch (e) {
+      console.error("set_connection_status_full failed:", e);
+      return;
+    }
     await checkConnectionState();
     await refreshLogs();
   };
 
   const handleManualRetry = () => {
     attemptCount.value = 0;
-    triggerConnectionAttempt();
+    // Audit finding #13: fire-and-forget with error containment — a rejected
+    // trigger must not produce an unhandled promise rejection.
+    triggerConnectionAttempt().catch((e) =>
+      console.error("Manual retry failed:", e)
+    );
   };
 
   const checkFirewall = async () => {

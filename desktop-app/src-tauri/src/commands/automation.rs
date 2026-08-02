@@ -179,8 +179,7 @@ pub fn execute_fallback_script(
     // Resolve against the SINGLE shared allowlist (audit finding #19). The
     // resolved value is the same relative key `run_fallback_subprocess` uses,
     // so the command layer and the executor can never disagree.
-    let allowed_path = resolve_allowed_fallback_script(&script_path)
-        .map_err(|e| e)?;
+    let allowed_path = resolve_allowed_fallback_script(&script_path).map_err(|e| e)?;
     state.add_log(format!(
         "[Subprocess] Executing fallback script: {allowed_path} (lux = {lux})"
     ));

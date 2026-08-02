@@ -163,22 +163,40 @@ const handleDeleteConnection = async () => {
       "Delete this connection? This clears the session key, ratchet state, and all pairing data on this desktop."
     );
     if (!confirmed) return;
-    const token = await invoke<string>("request_privilege_token", {
-      action: "delete_connection",
-    });
-    isPaired.value = false;
-    pairedDeviceName.value = "";
-    pairedDevicePicture.value = "";
-    localMethod.value = "";
-    remoteMethod.value = "";
-    localActive.value = false;
-    remoteActive.value = false;
-    await invoke("delete_connection", { token });
-    await invoke("set_connection_status_full", {
-      status: "DISCONNECTED",
-      method: "None",
-      color: "red"
-    });
+    // Audit finding #13: NO optimistic state mutation before the backend
+    // confirms — a rejected token request or a failed delete must not leave
+    // the UI claiming "deleted" while the backend kept the pairing (or vice
+    // versa). All local state flips happen only after the destructive command
+    // succeeds.
+    let token: string;
+    try {
+      token = await invoke<string>("request_privilege_token", {
+        action: "delete_connection",
+      });
+    } catch (e) {
+      console.error("Privilege token request failed:", e);
+      alert("Delete failed: could not obtain a confirmation token.");
+      return;
+    }
+    try {
+      await invoke("delete_connection", { token });
+      await invoke("set_connection_status_full", {
+        status: "DISCONNECTED",
+        method: "None",
+        color: "red",
+      });
+      // Backend confirmed — now reconcile the mirror state.
+      isPaired.value = false;
+      pairedDeviceName.value = "";
+      pairedDevicePicture.value = "";
+      localMethod.value = "";
+      remoteMethod.value = "";
+      localActive.value = false;
+      remoteActive.value = false;
+    } catch (e) {
+      console.error("Delete connection failed:", e);
+      alert("Delete failed: " + e);
+    }
   };
 
   const loadPairingConfig = async () => {

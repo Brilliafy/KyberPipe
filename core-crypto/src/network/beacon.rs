@@ -74,8 +74,7 @@ pub async fn send_p2p_beacon(
     let signed_region = format!("{sanitized_payload}:{timestamp}:{nonce_hex}");
 
     let (pk, sk) = device_signing_key();
-    let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), &sk)
-        .unwrap_or_default();
+    let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), &sk).unwrap_or_default();
     let pk_hex = hex::encode(&pk);
     let sig_hex = hex::encode(&sig);
 
@@ -174,22 +173,22 @@ pub async fn listen_for_beacons_with_expected_key(
                             if local_ip != addr.ip().to_string() {
                                 warn!(
                                     "Beacon IP mismatch: declared={} source={} — dropping",
-                                    local_ip, addr.ip()
+                                    local_ip,
+                                    addr.ip()
                                 );
                                 continue;
                             }
                             // Signature verification against a known device key.
                             if let Some(expected) = &expected_pk {
-                                let signed_region =
-                                    format!("{host_pk}:{local_ip}:{device_name}:{ts_str}:{nonce_hex}");
+                                let signed_region = format!(
+                                    "{host_pk}:{local_ip}:{device_name}:{ts_str}:{nonce_hex}"
+                                );
                                 let ok = match (hex::decode(sig_hex), hex::decode(signing_pk_hex)) {
-                                    (Ok(sig), Ok(pk)) => {
-                                        crate::crypto::verify_mldsa_signature(
-                                            signed_region.as_bytes(),
-                                            &sig,
-                                            &pk,
-                                        )
-                                    }
+                                    (Ok(sig), Ok(pk)) => crate::crypto::verify_mldsa_signature(
+                                        signed_region.as_bytes(),
+                                        &sig,
+                                        &pk,
+                                    ),
                                     _ => false,
                                 };
                                 if !ok {
@@ -224,7 +223,8 @@ pub async fn listen_for_beacons_with_expected_key(
                             if local_ip != addr.ip().to_string() {
                                 warn!(
                                     "Beacon IP mismatch: declared={} source={} — dropping",
-                                    local_ip, addr.ip()
+                                    local_ip,
+                                    addr.ip()
                                 );
                                 continue;
                             }

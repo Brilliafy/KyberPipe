@@ -1,20 +1,33 @@
+use super::types::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use super::types::*;
 
 type PersistJob = (String, String);
 
+/// Non-blocking, COALESCING persistence channel (audit finding #22). The
+/// consumer drains the queue on every wake and writes only the LATEST value
+/// per path, so a slow filesystem never blocks a Tauri command on the main
+/// thread and an intermediate stale write is dropped without loss (the newest
+/// value for each path always lands).
 fn persist_channel() -> &'static mpsc::SyncSender<PersistJob> {
     static CHAN: OnceLock<mpsc::SyncSender<PersistJob>> = OnceLock::new();
     CHAN.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel::<PersistJob>(16);
         std::thread::spawn(move || {
-            for (path, data) in rx {
-                if let Ok(mut file) = File::create(&path) {
-                    let _ = file.write_all(data.as_bytes());
+            let mut latest: HashMap<String, String> = HashMap::new();
+            while let Ok((path, data)) = rx.recv() {
+                latest.insert(path, data);
+                while let Ok((p2, d2)) = rx.try_recv() {
+                    latest.insert(p2, d2);
+                }
+                for (path, data) in latest.drain() {
+                    if let Ok(mut file) = File::create(&path) {
+                        let _ = file.write_all(data.as_bytes());
+                    }
                 }
             }
         });
@@ -22,9 +35,19 @@ fn persist_channel() -> &'static mpsc::SyncSender<PersistJob> {
     })
 }
 
+/// Enqueue a persistence job WITHOUT blocking the caller. A full 16-slot queue
+/// drops the write — safe because the consumer coalesces by path, so the next
+/// write for the same path carries strictly newer data (audit finding #22).
+fn persist(path: String, data: String) {
+    let _ = persist_channel().try_send((path, data));
+}
+
 pub fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| {
-        tracing::error!("[CRITICAL STATE ERROR] Mutex poisoned! Recovering inner state: {:?}", e);
+        tracing::error!(
+            "[CRITICAL STATE ERROR] Mutex poisoned! Recovering inner state: {:?}",
+            e
+        );
         e.into_inner()
     })
 }
@@ -36,7 +59,9 @@ pub struct CryptoService {
 
 impl Default for CryptoService {
     fn default() -> Self {
-        Self { inner: Mutex::new(CryptoState::default()) }
+        Self {
+            inner: Mutex::new(CryptoState::default()),
+        }
     }
 }
 
@@ -44,8 +69,16 @@ impl CryptoService {
     pub fn get_keypair(&self) -> Option<core_crypto::PqKeyPair> {
         lock_state(&self.inner).keypair.clone()
     }
+    /// Replace the held keypair, ZEROIZING the previous one before dropping it
+    /// (audit finding #16: unpair/self-destruct must not leave private halves
+    /// in freed heap).
     pub fn set_keypair(&self, pair: Option<core_crypto::PqKeyPair>) {
-        lock_state(&self.inner).keypair = pair;
+        use zeroize::Zeroize;
+        let mut state = lock_state(&self.inner);
+        if let Some(prev) = state.keypair.as_mut() {
+            prev.zeroize();
+        }
+        state.keypair = pair;
     }
     pub fn get_session_key_string(&self) -> String {
         lock_state(&self.inner).session_key.to_string()
@@ -65,7 +98,9 @@ pub struct PairingService {
 
 impl Default for PairingService {
     fn default() -> Self {
-        Self { inner: Mutex::new(PairingState::default()) }
+        Self {
+            inner: Mutex::new(PairingState::default()),
+        }
     }
 }
 
@@ -74,12 +109,74 @@ impl PairingService {
         let p = lock_state(&self.inner);
         (p.sas_code.clone(), p.pending_session_key.to_string())
     }
-    pub fn clear_pairing_stale(&self) {
+    /// Transition: begin a new KEM pairing attempt. Clears every per-attempt
+    /// field (audit finding #24 — ONE transition instead of the old two
+    /// divergent "clear" methods) while deliberately PRESERVING the mandatory
+    /// QR nonce (audit finding #20) and any confirmed paired identity.
+    pub fn begin_pairing_attempt(&self) -> PairingPhase {
         let mut p = lock_state(&self.inner);
-        p.pending_session_key = SecureString::new(String::new());
-        p.pending_client_cert_hash.clear();
+        p.phase = PairingPhase::PendingKem;
         p.sas_code.clear();
-        p.pending_pairing_nonce.clear();
+        p.pending_session_key = SecureString::new(String::new());
+        p.pending_shared_secret = SecureString::new(String::new());
+        p.initiator_pk.clear();
+        p.initiator_x25519_pk.clear();
+        p.attempt_count = 0;
+        p.pending_client_cert_hash.clear();
+        p.phase
+    }
+    /// Transition: a SAS code has been computed for the pending KEM.
+    pub fn promote_to_sas_pending(&self) -> PairingPhase {
+        let mut p = lock_state(&self.inner);
+        if p.phase == PairingPhase::PendingKem {
+            p.phase = PairingPhase::SasPending;
+        }
+        p.phase
+    }
+    /// Transition: SAS verified — the session is promoted. Clears the pending
+    /// handshake state (the caller persists the session key + ratchet first).
+    pub fn confirm_pairing(&self) -> PairingPhase {
+        let mut p = lock_state(&self.inner);
+        p.phase = PairingPhase::Confirmed;
+        p.sas_code.clear();
+        p.pending_session_key = SecureString::new(String::new());
+        p.pending_shared_secret = SecureString::new(String::new());
+        p.attempt_count = 0;
+        p.pending_client_cert_hash.clear();
+        p.phase
+    }
+    /// Transition: the SAS window expired without confirmation.
+    pub fn timeout_pairing(&self) -> PairingPhase {
+        let mut p = lock_state(&self.inner);
+        if p.phase == PairingPhase::SasPending {
+            p.phase = PairingPhase::TimedOut;
+            p.sas_code.clear();
+            p.pending_session_key = SecureString::new(String::new());
+            p.pending_shared_secret = SecureString::new(String::new());
+            p.pending_client_cert_hash.clear();
+        }
+        p.phase
+    }
+    /// Transition: the pairing was explicitly rejected (nonce mismatch, rate
+    /// limit, bad KEM).
+    pub fn fail_pairing(&self) -> PairingPhase {
+        let mut p = lock_state(&self.inner);
+        p.phase = PairingPhase::Failed;
+        p.sas_code.clear();
+        p.pending_session_key = SecureString::new(String::new());
+        p.pending_shared_secret = SecureString::new(String::new());
+        p.pending_client_cert_hash.clear();
+        p.phase
+    }
+    /// Current pairing phase.
+    pub fn phase(&self) -> PairingPhase {
+        lock_state(&self.inner).phase
+    }
+    /// Clear STALE per-attempt pairing state — now an alias of the single
+    /// `begin_pairing_attempt` transition (audit finding #24). The mandatory QR
+    /// nonce (audit finding #20) is preserved.
+    pub fn clear_pairing_stale(&self) {
+        self.begin_pairing_attempt();
     }
     pub fn get_sas_code(&self) -> String {
         lock_state(&self.inner).sas_code.clone()
@@ -118,6 +215,18 @@ impl PairingService {
     pub fn set_pending_pairing_nonce(&self, nonce: String) {
         lock_state(&self.inner).pending_pairing_nonce = nonce;
     }
+    /// Issue a FRESH QR pairing nonce (audit finding #20): the nonce gate is
+    /// mandatory — every pairing request must echo a nonce this desktop issued,
+    /// so an arbitrary LAN peer that never saw the QR cannot occupy the pairing
+    /// slot. Issued at app start (not only at QR build) so a pairing attempt
+    /// with no nonce is rejected outright instead of bypassing the gate.
+    pub fn issue_fresh_nonce(&self) -> String {
+        let mut bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+        let nonce = hex::encode(&bytes);
+        self.set_pending_pairing_nonce(nonce.clone());
+        nonce
+    }
     pub fn get_paired_client_cert_hash(&self) -> String {
         lock_state(&self.inner).paired_client_cert_hash.clone()
     }
@@ -153,6 +262,7 @@ impl PairingService {
     }
     pub fn clear_all_pairing(&self) {
         let mut p = lock_state(&self.inner);
+        p.phase = PairingPhase::Idle;
         p.sas_code.clear();
         p.pending_session_key = SecureString::new(String::new());
         p.pending_shared_secret = SecureString::new(String::new());
@@ -175,7 +285,9 @@ pub struct NetworkService {
 
 impl Default for NetworkService {
     fn default() -> Self {
-        Self { inner: Mutex::new(NetworkState::default()) }
+        Self {
+            inner: Mutex::new(NetworkState::default()),
+        }
     }
 }
 
@@ -238,7 +350,9 @@ pub struct UiService {
 
 impl Default for UiService {
     fn default() -> Self {
-        Self { inner: Mutex::new(UiState::default()) }
+        Self {
+            inner: Mutex::new(UiState::default()),
+        }
     }
 }
 
@@ -313,11 +427,41 @@ impl ClipboardService {
     pub fn add_notification(&self, pkt: NotificationRecord) {
         lock_state(&self.inner).sync_history.notifications.push(pkt);
     }
+    /// Persist the notification/SMS history ENCRYPTED at rest (audit finding
+    /// #21): the serialized JSON is AEAD-wrapped with the independent snapshot
+    /// key before writing — plaintext privacy data (Signal/WhatsApp content
+    /// captured via MessagingStyle) must never sit on disk. On any encryption
+    /// failure the write is SKIPPED (never plaintext).
     pub fn save_notifications(&self) {
-        let data = serde_json::to_string_pretty(&lock_state(&self.inner).sync_history.notifications).ok();
-        if let Some(serialized) = data {
-            let _ = persist_channel().send((self.notifications_path.clone(), serialized));
-        }
+        let data =
+            serde_json::to_string_pretty(&lock_state(&self.inner).sync_history.notifications)
+                .unwrap_or_else(|_| "[]".to_string());
+        let key = crate::ratchet_store::snapshot_key_from_keyring();
+        let Some(blob) =
+            key.and_then(|k| crate::ratchet_store::encrypt_notifications_data(&k, data.as_bytes()))
+        else {
+            tracing::warn!(
+                "[NotifyStore] No snapshot key — NOT persisting plaintext notifications"
+            );
+            return;
+        };
+        persist(self.notifications_path.clone(), blob);
+    }
+    /// Load and decrypt the persisted notification history at startup
+    /// (audit finding #21: the encrypted blob is the only at-rest format).
+    pub fn load_notifications(&self) -> Vec<NotificationRecord> {
+        let Ok(blob) = std::fs::read_to_string(&self.notifications_path) else {
+            return Vec::new();
+        };
+        let key = crate::ratchet_store::snapshot_key_from_keyring();
+        let Some(key) = key else {
+            return Vec::new();
+        };
+        let Some(bytes) = crate::ratchet_store::decrypt_notifications_data(&key, &blob) else {
+            tracing::warn!("[NotifyStore] Notification history failed to decrypt — ignoring");
+            return Vec::new();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
     }
     pub fn lock(&self) -> std::sync::MutexGuard<'_, ClipboardState> {
         lock_state(&self.inner)
@@ -340,7 +484,7 @@ impl SettingsService {
     pub fn save_settings(&self) {
         let data = serde_json::to_string_pretty(&*lock_state(&self.inner)).ok();
         if let Some(serialized) = data {
-            let _ = persist_channel().send((self.settings_path.clone(), serialized));
+            persist(self.settings_path.clone(), serialized);
         }
     }
     pub fn lock(&self) -> std::sync::MutexGuard<'_, AppSettings> {

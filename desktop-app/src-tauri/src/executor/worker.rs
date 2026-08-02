@@ -1,11 +1,11 @@
+use super::boa_sandbox::run_boa_inner;
+use super::ScriptExecutionResult;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tracing::info;
-use super::ScriptExecutionResult;
-use super::boa_sandbox::run_boa_inner;
 
 /// Maximum number of idle worker processes cached in the pool. Bounding the
 /// pool prevents unbounded resource growth under concurrent script executions
@@ -58,7 +58,10 @@ impl BoaWorker {
             .stderr(Stdio::piped())
             .env_clear()
             .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
-            .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_default())
+            .env(
+                "WAYLAND_DISPLAY",
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+            )
             .spawn()
             .map_err(|e| format!("Failed to spawn Boa worker: {e}"))?;
 
@@ -109,7 +112,12 @@ impl BoaWorker {
 
     /// Execute a script with a hard wall-clock timeout. On timeout the worker
     /// is considered wedged; the caller must kill and respawn it.
-    fn execute(&mut self, script: &str, lux: f64, feed: &str) -> Result<ScriptExecutionResult, String> {
+    fn execute(
+        &mut self,
+        script: &str,
+        lux: f64,
+        feed: &str,
+    ) -> Result<ScriptExecutionResult, String> {
         self.write_request(script, lux, feed)?;
         let response = self
             .response_rx
@@ -154,7 +162,11 @@ fn checkin_worker(worker: BoaWorker) {
 }
 
 /// Execute a script using the persistent Boa worker pool.
-pub fn run_boa_sandboxed_script(script_code: &str, lux: f64, feed_data: &str) -> ScriptExecutionResult {
+pub fn run_boa_sandboxed_script(
+    script_code: &str,
+    lux: f64,
+    feed_data: &str,
+) -> ScriptExecutionResult {
     // Attempt 1: pooled worker (or a fresh one).
     let mut worker = match checkout_worker() {
         Some(mut w) => {
@@ -246,7 +258,10 @@ fn fallback_in_process(script_code: &str, lux: f64, feed_data: &str) -> ScriptEx
         .stderr(Stdio::piped())
         .env_clear()
         .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
-        .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_default())
+        .env(
+            "WAYLAND_DISPLAY",
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+        )
         .spawn()
     {
         Ok(c) => c,
@@ -255,7 +270,9 @@ fn fallback_in_process(script_code: &str, lux: f64, feed_data: &str) -> ScriptEx
             // than executing with full privileges (audit finding #17).
             return ScriptExecutionResult {
                 success: false,
-                output: format!("Boa sandbox fallback unavailable (spawn error: {e}) — script NOT executed"),
+                output: format!(
+                    "Boa sandbox fallback unavailable (spawn error: {e}) — script NOT executed"
+                ),
                 logs: vec![],
             };
         }
@@ -325,7 +342,11 @@ pub fn run_boa_worker_loop() {
                 let feed = req["feed"].as_str().unwrap_or("");
                 run_boa_inner(script, lux, feed)
             }
-            Err(e) => ScriptExecutionResult { success: false, output: format!("Invalid request: {e}"), logs: vec![] },
+            Err(e) => ScriptExecutionResult {
+                success: false,
+                output: format!("Invalid request: {e}"),
+                logs: vec![],
+            },
         };
         let response = serde_json::to_string(&result).unwrap_or_default();
         let _ = writer.write_all(response.as_bytes());

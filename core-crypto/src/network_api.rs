@@ -4,7 +4,9 @@
 //! STUN hole punching, beacon listening, and connection hierarchy evaluation.
 
 use crate::error::KyberError;
-use crate::{ensure_panic_hook_installed, ffi, network, quic_bridge, ClientIdentityCert, ConnectionInfo};
+use crate::{
+    ensure_panic_hook_installed, ffi, network, quic_bridge, ClientIdentityCert, ConnectionInfo,
+};
 
 // ── QUIC Transport ──
 
@@ -193,9 +195,7 @@ pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> 
                 timeout_secs,
             ))
         })
-        .map_err(|e| {
-            KyberError::NetworkError(format!("Failed to spawn beacon listener: {e}"))
-        })?;
+        .map_err(|e| KyberError::NetworkError(format!("Failed to spawn beacon listener: {e}")))?;
     let results = handle
         .join()
         .map_err(|_| KyberError::NetworkError("Beacon listener panicked".into()))??;

@@ -284,10 +284,7 @@ pub fn split_secret_shamir_with_meta(
             mac: [0u8; 32],
         };
         let mac = compute_share_mac(secret, &share);
-        result.push(ShamirShare {
-            mac,
-            ..share
-        });
+        result.push(ShamirShare { mac, ..share });
     }
     Ok(result)
 }
@@ -332,7 +329,9 @@ mod tests {
     #[test]
     fn test_x_coordinate_consistency_enforced() {
         let secret = b"another-master-key";
-        let mut share = split_secret_shamir_with_meta(secret, 2, 3).unwrap().remove(0);
+        let mut share = split_secret_shamir_with_meta(secret, 2, 3)
+            .unwrap()
+            .remove(0);
         // Corrupt the embedded x-coordinate so it disagrees with index.
         share.data[0] = share.data[0].wrapping_add(7);
         assert!(!verify_share_with_key(&share, secret));

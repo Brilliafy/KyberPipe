@@ -28,6 +28,12 @@ class NotificationHook : NotificationListenerService() {
 
     private lateinit var serviceScope: CoroutineScope
 
+    /// Cached SettingsManager (audit finding #9): opened ONCE in onCreate and
+    /// reused — building an EncryptedSharedPreferences instance per notification
+    /// (Keystore-backed AES-256-GCM init) on the binder thread is expensive and
+    /// ANR-prone.
+    private var cachedSettings: org.kyberpipe.client.utils.SettingsManager? = null
+
     companion object {
         /** Extracted media notification state — avoids holding full StatusBarNotification
          *  (which retains Context, Bitmaps, and PendingIntent references). */
@@ -187,27 +193,6 @@ class NotificationHook : NotificationListenerService() {
         if (rawTitle.length > MAX_NOTIFICATION_TEXT_CHARS || rawArtist.length > MAX_NOTIFICATION_TEXT_CHARS) {
             Log.d("KyberpipeMedia", "Truncated media notification text to $MAX_NOTIFICATION_TEXT_CHARS chars (audit finding #14)")
         }
-        
-        var albumArtBase64 = ""
-        val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            extras.getParcelable("android.largeIcon", android.graphics.Bitmap::class.java)
-                ?: extras.getParcelable("android.picture", android.graphics.Bitmap::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            extras.getParcelable<android.graphics.Bitmap>("android.largeIcon")
-                ?: @Suppress("DEPRECATION")
-            extras.getParcelable<android.graphics.Bitmap>("android.picture")
-        }
-        if (bitmap != null) {
-            try {
-                val outputStream = java.io.ByteArrayOutputStream()
-                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, outputStream)
-                val bytes = outputStream.toByteArray()
-                albumArtBase64 = "data:image/jpeg;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            } catch (e: Exception) {
-                Log.e("KyberpipeMedia", "Failed to compress album art bitmap: ${e.message}")
-            }
-        }
 
         var isPlaying = false
         val actionsList = ArrayList<org.json.JSONObject>()
@@ -232,40 +217,77 @@ class NotificationHook : NotificationListenerService() {
             i to action.actionIntent
         }
 
-        val settings = org.kyberpipe.client.utils.SettingsManager(applicationContext)
-        // Forward over QUIC only when paired AND the user explicitly enabled
-        // notification forwarding (audit finding #14 — opt-in, default OFF).
-        // The SharedFlow emit in onNotificationPosted is local-only and stays.
-        if (settings.isPaired && settings.notificationForwardingEnabled) {
-            val jsonMedia = org.json.JSONObject()
-                .put("title", title)
-                .put("artist", artist)
-                .put("album_art", albumArtBase64)
-                .put("is_playing", isPlaying)
-                .put("actions", org.json.JSONArray(actionsList))
-            
-            val jsonStr = jsonMedia.toString()
-            val hostIp = settings.pairedHostIp
-            val sessionKey = settings.sessionKey
-            if (hostIp.isNotEmpty()) {
-                val payload = if (sessionKey.isNotEmpty()) {
-                    // Encrypt the payload. On failure, abort transmission — never fall back to plaintext.
-                    val encrypted = SessionKeyManager.encrypt(jsonStr)
-                    if (encrypted != null) {
-                        org.json.JSONObject().put("encrypted", org.json.JSONObject()
-                            .put("nonce_hex", encrypted.nonce.joinToString("") { "%02x".format(it) })
-                            .put("ciphertext_hex", encrypted.ciphertext.joinToString("") { "%02x".format(it) })
-                        ).toString()
-                    } else {
-                        Log.e("KyberpipeMedia", "Encryption failed — aborting transmission")
-                        return
-                    }
-                } else {
-                    Log.e("KyberpipeMedia", "No session key — aborting transmission")
-                    return
+        // AUDIT FINDING #9: NotificationListenerService.onNotificationPosted runs
+        // on a binder thread with strict deadlines. Bitmap JPEG-compression of
+        // full-resolution album art plus EncryptedSharedPreferences init (a
+        // Keystore-backed AES-256-GCM store) per notification can blow the ANR
+        // budget under notification bursts. ALL of that heavy work is offloaded
+        // to the worker coroutine below; only the cheap metadata extraction stays
+        // on the binder thread.
+        val mediaTitle = title
+        val mediaArtist = artist
+        val mediaActions = ArrayList(actionsList)
+        val mediaPlaying = isPlaying
+        val pkg = sbn.packageName ?: ""
+        val bmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            extras.getParcelable("android.largeIcon", android.graphics.Bitmap::class.java)
+                ?: extras.getParcelable("android.picture", android.graphics.Bitmap::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            extras.getParcelable<android.graphics.Bitmap>("android.largeIcon")
+                ?: @Suppress("DEPRECATION")
+            extras.getParcelable<android.graphics.Bitmap>("android.picture")
+        }
+        serviceScope.launch {
+            var albumArtBase64 = ""
+            if (bmp != null) {
+                try {
+                    val outputStream = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, outputStream)
+                    val bytes = outputStream.toByteArray()
+                    albumArtBase64 = "data:image/jpeg;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                } catch (e: Exception) {
+                    Log.e("KyberpipeMedia", "Failed to compress album art bitmap: ${e.message}")
                 }
-                // Use QUIC instead of HTTP/TCP for media sync
-                quicSendMedia(serviceScope, hostIp, payload)
+            }
+
+            // Cached SettingsManager (audit finding #9): opened once in onCreate,
+            // reused across notifications instead of rebuilding the
+            // EncryptedSharedPreferences per call.
+            val settings = cachedSettings ?: org.kyberpipe.client.utils.SettingsManager(applicationContext).also { cachedSettings = it }
+            // Forward over QUIC only when paired AND the user explicitly enabled
+            // notification forwarding (audit finding #14 — opt-in, default OFF).
+            if (settings.isPaired && settings.notificationForwardingEnabled) {
+                val jsonMedia = org.json.JSONObject()
+                    .put("title", mediaTitle)
+                    .put("artist", mediaArtist)
+                    .put("album_art", albumArtBase64)
+                    .put("is_playing", mediaPlaying)
+                    .put("actions", org.json.JSONArray(mediaActions))
+
+                val jsonStr = jsonMedia.toString()
+                val hostIp = settings.pairedHostIp
+                val sessionKey = settings.sessionKey
+                if (hostIp.isNotEmpty()) {
+                    val payload = if (sessionKey.isNotEmpty()) {
+                        // Encrypt the payload. On failure, abort transmission — never fall back to plaintext.
+                        val encrypted = SessionKeyManager.encrypt(jsonStr)
+                        if (encrypted != null) {
+                            org.json.JSONObject().put("encrypted", org.json.JSONObject()
+                                .put("nonce_hex", encrypted.nonce.joinToString("") { "%02x".format(it) })
+                                .put("ciphertext_hex", encrypted.ciphertext.joinToString("") { "%02x".format(it) })
+                            ).toString()
+                        } else {
+                            Log.e("KyberpipeMedia", "Encryption failed — aborting transmission")
+                            return@launch
+                        }
+                    } else {
+                        Log.e("KyberpipeMedia", "No session key — aborting transmission")
+                        return@launch
+                    }
+                    Log.d("KyberpipeMedia", "Forwarding media payload for $pkg")
+                    quicSendMedia(serviceScope, hostIp, payload)
+                }
             }
         }
     }

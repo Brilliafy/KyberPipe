@@ -190,18 +190,26 @@ object PairingManager {
     fun sendCiphertext(hostIp: String, deviceName: String, kemCiphertext: String, clientPkHex: String, x25519PkHex: String, context: android.content.Context? = null): String? {
         return try {
             val settings = context?.let { SettingsManager(it) }
+            // Audit finding #15: the QR-bound server certificate pin is MANDATORY
+            // for the bootstrap connection. Without it the desktop's certificate
+            // would be accepted blindly and a LAN MITM could terminate TLS,
+            // forward the KEM, and hold every session key while the SAS still
+            // matches. Fail loudly instead of proceeding.
+            val pin = settings?.pendingServerCertHash ?: ""
+            if (pin.isEmpty()) {
+                Log.e(TAG, "Pairing aborted: the QR carried no server certificate pin — refusing unverified bootstrap (MITM protection)")
+                return null
+            }
             // Establish the QUIC bridge to the desktop before sending any stream.
-            // Bootstrap pairing pins the server cert from the QR when the desktop
-            // included one (audit finding #5/#15); empty pin = legacy accept-any
-            // allow-private connect (the SSRF guard — audit #6).
             try {
                 uniffi.core_crypto.quicConnectPairingBootstrap(
                     hostIp,
                     9876.toUShort(),
-                    settings?.pendingServerCertHash ?: ""
+                    pin
                 )
             } catch (connectErr: Exception) {
                 Log.e(TAG, "QUIC connect failed: ${connectErr.message}")
+                return null
             }
             var certHash = ""
             var nonceHex = ""

@@ -9,7 +9,12 @@ use super::IS_SESSION_KEY_AUTHENTICATED;
 /// format both platforms use (audit finding #15): the previous `KP\x01` binary
 /// frame parser was unreachable in production (Android only ever sent
 /// JSON+hex), so it has been removed — one encoder/decoder, no drift surface.
-fn decrypt_json_payload(body: &[u8], peer_id: &str, sk_handle: u64, sk_auth: bool) -> Option<String> {
+fn decrypt_json_payload(
+    body: &[u8],
+    peer_id: &str,
+    sk_handle: u64,
+    sk_auth: bool,
+) -> Option<String> {
     let body_str = String::from_utf8_lossy(body);
     let json = serde_json::from_str::<serde_json::Value>(&body_str).ok()?;
 
@@ -19,16 +24,13 @@ fn decrypt_json_payload(body: &[u8], peer_id: &str, sk_handle: u64, sk_auth: boo
     if !peer_id.is_empty() {
         if let Some(enc) = json.get("encrypted_ratchet") {
             let tlv_b64 = enc.get("tlv_b64").and_then(|v| v.as_str())?;
-            let bin = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                tlv_b64,
-            )
-            .ok()?;
+            let bin =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()?;
             match core_crypto::ratchet_decrypt_message_binary(peer_id.to_string(), bin) {
                 Ok(pt) => return String::from_utf8(pt).ok(),
-                Err(e) => tracing::warn!(
-                    "[Clipboard] Ratchet binary decrypt failed for {peer_id}: {e}"
-                ),
+                Err(e) => {
+                    tracing::warn!("[Clipboard] Ratchet binary decrypt failed for {peer_id}: {e}")
+                }
             }
         }
     }
@@ -69,7 +71,16 @@ pub(crate) async fn handle_clipboard(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8>
     };
 
     if !decrypted.is_empty() && s.check_and_record_clipboard(&decrypted) {
-        let _ = crate::portal::sync_clipboard_text(&decrypted);
+        // Audit finding #9: the OS clipboard write (arboard / wl-copy / xclip
+        // subprocesses with multi-second waits) must NEVER execute on the
+        // accept-loop worker — it would stall every concurrent QUIC stream.
+        // Delegate to the tokio blocking pool, which is sized independently of
+        // the 2-worker IO accept-loop runtime.
+        let text = decrypted.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::portal::sync_clipboard_text(&text);
+        })
+        .await;
         s.add_log(format!(
             "[Clipboard] Received via QUIC: \"{}\"",
             decrypted.chars().take(30).collect::<String>()

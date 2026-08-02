@@ -38,8 +38,8 @@ pub(crate) fn validate_stun_host(host: &str) -> Result<(), KyberError> {
         return Ok(());
     }
     // Hostname: resolve once and validate the full resolved set.
-    let resolved = std::net::ToSocketAddrs::to_socket_addrs(&format!("{hostname}:19302"))
-        .map_err(|e| {
+    let resolved =
+        std::net::ToSocketAddrs::to_socket_addrs(&format!("{hostname}:19302")).map_err(|e| {
             KyberError::NetworkError(format!("STUN host resolution failed for {host}: {e}"))
         })?;
     let ips: Vec<std::net::IpAddr> = resolved.map(|sa| sa.ip()).collect();
@@ -91,20 +91,26 @@ pub fn quic_connect_impl(
     quic_connect_with_mode(&host, port, pinned_cert_hash_hex, allow_private, None)
 }
 
-/// Bootstrap-pairing connect: allows private (LAN) addresses with an EMPTY
-/// pin, because pairing itself must happen before any pin exists. Loopback is
-/// still rejected in every path. Callers MUST only use this from the pairing
-/// flow (the server-side pairing rate limiter gates abuse) — never from
-/// free-form "connect to this IP" commands.
+/// Bootstrap-pairing connect: allows private (LAN) addresses, but REQUIRES the
+/// QR-bound server certificate pin (audit finding #15). The pin binds the
+/// bootstrap TLS to the certificate whose hash was encoded in the pairing QR;
+/// without it the verifier would accept ANY server certificate, so a LAN MITM
+/// could terminate TLS, forward the KEM handshake unchanged, and hold every
+/// session key while the SAS still matches on both ends (the SAS inputs are
+/// unchanged by transparent forwarding). Empty-pin bootstrap pairing is
+/// therefore FORBIDDEN: the phone fails loudly instead of proceeding with an
+/// unverified server identity. Loopback is still rejected in every path.
 pub fn quic_connect_pairing_bootstrap_impl(
     host: String,
     port: u16,
     pinned_cert_hash_hex: String,
 ) -> Result<bool, KyberError> {
-    // `quic_connect_with_mode` structurally validates the pin when non-empty
-    // (audit finding #15): a bootstrap connection WITH a pin verifies the server
-    // certificate against the QR-bound hash, so a MITM cannot present its own
-    // certificate and become the pinned identity.
+    if !validate_cert_pin(&pinned_cert_hash_hex) {
+        return Err(KyberError::NetworkError(
+            "Bootstrap pairing requires a valid QR-bound server certificate pin — ".to_string()
+                + "pairing without one is forbidden (MITM protection, audit finding #15)",
+        ));
+    }
     quic_connect_with_mode(&host, port, pinned_cert_hash_hex, true, None)
 }
 
@@ -148,6 +154,16 @@ fn quic_connect_with_mode(
             "Invalid certificate pin: must be a 64-char hex SHA-256 digest".into(),
         ));
     }
+    // Audit finding #15: a non-bootstrap connect with an EMPTY pin would also
+    // install an accept-any verifier (PinnedCertVerifier::new(None, required =
+    // false)). Post-pairing connects must always present the persisted pin;
+    // refusing empty pins here closes the residual accept-any path outside the
+    // (now mandatory-pin) pairing bootstrap.
+    if pinned_cert_hash_hex.is_empty() {
+        return Err(KyberError::NetworkError(
+            "QUIC connect without a certificate pin is forbidden (MITM protection)".into(),
+        ));
+    }
 
     // Resolve ONCE, validate the entire resolved IP set, and connect only to a
     // validated address. Hostnames pointing at loopback/private ranges (or a
@@ -159,9 +175,7 @@ fn quic_connect_with_mode(
         .or_else(|_| {
             std::net::ToSocketAddrs::to_socket_addrs(&raw)
                 .map(|iter| iter.collect())
-                .map_err(|e| {
-                    KyberError::NetworkError(format!("Address resolution failed: {e}"))
-                })
+                .map_err(|e| KyberError::NetworkError(format!("Address resolution failed: {e}")))
         })?;
     if socket_addrs.is_empty() {
         return Err(KyberError::NetworkError(
@@ -234,7 +248,11 @@ mod tests {
             assert!(validate_stun_host(bad).is_err(), "{bad} should be rejected");
         }
         // Public STUN servers must pass
-        for good in ["stun.l.google.com:19302", "8.8.8.8:19302", "stun.cloudflare.com:3478"] {
+        for good in [
+            "stun.l.google.com:19302",
+            "8.8.8.8:19302",
+            "stun.cloudflare.com:3478",
+        ] {
             assert!(validate_stun_host(good).is_ok(), "{good} should be allowed");
         }
     }
@@ -244,7 +262,10 @@ mod tests {
     #[test]
     fn test_stun_hostname_resolution_rejected() {
         for host in ["localhost:19302", "ip6-localhost:19302"] {
-            assert!(validate_stun_host(host).is_err(), "{host} should be rejected");
+            assert!(
+                validate_stun_host(host).is_err(),
+                "{host} should be rejected"
+            );
         }
     }
 

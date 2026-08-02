@@ -170,7 +170,9 @@ pub fn session_key_destroy_all() {
 /// keystream reuse. Random nonces remove that entire class of bug.
 pub fn session_key_encrypt(handle: u64, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), KyberError> {
     if !crate::check_generation() {
-        return Err(KyberError::CryptoError("Session invalidated by self-destruct".into()));
+        return Err(KyberError::CryptoError(
+            "Session invalidated by self-destruct".into(),
+        ));
     }
     let key = session_key_get(handle)
         .ok_or_else(|| KyberError::CryptoError(format!("Invalid session key handle {handle}")))?;
@@ -188,7 +190,9 @@ pub fn session_key_decrypt(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, KyberError> {
     if !crate::check_generation() {
-        return Err(KyberError::CryptoError("Session invalidated by self-destruct".into()));
+        return Err(KyberError::CryptoError(
+            "Session invalidated by self-destruct".into(),
+        ));
     }
     let key = session_key_get(handle)
         .ok_or_else(|| KyberError::CryptoError(format!("Invalid session key handle {handle}")))?;
@@ -273,7 +277,9 @@ mod tests {
     #[test]
     fn test_concurrent_create_destroy_no_deadlock() {
         // Disjoint seed ranges (500..563, 600..649) — see test_destroy_clears_lru.
-        let handles: Vec<u64> = (500..563u16).map(|i| session_key_create(test_key(i)).unwrap()).collect();
+        let handles: Vec<u64> = (500..563u16)
+            .map(|i| session_key_create(test_key(i)).unwrap())
+            .collect();
         let handles_clone = handles.clone();
         let t = std::thread::spawn(move || {
             for h in handles_clone {
@@ -285,7 +291,8 @@ mod tests {
         for i in 600..649u16 {
             extra.push(session_key_create(test_key(i)).unwrap());
         }
-        t.join().expect("destroy thread must finish without deadlock");
+        t.join()
+            .expect("destroy thread must finish without deadlock");
         // Cleanup remaining.
         for h in handles {
             session_key_destroy(h);

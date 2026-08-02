@@ -125,29 +125,39 @@ pub(crate) static DESKTOP_SESSION_KEY_HANDLE: AtomicU64 = AtomicU64::new(0);
 
 fn decode_binary_pairing_frame(payload: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, String)> {
     let mut cursor = 0;
-    if payload.len() < 4 { return None; }
-    let ct_len = u32::from_be_bytes(payload[cursor..cursor+4].try_into().ok()?) as usize;
+    if payload.len() < 4 {
+        return None;
+    }
+    let ct_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
     cursor += 4;
-    if payload.len() < cursor + ct_len + 4 { return None; }
-    let ct = payload[cursor..cursor+ct_len].to_vec();
+    if payload.len() < cursor + ct_len + 4 {
+        return None;
+    }
+    let ct = payload[cursor..cursor + ct_len].to_vec();
     cursor += ct_len;
 
-    let pk_len = u32::from_be_bytes(payload[cursor..cursor+4].try_into().ok()?) as usize;
+    let pk_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
     cursor += 4;
-    if payload.len() < cursor + pk_len + 4 { return None; }
-    let pk = payload[cursor..cursor+pk_len].to_vec();
+    if payload.len() < cursor + pk_len + 4 {
+        return None;
+    }
+    let pk = payload[cursor..cursor + pk_len].to_vec();
     cursor += pk_len;
 
-    let x25519_len = u32::from_be_bytes(payload[cursor..cursor+4].try_into().ok()?) as usize;
+    let x25519_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
     cursor += 4;
-    if payload.len() < cursor + x25519_len + 4 { return None; }
-    let x25519_pk = payload[cursor..cursor+x25519_len].to_vec();
+    if payload.len() < cursor + x25519_len + 4 {
+        return None;
+    }
+    let x25519_pk = payload[cursor..cursor + x25519_len].to_vec();
     cursor += x25519_len;
 
-    let ch_len = u32::from_be_bytes(payload[cursor..cursor+4].try_into().ok()?) as usize;
+    let ch_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
     cursor += 4;
-    if payload.len() < cursor + ch_len { return None; }
-    let cert_hash = String::from_utf8(payload[cursor..cursor+ch_len].to_vec()).ok()?;
+    if payload.len() < cursor + ch_len {
+        return None;
+    }
+    let cert_hash = String::from_utf8(payload[cursor..cursor + ch_len].to_vec()).ok()?;
 
     Some((ct, pk, x25519_pk, cert_hash))
 }
@@ -181,6 +191,10 @@ pub(crate) async fn handle_pairing(
             .to_string()
             .into_bytes();
     }
+    // Audit finding #24: every pairing state change flows through the phase
+    // transitions on PairingService — begin_pairing_attempt resets the
+    // per-attempt fields (and preserves the mandatory QR nonce).
+    s.begin_pairing_attempt();
 
     // Record the peer identity at pairing time so post-pairing streams can be
     // authorized to this peer only. The identity is the TLS-OBSERVED client
@@ -195,14 +209,29 @@ pub(crate) async fn handle_pairing(
     // QR nonce binding (audit finding #20): the phone must echo the nonce this
     // desktop issued when it generated the pairing QR. An attacker who races
     // the legitimate device cannot know the nonce, so blind pairing-slot
-    // hijack is defeated. If no nonce was issued (e.g. legacy flow), skip.
+    // hijack is defeated. The nonce is MANDATORY: a missing nonce (no QR was
+    // ever generated, or it was cleared) rejects the pairing outright — the
+    // old empty-nonce skip let any LAN peer with the desktop's public keys
+    // complete a KEM handshake before a QR existed.
     let expected_nonce = s.get_pending_pairing_nonce();
-    if !expected_nonce.is_empty() {
-        let supplied_nonce =
-            serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("pairing_nonce_hex").and_then(|x| x.as_str()).map(str::to_string))
-                .unwrap_or_default();
+    if expected_nonce.is_empty() {
+        s.add_log(
+            "[Pairing] Rejected: no pairing nonce has been issued — generate a pairing QR first"
+                .to_string(),
+        );
+        return r#"{"status":"error","reason":"No pairing nonce issued"}"#
+            .to_string()
+            .into_bytes();
+    }
+    {
+        let supplied_nonce = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| {
+                v.get("pairing_nonce_hex")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
         if supplied_nonce.is_empty() || supplied_nonce != expected_nonce {
             s.add_log(
                 "[Pairing] Rejected: pairing QR nonce mismatch — possible blind race".to_string(),
@@ -214,24 +243,50 @@ pub(crate) async fn handle_pairing(
     }
 
     // Pure binary QUIC frame transport vs JSON fallback
-    let (ciphertext, client_pk, client_x25519_pk, cert_hash) = if body.len() > 3 && body[0] == 0x4B && body[1] == 0x50 && body[2] == 0x00 {
-        // Direct zero-copy binary frame transport (No JSON parsing)
-        if let Some(decoded) = decode_binary_pairing_frame(&body[3..]) {
-            decoded
+    let (ciphertext, client_pk, client_x25519_pk, cert_hash) =
+        if body.len() > 3 && body[0] == 0x4B && body[1] == 0x50 && body[2] == 0x00 {
+            // Direct zero-copy binary frame transport (No JSON parsing)
+            if let Some(decoded) = decode_binary_pairing_frame(&body[3..]) {
+                decoded
+            } else {
+                return r#"{"status":"error","reason":"Invalid binary frame payload"}"#
+                    .to_string()
+                    .into_bytes();
+            }
         } else {
-            return r#"{"status":"error","reason":"Invalid binary frame payload"}"#.to_string().into_bytes();
-        }
-    } else {
-        let body_str = String::from_utf8_lossy(&body);
-        let req = match serde_json::from_str::<PairingRequest>(&body_str) {
-            Ok(r) => r,
-            Err(_) => return r#"{"status":"error","reason":"Invalid JSON"}"#.to_string().into_bytes(),
+            let body_str = String::from_utf8_lossy(&body);
+            let req = match serde_json::from_str::<PairingRequest>(&body_str) {
+                Ok(r) => r,
+                Err(_) => {
+                    return r#"{"status":"error","reason":"Invalid JSON"}"#.to_string().into_bytes()
+                }
+            };
+            let ct = if !req.ciphertext_bytes.is_empty() {
+                req.ciphertext_bytes
+            } else {
+                hex::decode(&req.ciphertext_hex).unwrap_or_default()
+            };
+            let pk = if !req.client_pk_bytes.is_empty() {
+                req.client_pk_bytes
+            } else {
+                hex::decode(&req.client_pk_hex).unwrap_or_default()
+            };
+            let x25519_pk = if !req.client_x25519_pk_bytes.is_empty() {
+                req.client_x25519_pk_bytes
+            } else {
+                hex::decode(&req.client_x25519_pk_hex).unwrap_or_default()
+            };
+            (
+                ct,
+                pk,
+                x25519_pk,
+                if req.cert_hash_hex_alias.is_empty() {
+                    req.client_cert_hash_hex
+                } else {
+                    req.cert_hash_hex_alias
+                },
+            )
         };
-        let ct = if !req.ciphertext_bytes.is_empty() { req.ciphertext_bytes } else { hex::decode(&req.ciphertext_hex).unwrap_or_default() };
-        let pk = if !req.client_pk_bytes.is_empty() { req.client_pk_bytes } else { hex::decode(&req.client_pk_hex).unwrap_or_default() };
-        let x25519_pk = if !req.client_x25519_pk_bytes.is_empty() { req.client_x25519_pk_bytes } else { hex::decode(&req.client_x25519_pk_hex).unwrap_or_default() };
-        (ct, pk, x25519_pk, if req.cert_hash_hex_alias.is_empty() { req.client_cert_hash_hex } else { req.cert_hash_hex_alias })
-    };
     if !ciphertext.is_empty() {
         if let Some(pair) = s.get_keypair() {
             if let Ok(shared_secret) = core_crypto::decapsulate_pq_secret(
@@ -284,8 +339,11 @@ pub(crate) async fn handle_pairing(
                         ) {
                             s.set_sas_code(sas);
                             s.add_log(
-                                "[Session] SAS code generated — awaiting OOB verification".to_string(),
+                                "[Session] SAS code generated — awaiting OOB verification"
+                                    .to_string(),
                             );
+                            // Transition: PendingKem → SasPending.
+                            s.promote_to_sas_pending();
                             // Push the SAS to the webview so the UI can render the
                             // verification modal (audit finding #7 — the modal was
                             // previously dead code because nothing populated it).
@@ -306,8 +364,9 @@ pub(crate) async fn handle_pairing(
                                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
                                 let (_, pending) = timeout_state.get_pairing_read();
                                 if !pending.is_empty() {
-                                    timeout_state.clear_pairing_stale();
-                                    super::IS_SESSION_KEY_AUTHENTICATED.store(false, Ordering::Release);
+                                    timeout_state.timeout_pairing();
+                                    super::IS_SESSION_KEY_AUTHENTICATED
+                                        .store(false, Ordering::Release);
                                     timeout_state.set_connection_status("DISCONNECTED".to_string());
                                     timeout_state.set_connection_color("red".to_string());
                                     timeout_state.add_log(
