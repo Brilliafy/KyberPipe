@@ -2423,6 +2423,7 @@ dependencies = [
  "arboard",
  "arti-client",
  "ashpd",
+ "base64 0.22.1",
  "boa_engine",
  "core-crypto",
  "directories 5.0.1",
