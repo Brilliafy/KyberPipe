@@ -178,8 +178,12 @@ pub async fn execute_boa_script(
 pub fn execute_fallback_script(
     script_path: String,
     lux: f64,
+    token: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<ScriptExecutionResult, String> {
+    // Tier-2 command (subprocess code execution) — uniform user-gesture token
+    // gate, matching execute_boa_script (audit finding #20).
+    crate::commands::gate_tier2("execute_fallback_script", &token)?;
     // Resolve against the SINGLE shared allowlist (audit finding #19). The
     // resolved value is the same relative key `run_fallback_subprocess` uses,
     // so the command layer and the executor can never disagree.

@@ -304,6 +304,12 @@ fn pairing_poll_clipboard_roundtrip() {
     // Stop the shared IO runtime (bounded blocking) so its worker threads do
     // not keep the test process alive after the assertions complete.
     core_crypto::shutdown_io_runtime();
+    // Also shut down the FFI runtime (if any test path created it) and the
+    // background persistence writer (created by the first save_settings call)
+    // — both keep non-daemon threads alive and would otherwise hang the
+    // process after the tests pass.
+    core_crypto::shutdown_ffi_runtime();
+    crate::state::services::shutdown_persist_for_tests();
 }
 
 /// Block on a join handle with a timeout (std has no timed join).

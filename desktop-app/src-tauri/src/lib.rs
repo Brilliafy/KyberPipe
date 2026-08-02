@@ -242,7 +242,6 @@ pub fn run() {
             write_real_clipboard,
             create_p2p_group,
             register_mdns_service,
-            execute_fallback_script,
             generate_shamir_recovery_shares,
             reconstruct_key_from_shamir_shares,
             confirm_pairing_sas,
@@ -264,6 +263,7 @@ pub fn run() {
             request_firewall_open,
             create_tor_onion,
             execute_boa_script,
+            execute_fallback_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

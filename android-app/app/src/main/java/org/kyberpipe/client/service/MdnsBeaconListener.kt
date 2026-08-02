@@ -43,17 +43,18 @@ class MdnsBeaconListener(private val scope: CoroutineScope) {
                         val raw = String(packet.data, 0, packet.length)
                         if (raw.startsWith(beaconMagic)) {
                             val payload = raw.removePrefix("$beaconMagic:")
+                            // Identity-minimal signed format: pk:ip:ts:nonce:signing_pk:sig
+                            // (the device name is deliberately NOT broadcast on the
+                            // unauthenticated discovery channel).
                             val parts = payload.split(":", limit = 4)
                             if (parts.size >= 3) {
                                 val declIp = parts[1]
                                 // Validate beacon timestamp (anti-replay)
-                                if (parts.size >= 3) {
-                                    val beaconTs = parts[2].toLongOrNull() ?: 0L
-                                    val now = System.currentTimeMillis() / 1000
-                                    if (kotlin.math.abs(now - beaconTs) > 60) {
-                                        Log.w(tag, "Stale beacon rejected (age=${now - beaconTs}s)")
-                                        continue
-                                    }
+                                val beaconTs = parts[2].toLongOrNull() ?: 0L
+                                val now = System.currentTimeMillis() / 1000
+                                if (kotlin.math.abs(now - beaconTs) > 60) {
+                                    Log.w(tag, "Stale beacon rejected (age=${now - beaconTs}s)")
+                                    continue
                                 }
                                 val srcIp = packet.address.hostAddress ?: ""
                                 // Validate beacon source IP matches declared IP — prevents
@@ -65,7 +66,9 @@ class MdnsBeaconListener(private val scope: CoroutineScope) {
                                 val host = BeaconHost(
                                     hostPkHex = parts[0],
                                     localIp = declIp,
-                                    deviceName = if (parts.size >= 4) parts[3] else "Desktop"
+                                    // Name is intentionally absent from the beacon
+                                    // payload — show a neutral default.
+                                    deviceName = "Desktop"
                                 )
                                 Log.d(tag, "Beacon from ${packet.address.hostAddress}: ${host.deviceName} @ ${host.localIp}")
                                 onHostDiscovered?.invoke(host)
