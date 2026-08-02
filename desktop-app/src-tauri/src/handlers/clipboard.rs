@@ -13,41 +13,22 @@ fn decrypt_json_payload(body: &[u8], peer_id: &str, sk_handle: u64, sk_auth: boo
     let body_str = String::from_utf8_lossy(body);
     let json = serde_json::from_str::<serde_json::Value>(&body_str).ok()?;
 
-    // Try ratchet decryption first
+    // Try ratchet decryption first. Audit finding #12: the ratchet payload is a
+    // single base64-wrapped BINARY TLV (`tlv_b64`) — one serialization contract
+    // instead of five independent hex fields.
     if !peer_id.is_empty() {
         if let Some(enc) = json.get("encrypted_ratchet") {
-            let nonce_hex = enc.get("nonce_hex").and_then(|v| v.as_str())?;
-            let ct_hex = enc.get("ciphertext_hex").and_then(|v| v.as_str())?;
-            if let (Ok(nonce), Ok(ct)) = (hex::decode(nonce_hex), hex::decode(ct_hex)) {
-                // REKEY-AWARE decrypt (audit finding #1): forward the rekey fields
-                // so DH/KEM proposals are adopted and ACKed — the phone's plain
-                // decrypt path previously ignored rekey payloads and permanently
-                // desynced the session when the desktop committed via TTL.
-                let rekey_x = enc
-                    .get("rekey_x25519_pk_hex")
-                    .and_then(|v| v.as_str())
-                    .and_then(|h| hex::decode(h).ok());
-                let rekey_m = enc
-                    .get("rekey_mlkem_pk_hex")
-                    .and_then(|v| v.as_str())
-                    .and_then(|h| hex::decode(h).ok());
-                let rekey_ct = enc
-                    .get("rekey_ciphertext_hex")
-                    .and_then(|v| v.as_str())
-                    .and_then(|h| hex::decode(h).ok());
-                match core_crypto::ratchet_decrypt_with_rekey_message(
-                    peer_id.to_string(),
-                    nonce,
-                    ct,
-                    rekey_ct,
-                    rekey_x,
-                    rekey_m,
-                ) {
-                    Ok(pt) => return String::from_utf8(pt).ok(),
-                    Err(e) => tracing::warn!(
-                        "[Clipboard] Ratchet rekey decrypt failed for {peer_id}: {e}"
-                    ),
-                }
+            let tlv_b64 = enc.get("tlv_b64").and_then(|v| v.as_str())?;
+            let bin = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                tlv_b64,
+            )
+            .ok()?;
+            match core_crypto::ratchet_decrypt_message_binary(peer_id.to_string(), bin) {
+                Ok(pt) => return String::from_utf8(pt).ok(),
+                Err(e) => tracing::warn!(
+                    "[Clipboard] Ratchet binary decrypt failed for {peer_id}: {e}"
+                ),
             }
         }
     }

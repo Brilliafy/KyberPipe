@@ -51,8 +51,11 @@ fn setup_panic_hook() {
         let crash_path = data_dir.join("crash_log.txt");
         let _ = fs::write(&crash_path, anonymized_report);
         eprintln!("{raw_report}");
-        // Never unwind across the FFI/Tauri boundary — abort after logging.
-        std::process::abort();
+        // Do NOT abort the whole process. UniFFI's scaffolding catch_unwind
+        // contains panics inside exported FFI functions and returns them as
+        // structured errors, so a single panicking call must not kill the app
+        // (and its in-memory key material). The crash report above is still
+        // written so the failure is observable (audit finding #13).
     }));
 }
 
@@ -221,6 +224,8 @@ pub fn run() {
             perform_stun_hole_punch,
             evaluate_connection_status,
             get_pairing_config,
+            get_pairing_nonce,
+            get_server_cert_hash,
             confirm_pairing_sas,
             get_pairing_status,
             get_settings,

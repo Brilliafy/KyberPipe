@@ -146,25 +146,43 @@ pub fn bind_pkcs11_yubikey_hardware_token(
                 .into(),
         );
     };
+    // Audit finding #17: the previous implementation only string-matched the
+    // slot listing for "token"/"present" — it never performed a KEY operation,
+    // so "YubiKey-bound" was cosmetic. A real token interaction is required to
+    // prove the token is present AND responsive: `--show-info` performs
+    // C_GetTokenInfo against the actual token and returns its serial number.
     let out = std::process::Command::new(tool)
-        .args(["--list-slots"])
+        .args(["--slot", &slot_id.to_string(), "--show-info"])
         .output()
         .map_err(|e| format!("Failed to run pkcs11-tool: {e}"))?;
     let listing = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Err(format!(
+            "PKCS#11 token interaction failed: {} — no hardware-backed binding performed",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // Extract the token serial number as proof of a REAL token operation.
+    let serial = listing
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            if t.starts_with("serial number") || t.starts_with("Serial") {
+                Some(t.to_string())
+            } else {
+                None
+            }
+        });
     // Status-only return: never expose raw tool output to the renderer
-    // (audit finding #14b — info disclosure).
-    let slot_block = listing
-        .split("Slot ")
-        .skip(1)
-        .find(|block| block.starts_with(&format!("{slot_id} ")));
-    match slot_block {
-        Some(block) if block.contains("token") || block.contains("present") => {
-            Ok(format!("PKCS#11 token verified in slot {slot_id}"))
-        }
-        Some(_) => Err(format!(
-            "PKCS#11 slot {slot_id} exists but has no token inserted"
+    // (audit finding #14b — info disclosure). Honest wording: this verifies the
+    // token, it does NOT wrap KyberPipe keys (no key operation is performed).
+    match serial {
+        Some(s) => Ok(format!(
+            "PKCS#11 token present and responsive in slot {slot_id} (serial {s}). Note: KyberPipe keys are NOT hardware-backed — this verifies the token only."
         )),
-        None => Err(format!("PKCS#11 slot {slot_id} not found")),
+        None => Err(format!(
+            "PKCS#11 slot {slot_id} responded but no serial number was reported — cannot confirm a real token"
+        )),
     }
 }
 
@@ -195,25 +213,42 @@ pub fn trigger_panic_self_destruct(
     }
     state.save_settings();
 
-    // Wipe OS keyring entries
-    if let Ok(entry) = keyring::Entry::new("kyberpipe", "master_identity_key") {
+    // Wipe OS keyring entries. Enumerate EVERY kyberpipe service entry:
+    // master_identity_key, session_key, and the independent ratchet snapshot
+    // wrap key — plus the kyberpipe-tofu service's trusted-server TLS pin.
+    // (Audit finding #16: the old path left snapshot_key and the TLS pin alive
+    // after self-destruct.)
+    for key_name in ["master_identity_key", "session_key", "snapshot_key"] {
+        if let Ok(entry) = keyring::Entry::new("kyberpipe", key_name) {
+            let _ = entry.delete_password();
+        }
+    }
+    if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
         let _ = entry.delete_password();
     }
+    // Invalidate the in-memory trusted pin too.
+    core_crypto::network::tls_config::store_tofu_cert_hash(String::new());
 
-    // Destroy session key handle
+    // Destroy the desktop session key handle AND every other live handle — the
+    // old path only destroyed DESKTOP_SESSION_KEY_HANDLE, leaving the key bytes
+    // of other handles registered in memory (audit finding #16).
     let handle = crate::handlers::DESKTOP_SESSION_KEY_HANDLE.swap(0, std::sync::atomic::Ordering::AcqRel);
     if handle != 0 {
         core_crypto::session_key_destroy(handle);
     }
+    core_crypto::session_key_destroy_all();
     crate::handlers::IS_SESSION_KEY_AUTHENTICATED.store(false, std::sync::atomic::Ordering::Release);
 
     // Clear all ratchet sessions — chain keys must not survive self-destruct
     core_crypto::ratchet_clear_all_sessions();
     // Remove any persisted ratchet snapshots too.
     crate::ratchet_store::clear_ratchet_store();
-    let _ = keyring::Entry::new("kyberpipe", "session_key").and_then(|e| e.delete_password());
     // Invalidate all in-flight FFI operations
     core_crypto::increment_destruct_generation();
+
+    // Confirm the destruct generation now blocks use of every keyed operation
+    // (check_generation() false). A follow-up session_key_encrypt must fail.
+    debug_assert!(!core_crypto::check_generation());
 
     state.set_connection_status("SELF_DESTRUCTED_MEMORY_ZEROIZED".to_string());
     state.add_log(

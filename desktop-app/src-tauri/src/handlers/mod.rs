@@ -10,6 +10,8 @@ pub(crate) use clipboard::handle_clipboard;
 pub(crate) use media::handle_media;
 pub(crate) use pairing::{handle_pairing, DESKTOP_SESSION_KEY_HANDLE};
 pub(crate) use poll::handle_poll;
+#[cfg(test)]
+pub(crate) use poll::FORCE_EMPTY_CLIPBOARD;
 pub(crate) use sms::handle_sms;
 pub(crate) use unpair::handle_unpair;
 pub(crate) use rekey_ack::handle_rekey_ack;

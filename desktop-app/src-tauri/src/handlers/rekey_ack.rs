@@ -7,13 +7,15 @@ pub(crate) async fn handle_rekey_ack(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8>
         let peer_id = s.get_pairing_initiator_pk();
         if !peer_id.is_empty() {
             if let Some(enc) = json.get("encrypted_ratchet") {
-                let nonce_hex = enc.get("nonce_hex").and_then(|v| v.as_str()).unwrap_or("");
-                let ct_hex = enc.get("ciphertext_hex").and_then(|v| v.as_str()).unwrap_or("");
-                
-                if !nonce_hex.is_empty() && !ct_hex.is_empty() {
-                    if let (Ok(nonce), Ok(ct)) = (hex::decode(nonce_hex), hex::decode(ct_hex)) {
-                        // Decrypt the ACK and parse the JSON payload
-                        match core_crypto::ratchet_decrypt_message(peer_id.clone(), nonce, ct) {
+                let tlv_b64 = enc.get("tlv_b64").and_then(|v| v.as_str()).unwrap_or("");
+                if !tlv_b64.is_empty() {
+                    if let Ok(bin) = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        tlv_b64,
+                    ) {
+                        // Decrypt the ACK and parse the JSON payload (audit #12:
+                        // binary TLV framing).
+                        match core_crypto::ratchet_decrypt_message_binary(peer_id.clone(), bin) {
                             Ok(pt) => {
                                 if let Ok(msg) = core_crypto::packets::KyberMessage::from_json(&String::from_utf8_lossy(&pt)) {
                                     if let core_crypto::packets::KyberMessage::RekeyAck { seq } = msg {
