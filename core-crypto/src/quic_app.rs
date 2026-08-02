@@ -165,6 +165,22 @@ fn store_server_endpoint(ep: Endpoint) -> Option<Endpoint> {
     old
 }
 
+/// TEST/TEARDOWN ONLY: drop the process-global server endpoint so its UDP
+/// socket and driver tasks release before the test process exits (audit
+/// finding #4 follow-up — the lingering e2e). Returns whether an endpoint was
+/// held. Not cfg(test) because the desktop-app integration test links this
+/// crate as a normal dependency.
+#[doc(hidden)]
+pub fn release_server_endpoint_for_tests() -> bool {
+    match SERVER_ENDPOINT.get() {
+        Some(cell) => match cell.lock() {
+            Ok(mut guard) => guard.take().is_some(),
+            Err(poisoned) => poisoned.into_inner().take().is_some(),
+        },
+        None => false,
+    }
+}
+
 /// Store the pinned client cert hash after successful SAS pairing and rebind
 /// the server so mTLS enforcement takes effect IMMEDIATELY — not on the next
 /// startup. Rejects empty/malformed hashes (audit findings #8/#8b: an empty

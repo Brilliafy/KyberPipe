@@ -255,7 +255,12 @@ export function usePairing(deps: PairingDeps) {
       }
     } else if (method === "tor") {
       try {
-        const onion = await invoke<any>("create_tor_onion");
+        // Tier-2 destructive command — single-use user-gesture token
+        // (audit finding #20).
+        const token = await invoke<string>("request_privilege_token", {
+          action: "create_tor_onion",
+        });
+        const onion = await invoke<any>("create_tor_onion", { token });
         if (onion.onion_address) {
           await buildPairingQr({
             method: "tor",
@@ -354,7 +359,12 @@ export function usePairing(deps: PairingDeps) {
     firewallBusy.value = true;
     firewallResult.value = "";
     try {
-      const result = await invoke<string>("request_firewall_open");
+      // Tier-2 destructive command — single-use user-gesture token
+      // (audit finding #20).
+      const token = await invoke<string>("request_privilege_token", {
+        action: "request_firewall_open",
+      });
+      const result = await invoke<string>("request_firewall_open", { token });
       if (result) {
         firewallResult.value = result;
         setTimeout(() => {
@@ -372,7 +382,10 @@ export function usePairing(deps: PairingDeps) {
 
   const handleFixFirewall = async () => {
     try {
-      await invoke<string>("request_firewall_open");
+      const token = await invoke<string>("request_privilege_token", {
+        action: "request_firewall_open",
+      });
+      await invoke<string>("request_firewall_open", { token });
     } catch (e) {
       console.error("Firewall fix failed:", e);
     }

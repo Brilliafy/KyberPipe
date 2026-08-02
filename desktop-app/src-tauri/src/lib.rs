@@ -196,8 +196,9 @@ pub fn run() {
             crate::sync_server::start_local_sync_server(state_clone);
             Ok(())
         })
+        // ── Command surface, registered per-TIER (audit finding #20) ────────
+        // Tier 0: read-only queries — no token required.
         .invoke_handler(tauri::generate_handler![
-            // ── Tier 0: read-only queries (no token required) ──
             get_system_info,
             get_connection_status,
             get_connection_status_full,
@@ -215,7 +216,11 @@ pub fn run() {
             dump_flight_recorder_events,
             get_pairing_config,
             read_real_clipboard,
-            // ── Tier 1: state mutation (user gesture in the UI) ──
+            list_mock_files,
+        ])
+        // Tier 1: state mutation — driven by a real user gesture in the UI;
+        // no extra token (the renderer is the trusted local frontend).
+        .invoke_handler(tauri::generate_handler![
             generate_keypair,
             save_settings,
             sync_clipboard,
@@ -238,9 +243,16 @@ pub fn run() {
             create_p2p_group,
             register_mdns_service,
             execute_fallback_script,
-            execute_boa_script,
-            // ── Tier 2: privileged/destructive (SINGLE-USE user-gesture token ──
-            // via `request_privilege_token` + `consume_privilege_token`) ──
+            generate_shamir_recovery_shares,
+            reconstruct_key_from_shamir_shares,
+            confirm_pairing_sas,
+            toggle_neural_anomaly_engine,
+        ])
+        // Tier 2: privileged/destructive — EVERY command first calls
+        // `gate_tier2(action, token)`, consuming the single-use user-gesture
+        // token issued by `request_privilege_token`. Enforcement is per-TIER
+        // (uniform), not ad-hoc per command.
+        .invoke_handler(tauri::generate_handler![
             request_privilege_token,
             check_stepup_authorization,
             delete_connection,
@@ -251,13 +263,7 @@ pub fn run() {
             open_local_file,
             request_firewall_open,
             create_tor_onion,
-            // Tier-2-but-not-yet-token-gated (legacy surface, kept for
-            // compatibility; see audit finding #20 for the ongoing migration):
-            list_mock_files,
-            generate_shamir_recovery_shares,
-            reconstruct_key_from_shamir_shares,
-            confirm_pairing_sas,
-            toggle_neural_anomaly_engine,
+            execute_boa_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

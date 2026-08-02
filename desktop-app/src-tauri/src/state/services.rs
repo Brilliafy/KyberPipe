@@ -12,11 +12,14 @@ type PersistJob = (String, String);
 /// consumer drains the queue on every wake and writes only the LATEST value
 /// per path, so a slow filesystem never blocks a Tauri command on the main
 /// thread and an intermediate stale write is dropped without loss (the newest
-/// value for each path always lands).
-fn persist_channel() -> &'static mpsc::SyncSender<PersistJob> {
-    static CHAN: OnceLock<mpsc::SyncSender<PersistJob>> = OnceLock::new();
+/// value for each path always lands). An UNBOUNDED channel is used so
+/// `persist()` is a pure enqueue that can never block even under a full
+/// buffer; the drain-and-coalesce consumer bounds memory in practice (only one
+/// value per path is retained at write time).
+fn persist_channel() -> &'static mpsc::Sender<PersistJob> {
+    static CHAN: OnceLock<mpsc::Sender<PersistJob>> = OnceLock::new();
     CHAN.get_or_init(|| {
-        let (tx, rx) = mpsc::sync_channel::<PersistJob>(16);
+        let (tx, rx) = mpsc::channel::<PersistJob>();
         std::thread::spawn(move || {
             let mut latest: HashMap<String, String> = HashMap::new();
             while let Ok((path, data)) = rx.recv() {
@@ -35,11 +38,11 @@ fn persist_channel() -> &'static mpsc::SyncSender<PersistJob> {
     })
 }
 
-/// Enqueue a persistence job WITHOUT blocking the caller. A full 16-slot queue
-/// drops the write — safe because the consumer coalesces by path, so the next
-/// write for the same path carries strictly newer data (audit finding #22).
+/// Enqueue a persistence job WITHOUT blocking the caller. `mpsc::Sender::send`
+/// on an unbounded channel never blocks, so a slow FS or a busy persistence
+/// thread can never stall a Tauri command (audit finding #22).
 fn persist(path: String, data: String) {
-    let _ = persist_channel().try_send((path, data));
+    let _ = persist_channel().send((path, data));
 }
 
 pub fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

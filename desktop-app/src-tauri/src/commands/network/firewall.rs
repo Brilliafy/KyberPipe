@@ -89,7 +89,9 @@ pub fn check_firewall(state: State<'_, std::sync::Arc<AppState>>) -> FirewallSta
 }
 
 #[tauri::command]
-pub fn request_firewall_open() -> String {
+pub fn request_firewall_open(token: String) -> Result<String, String> {
+    // Tier-2 destructive command — uniform user-gesture token gate (audit #20).
+    crate::commands::gate_tier2("request_firewall_open", &token)?;
     for gui_app in &[
         "firewall-config",
         "gnome-control-center",
@@ -99,10 +101,10 @@ pub fn request_firewall_open() -> String {
         if let Ok(out) = std::process::Command::new("which").arg(gui_app).output() {
             if !out.stdout.is_empty() {
                 let _ = std::process::Command::new(gui_app).spawn();
-                return format!(
+                return Ok(format!(
                     "Opened {} GUI. Please add port 9876/udp to the firewall.",
                     gui_app
-                );
+                ));
             }
         }
     }
@@ -139,9 +141,9 @@ pub fn request_firewall_open() -> String {
                     "Reload",
                 ])
                 .output();
-            return "Port opened via D-Bus/Polkit".to_string();
+            return Ok("Port opened via D-Bus/Polkit".to_string());
         }
     }
 
-    String::new()
+    Ok(String::new())
 }

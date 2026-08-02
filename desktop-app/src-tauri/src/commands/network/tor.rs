@@ -12,7 +12,12 @@ pub struct TorOnionInfo {
 }
 
 #[tauri::command]
-pub fn create_tor_onion(state: State<'_, std::sync::Arc<AppState>>) -> TorOnionInfo {
+pub fn create_tor_onion(
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<TorOnionInfo, String> {
+    // Tier-2 destructive command — uniform user-gesture token gate (audit #20).
+    crate::commands::gate_tier2("create_tor_onion", &token)?;
     let mut info = TorOnionInfo {
         onion_address: String::new(),
     };
@@ -71,7 +76,7 @@ ClientOnly 1
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return info,
+        Err(_) => return Ok(info),
     };
 
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -115,5 +120,5 @@ ClientOnly 1
     // Previously tor_child was killed immediately, destroying the .onion route.
     state.set_tor_child(tor_child);
 
-    info
+    Ok(info)
 }

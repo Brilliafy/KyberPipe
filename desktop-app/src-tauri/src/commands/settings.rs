@@ -22,6 +22,7 @@ pub fn save_settings(
     theme_mode: Option<String>,
     pathway_order: Option<Vec<String>>,
     wireguard_active: Option<bool>,
+    beacon_discovery_enabled: Option<bool>,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
     // NOTE: `is_paired` is intentionally NOT accepted here. Pairing state is
@@ -70,6 +71,13 @@ pub fn save_settings(
         }
         if let Some(v) = wireguard_active {
             s.wireguard_active = v;
+        }
+        if let Some(v) = beacon_discovery_enabled {
+            s.beacon_discovery_enabled = v;
+            state.add_log(format!(
+                "[Beacon] LAN discovery beacons {}",
+                if v { "enabled (opt-in)" } else { "disabled" }
+            ));
         }
     }
     state.save_settings();
