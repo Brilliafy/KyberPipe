@@ -183,8 +183,11 @@ pub(crate) async fn handle_pairing(
     }
 
     // Record the peer identity at pairing time so post-pairing streams can be
-    // authorized to this peer only (certificate hash preferred, IP as fallback).
-    s.set_pending_client_cert_hash(peer_cert_hash);
+    // authorized to this peer only. The identity is the TLS-OBSERVED client
+    // certificate hash captured from the QUIC connection at handshake time —
+    // unforgeable by the client (audit finding #11). It must NEVER be replaced
+    // by a hash the client claims in the request body.
+    s.set_pending_client_cert_hash(peer_cert_hash.clone());
     if let Some(ip) = peer_ip {
         s.set_paired_peer_ip(ip.to_string());
     }
@@ -243,7 +246,24 @@ pub(crate) async fn handle_pairing(
                 if let Ok(sk) = core_crypto::derive_session_key(shared_secret, salt) {
                     s.set_pending_session_key(SecureString::new(hex::encode(&sk)));
                     s.set_pending_shared_secret(SecureString::new(hex::encode(&ss_for_sas)));
-                    s.set_pending_client_cert_hash(cert_hash);
+                    // Audit finding #11: the pinned client identity is the
+                    // TLS-OBSERVED certificate hash captured at handshake time
+                    // (already stored above) — never the client-claimed hash
+                    // from the request body. The claimed hash, when present, is
+                    // used ONLY as a cross-check and must equal the connection
+                    // hash; a mismatch is a protocol violation (the client is
+                    // not presenting the identity it claims).
+                    if !cert_hash.is_empty()
+                        && !peer_cert_hash.is_empty()
+                        && cert_hash != peer_cert_hash
+                    {
+                        s.add_log(
+                            "[Pairing] Rejected: client-claimed cert hash does not match the TLS-presented certificate".to_string(),
+                        );
+                        return r#"{"status":"error","reason":"Certificate hash mismatch"}"#
+                            .to_string()
+                            .into_bytes();
+                    }
 
                     if !client_pk.is_empty() {
                         s.set_pairing_initiator_pk(hex::encode(&client_pk));

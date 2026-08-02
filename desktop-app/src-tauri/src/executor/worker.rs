@@ -218,27 +218,80 @@ pub fn run_boa_sandboxed_script(script_code: &str, lux: f64, feed_data: &str) ->
     }
 }
 
-/// Last-resort in-process execution with a bounded stack. The Boa runtime
-/// itself enforces a loop-iteration limit; deep recursion / huge allocations
-/// are the only unbounded risk, bounded here by the OS thread. 8 MiB stack
-/// (audit finding #16 — the old 1 MiB fallback stack could overflow and abort
-/// the whole process via the panic hook).
+/// Last-resort execution when the persistent worker pool cannot spawn.
+///
+/// Audit finding #17: the old fallback ran Boa IN-PROCESS with only an 8 MiB
+/// stack — no RLIMIT_AS / RLIMIT_CPU — so a hostile script (reachable if any
+/// renderer compromise can invoke execute_boa_script) executed with the full
+/// app's privileges. We REFUSE to run unsandboxed: this path spawns the one-shot
+/// `--boa-sandbox` child, which applies the same hard rlimits as the workers
+/// (`apply_worker_rlimits`) before running the script. If the child cannot be
+/// spawned, the script is not executed at all and an error is returned.
 fn fallback_in_process(script_code: &str, lux: f64, feed_data: &str) -> ScriptExecutionResult {
-    let script = script_code.to_string();
-    let feed = feed_data.to_string();
-    let handle = std::thread::Builder::new()
-        .name("boa-fallback".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || run_boa_inner(&script, lux, &feed));
-    match handle {
-        Ok(jh) => jh.join().unwrap_or(ScriptExecutionResult {
-            success: false,
-            output: "Boa thread panicked".into(),
-            logs: vec![],
-        }),
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            return ScriptExecutionResult {
+                success: false,
+                output: format!("Boa fallback disabled: cannot locate executable: {e}"),
+                logs: vec![],
+            };
+        }
+    };
+    let request = serde_json::json!({ "script": script_code, "lux": lux, "feed": feed_data });
+    let mut child = match Command::new(&exe)
+        .arg("--boa-sandbox")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
+        .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_default())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            // Refuse to run the script unsandboxed — returning an error is safer
+            // than executing with full privileges (audit finding #17).
+            return ScriptExecutionResult {
+                success: false,
+                output: format!("Boa sandbox fallback unavailable (spawn error: {e}) — script NOT executed"),
+                logs: vec![],
+            };
+        }
+    };
+    {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(request.to_string().as_bytes());
+            let _ = stdin.write_all(b"\n");
+        }
+    }
+    let output = child.wait_with_output();
+    match output {
+        Ok(out) => {
+            if !out.status.success() {
+                return ScriptExecutionResult {
+                    success: false,
+                    output: format!(
+                        "Boa sandbox exited with {}: {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    logs: vec![],
+                };
+            }
+            serde_json::from_slice::<ScriptExecutionResult>(&out.stdout).unwrap_or_else(|e| {
+                ScriptExecutionResult {
+                    success: false,
+                    output: format!("Boa sandbox returned malformed result: {e}"),
+                    logs: vec![],
+                }
+            })
+        }
         Err(e) => ScriptExecutionResult {
             success: false,
-            output: format!("Thread spawn error: {e}"),
+            output: format!("Boa sandbox I/O error: {e}"),
             logs: vec![],
         },
     }

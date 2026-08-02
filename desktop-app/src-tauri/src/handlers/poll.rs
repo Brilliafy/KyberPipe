@@ -6,10 +6,6 @@ use std::time::Instant;
 use super::DESKTOP_SESSION_KEY_HANDLE;
 use super::IS_SESSION_KEY_AUTHENTICATED;
 
-/// Cap on the receive-chain forward gap before this side issues a resync.
-/// Mirrors the ratchet's default max_skip (100).
-const RESYNC_GAP_THRESHOLD: u64 = 100;
-
 /// Clipboard read cache TTL — poll requests arrive every 2.5s from the phone;
 /// re-reading the OS clipboard (arboard / wl-paste / xclip, each up to 3s) on
 /// EVERY poll would stall the accept-loop runtime. Cache for 1s instead
@@ -20,10 +16,23 @@ const CLIPBOARD_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(
 static CLIPBOARD_CACHE: LazyLock<Mutex<Option<(Instant, Vec<u8>)>>> =
     LazyLock::new(|| Mutex::new(None));
 
+/// TEST-ONLY hermetic override: when set, the poll handler treats the OS
+/// clipboard as empty. The wire-level rekey e2e sets this so the desktop never
+/// encrypts real clipboard content during the test — otherwise the desktop's
+/// own send chain can cross seq 100 and, as the initiator, suppress the
+/// client's rekey proposal (deterministic race outcome required by the test).
+#[cfg(test)]
+pub(crate) static FORCE_EMPTY_CLIPBOARD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Read the real clipboard through a 1s cache so the (potentially
 /// multi-second) OS clipboard read never runs on the accept-loop workers more
 /// than once per second, regardless of poll frequency.
 fn cached_clipboard_read() -> Vec<u8> {
+    #[cfg(test)]
+    if FORCE_EMPTY_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire) {
+        return Vec::new();
+    }
     let now = Instant::now();
     if let Ok(cache) = CLIPBOARD_CACHE.lock() {
         if let Some((at, bytes)) = cache.as_ref() {
@@ -75,20 +84,19 @@ fn select_encryption_method(
 fn encrypt_clipboard_data(method: &EncryptionMethod, latest_clip: &[u8]) -> serde_json::Value {
     match method {
         EncryptionMethod::Ratchet { peer_id } => {
-            match core_crypto::ratchet_encrypt_message(
+            // Audit finding #12: the ratchet payload is serialized as a single
+            // base64-wrapped BINARY TLV (the UniFFI Record's `to_binary` framing)
+            // instead of five independent hex fields — one serialization
+            // contract shared by both platforms, no per-field drift surface.
+            match core_crypto::ratchet_encrypt_message_binary(
                 peer_id.clone(),
                 latest_clip.to_vec(),
             ) {
-                Ok(msg) => {
-                    let ratchet_val = serde_json::json!({
-                        "nonce_hex": hex::encode(&msg.nonce),
-                        "ciphertext_hex": hex::encode(&msg.ciphertext),
-                        "rekey_x25519_pk_hex": msg.rekey_x25519_pk.as_ref().map(hex::encode),
-                        "rekey_mlkem_pk_hex": msg.rekey_mlkem_pk.as_ref().map(hex::encode),
-                        "rekey_ciphertext_hex": msg.rekey_ciphertext.as_ref().map(hex::encode),
-                    });
-                    serde_json::json!({"encrypted_ratchet": ratchet_val})
-                }
+                Ok(bin) => serde_json::json!({
+                    "encrypted_ratchet": {
+                        "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
+                    }
+                }),
                 Err(e) => {
                     tracing::warn!("[Poll] Ratchet encrypt failed for {peer_id}: {e}");
                     serde_json::Value::Null
@@ -141,15 +149,21 @@ fn read_local_state(s: &AppState) -> (String, bool, u64, bool, serde_json::Value
     (peer_id, session_key_auth, sk_handle, is_paired, base, connection.status.clone().into())
 }
 
-/// Parse the peer's poll REQUEST body. The Android poll loop now sends its own
-/// ratchet send counter (`sync_send_count`) so the desktop can detect and
-/// repair receive-chain gaps (audit finding #4 — Synchronize recovery).
-fn peer_sync_send_count(body: &[u8]) -> Option<u64> {
+/// Parse the peer's poll REQUEST body for an ENCRYPTED `Synchronize` packet.
+/// The Android poll loop sends its current send counter as a ratchet-encrypted
+/// `KyberMessage::Synchronize` (`{ "sync": { nonce_hex, ciphertext_hex } }`);
+/// the desktop processes it via `ratchet_process_synchronize`, which decrypts
+/// (authenticating the sender), verifies the packet type, and only then resyncs
+/// the receiving chain (audit finding #4 — the plaintext counter is NEVER
+/// acted on, and resync is rate-limited / budget-bounded / generation-aware).
+fn peer_sync_packet(body: &[u8]) -> Option<Vec<u8>> {
     if body.is_empty() {
         return None;
     }
     let v = serde_json::from_slice::<serde_json::Value>(body).ok()?;
-    v.get("sync_send_count").and_then(|x| x.as_u64())
+    let sync = v.get("sync")?;
+    let tlv_b64 = sync.get("tlv_b64")?.as_str()?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()
 }
 
 /// Split of `handle_poll`: encrypt the clipboard and attach the rekey-ack and
@@ -201,16 +215,30 @@ async fn build_poll_response(
     // the poll response so the peer can commit its outgoing proposal.
     if !peer_id.is_empty() {
         if let Ok(Some(ack)) = core_crypto::ratchet_generate_rekey_ack(peer_id.to_string()) {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
-                    "nonce_hex": hex::encode(ack.nonce),
-                    "ciphertext_hex": hex::encode(ack.ciphertext),
-                }));
+            if let Ok(bin) = ack.to_binary() {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
+                        "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
+                    }));
+                }
             }
         }
-        // Producer for the Synchronize recovery path (audit finding #4): the
-        // peer uses this plaintext counter to detect a receive-chain gap and
-        // resync locally.
+        // Producer for the Synchronize recovery path (audit finding #4): our
+        // send counter is sent as a RATCHET-ENCRYPTED Synchronize packet so the
+        // peer can authenticate the resync target. The packet is encoded as a
+        // full BINARY TLV (audit finding #12): a ratchet message may carry a
+        // rekey payload at seq 100/200, and dropping those fields would make the
+        // ciphertext undecryptable (AEAD binds the rekey params). The plaintext
+        // counter is retained only as a diagnostic field and is never acted on.
+        if let Ok(sync_msg) = core_crypto::ratchet_synchronize_packet(peer_id.to_string()) {
+            if let Ok(bin) = sync_msg.to_binary() {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("sync".to_string(), serde_json::json!({
+                        "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin),
+                    }));
+                }
+            }
+        }
         if let Ok(send_count) = core_crypto::ratchet_send_count(peer_id.to_string()) {
             if let Some(obj) = resp.as_object_mut() {
                 obj.insert("ratchet_send_count".to_string(), serde_json::json!(send_count));
@@ -226,17 +254,24 @@ pub(crate) async fn handle_poll(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
     let (peer_id, session_key_auth, sk_handle, _is_paired, base, _conn) =
         read_local_state(&s);
 
-    // Consumer for the Synchronize recovery path: if the peer's send counter
-    // is ahead of our receive counter by more than max_skip, resync our
-    // receiving chain so we can follow the peer across a network handoff.
+    // Consumer for the Synchronize recovery path (audit finding #4): the peer
+    // sends its send counter as a RATCHET-ENCRYPTED Synchronize packet. Only an
+    // authenticated, verified Synchronize can trigger a resync; the plaintext
+    // counter is never acted on. The core additionally refuses resync across an
+    // unconsumed pending rekey, enforces a persisted cumulative budget, and
+    // rate-limits per peer.
     if !peer_id.is_empty() {
-        if let Some(peer_send) = peer_sync_send_count(&body) {
-            if let Ok(recv) = core_crypto::ratchet_recv_count(peer_id.clone()) {
-                if peer_send > recv && peer_send - recv > RESYNC_GAP_THRESHOLD {
-                    tracing::info!(
-                        "[Sync] Peer send count {peer_send} ahead of recv {recv} — resynchronizing receiving chain"
-                    );
-                    let _ = core_crypto::ratchet_synchronize_session(peer_id.clone(), peer_send);
+        if let Some(data) = peer_sync_packet(&body) {
+            match core_crypto::ratchet_process_synchronize(peer_id.clone(), data) {
+                Ok(skipped) => {
+                    if skipped > 0 {
+                        tracing::info!(
+                            "[Sync] Authenticated Synchronize from {peer_id} advanced receive chain by {skipped}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::info!("[Sync] Synchronize from {peer_id} not applied: {e}");
                 }
             }
         }

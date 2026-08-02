@@ -80,8 +80,21 @@ pub fn save_settings(
 /// `is_paired = false` directly, this command performs the full authenticated
 /// unlink: clears the ratchet session, destroys the session-key handle, wipes
 /// pairing state and settings, and persists the result.
+///
+/// Destructive — requires a fresh user-gesture confirmation token, matching
+/// its siblings (audit finding #9: `delete_connection` was the only destructive
+/// command WITHOUT a token, so the least protected path was the one most
+/// easily reached by a renderer bug or XSS). The renderer must call
+/// `request_privilege_token("delete_connection")` immediately after showing a
+/// confirmation dialog and pass the token here.
 #[tauri::command]
-pub fn delete_connection(state: State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
+pub fn delete_connection(
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    if !crate::commands::security::consume_privilege_token("delete_connection", &token) {
+        return Err("Destructive action requires a fresh confirmation token".into());
+    }
     let peer_id = state.get_pairing_initiator_pk();
     if !peer_id.is_empty() {
         core_crypto::ratchet_remove_session(peer_id);

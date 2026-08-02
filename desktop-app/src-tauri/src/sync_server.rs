@@ -20,6 +20,17 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::info;
 
+/// Maximum concurrent QUIC connections accepted at once. Bounds the number of
+/// per-connection accept-loop tasks and connection buffers an attacker on the
+/// LAN can force the server to hold before any authorization happens (audit
+/// finding #8 — pre-pairing LAN DoS).
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+/// Maximum concurrent streams per connection. Bounds the N×M task explosion
+/// from a single hostile connection.
+const MAX_STREAMS_PER_CONNECTION: usize = 16;
+/// Maximum concurrent streams across ALL connections.
+const MAX_GLOBAL_STREAMS: usize = 256;
+
 /// Authorize a stream from a given peer against the pairing state.
 /// Post-pairing identity is the CLIENT CERTIFICATE hash captured at pairing
 /// time — never the IP address (audit finding #8: IP binding breaks on network
@@ -54,6 +65,41 @@ fn authorize_stream(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState::default())
+    }
+
+    /// Audit finding #8: the stream authorization matrix must be enforced —
+    /// pairing streams only while unpaired, everything else only when paired
+    /// AND the peer's TLS-observed cert hash matches the pinned one.
+    #[test]
+    fn authorize_stream_matrix() {
+        let state = test_state();
+        // Pre-pairing: pairing streams allowed, everything else rejected.
+        assert!(authorize_stream(&state, "", "", STREAM_PAIRING).is_ok());
+        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_CLIPBOARD).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_UNPAIR).is_err());
+
+        // Paired: non-pairing streams require the pinned cert hash.
+        {
+            let mut settings = state.settings.lock();
+            settings.is_paired = true;
+        }
+        state.set_paired_client_cert_hash("deadbeef".to_string());
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_POLL).is_ok());
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_CLIPBOARD).is_ok());
+        assert!(authorize_stream(&state, "wronghash", "", STREAM_POLL).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
+        // Pairing streams are refused once paired.
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_PAIRING).is_err());
     }
 }
 
@@ -184,6 +230,13 @@ pub async fn run_server_dispatch(
     let rekey_ack_cb = std::sync::Arc::new(on_rekey_ack);
     let sms_cb = std::sync::Arc::new(on_sms);
 
+    // ── Resource budgets (audit finding #8) ──────────────────────────────────
+    // A pre-pairing desktop is a public pairing server on 0.0.0.0:9876. Without
+    // caps, an attacker on the LAN could open N connections × M streams and
+    // force the server to buffer up to 1 MiB per stream before authorization.
+    let connection_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let global_stream_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_GLOBAL_STREAMS));
+
     loop {
         let incoming = match stop_rx.as_mut() {
             Some(rx) => {
@@ -204,7 +257,20 @@ pub async fn run_server_dispatch(
                 let unpair_cb = unpair_cb.clone();
                 let rekey_ack_cb = rekey_ack_cb.clone();
                 let sms_cb = sms_cb.clone();
+                // Refuse connections beyond the budget immediately: the
+                // connecting peer sees a dropped handshake instead of being
+                // queued, so the accept loop and the pairing path cannot be
+                // starved by a flood of connections.
+                let conn_permit = match connection_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        info!("[QUIC] Refusing connection: budget exhausted (max {MAX_CONCURRENT_CONNECTIONS})");
+                        continue;
+                    }
+                };
+                let global_stream = global_stream_semaphore.clone();
                 tokio::spawn(async move {
+                    let _conn_guard = conn_permit;
                     match connecting.await {
                         Ok(connection) => {
                             info!("QUIC connection: {}", connection.remote_address());
@@ -212,6 +278,10 @@ pub async fn run_server_dispatch(
                                 core_crypto::quic_app::connection_peer_cert_hash(&connection)
                                     .unwrap_or_default();
                             let peer_ip = connection.remote_address().ip();
+                            // Per-connection stream budget.
+                            let per_conn_streams = std::sync::Arc::new(
+                                tokio::sync::Semaphore::new(MAX_STREAMS_PER_CONNECTION),
+                            );
                             while let Ok((mut send, mut recv)) = connection.accept_bi().await {
                                 let state = state.clone();
                                 let pairing_cb = pairing_cb.clone();
@@ -222,40 +292,76 @@ pub async fn run_server_dispatch(
                                 let rekey_ack_cb = rekey_ack_cb.clone();
                                 let sms_cb = sms_cb.clone();
                                 let peer_cert_hash = peer_cert_hash.clone();
+                                let per_conn = per_conn_streams.clone();
+                                let global_stream = global_stream.clone();
                                 tokio::spawn(async move {
-                                    if let Ok(frame) = core_crypto::quic_app::QuicAppManager::recv_frame(&mut recv).await {
-                                        if let Err(reason) = authorize_stream(
-                                            &state,
-                                            &peer_cert_hash,
-                                            &peer_ip.to_string(),
-                                            frame.stream_type,
-                                        ) {
-                                            info!(
-                                                "[QUIC Auth] Rejected stream 0x{:02x} from {}: {}",
-                                                frame.stream_type, peer_ip, reason
-                                            );
-                                            let _ = core_crypto::quic_app::QuicAppManager::send_frame(
-                                                &mut send,
-                                                &QuicFrame {
-                                                    stream_type: frame.stream_type,
-                                                    body: format!(r#"{{"status":"error","reason":"{reason}"}}"#).into_bytes(),
-                                                },
-                                            )
-                                            .await;
+                                    // Both the per-connection and the global stream
+                                    // budget must be available; otherwise the stream
+                                    // is dropped without reading its body.
+                                    let _local_guard = match per_conn.try_acquire_owned() {
+                                        Ok(g) => g,
+                                        Err(_) => {
+                                            info!("[QUIC] Dropping stream: per-connection budget exhausted");
                                             return;
                                         }
-                                        let response = match frame.stream_type {
-                                            STREAM_PAIRING => QuicFrame { stream_type: STREAM_PAIRING, body: pairing_cb(frame.body, peer_ip, peer_cert_hash.clone()).await },
-                                            STREAM_CLIPBOARD => QuicFrame { stream_type: STREAM_CLIPBOARD, body: clipboard_cb(frame.body).await },
-                                            STREAM_MEDIA => QuicFrame { stream_type: STREAM_MEDIA, body: media_cb(frame.body).await },
-                                            STREAM_POLL => QuicFrame { stream_type: STREAM_POLL, body: poll_cb(frame.body).await },
-                                            STREAM_UNPAIR => { unpair_cb(peer_cert_hash.clone(), peer_ip).await; QuicFrame { stream_type: STREAM_UNPAIR, body: vec![] } },
-                                            STREAM_REKEY_ACK => QuicFrame { stream_type: STREAM_REKEY_ACK, body: rekey_ack_cb(frame.body).await },
-                                            STREAM_SMS => QuicFrame { stream_type: STREAM_SMS, body: sms_cb(frame.body).await },
-                                            _ => QuicFrame { stream_type: frame.stream_type, body: vec![] },
-                                        };
-                                        let _ = core_crypto::quic_app::QuicAppManager::send_frame(&mut send, &response).await;
+                                    };
+                                    let _global_guard = match global_stream.try_acquire_owned() {
+                                        Ok(g) => g,
+                                        Err(_) => {
+                                            info!("[QUIC] Dropping stream: global stream budget exhausted");
+                                            return;
+                                        }
+                                    };
+                                    // Authorize from the HEADER before reading the
+                                    // body: an unauthenticated peer cannot force the
+                                    // server to buffer a 1 MiB body.
+                                    let (stream_type, _body_len) = match core_crypto::quic_app::QuicAppManager::recv_frame_header(&mut recv).await {
+                                        Ok(h) => h,
+                                        Err(e) => {
+                                            info!("[QUIC] Stream header read failed: {e}");
+                                            return;
+                                        }
+                                    };
+                                    if let Err(reason) = authorize_stream(
+                                        &state,
+                                        &peer_cert_hash,
+                                        &peer_ip.to_string(),
+                                        stream_type,
+                                    ) {
+                                        info!(
+                                            "[QUIC Auth] Rejected stream 0x{:02x} from {}: {}",
+                                            stream_type, peer_ip, reason
+                                        );
+                                        let _ = core_crypto::quic_app::QuicAppManager::send_frame(
+                                            &mut send,
+                                            &QuicFrame {
+                                                stream_type,
+                                                body: format!(r#"{{"status":"error","reason":"{reason}"}}"#).into_bytes(),
+                                            },
+                                        )
+                                        .await;
+                                        return;
                                     }
+                                    // Authorized: now read the (bounded) body and
+                                    // dispatch to the handler.
+                                    let body = match core_crypto::quic_app::QuicAppManager::recv_frame_body(&mut recv, _body_len).await {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            info!("[QUIC] Stream body read failed: {e}");
+                                            return;
+                                        }
+                                    };
+                                    let response = match stream_type {
+                                        STREAM_PAIRING => QuicFrame { stream_type: STREAM_PAIRING, body: pairing_cb(body, peer_ip, peer_cert_hash.clone()).await },
+                                        STREAM_CLIPBOARD => QuicFrame { stream_type: STREAM_CLIPBOARD, body: clipboard_cb(body).await },
+                                        STREAM_MEDIA => QuicFrame { stream_type: STREAM_MEDIA, body: media_cb(body).await },
+                                        STREAM_POLL => QuicFrame { stream_type: STREAM_POLL, body: poll_cb(body).await },
+                                        STREAM_UNPAIR => { unpair_cb(peer_cert_hash.clone(), peer_ip).await; QuicFrame { stream_type: STREAM_UNPAIR, body: vec![] } },
+                                        STREAM_REKEY_ACK => QuicFrame { stream_type: STREAM_REKEY_ACK, body: rekey_ack_cb(body).await },
+                                        STREAM_SMS => QuicFrame { stream_type: STREAM_SMS, body: sms_cb(body).await },
+                                        _ => QuicFrame { stream_type, body: vec![] },
+                                    };
+                                    let _ = core_crypto::quic_app::QuicAppManager::send_frame(&mut send, &response).await;
                                 });
                             }
                         }

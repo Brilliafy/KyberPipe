@@ -88,19 +88,65 @@ pub async fn perform_sas_confirmation(
                 let peer_mlkem = hex::decode(state.get_pairing_initiator_pk()).unwrap_or_default();
                 let peer_x25519 =
                     hex::decode(state.get_pairing_initiator_x25519_pk()).unwrap_or_default();
-                let _ = core_crypto::ratchet_init_session(
-                    peer_id,
-                    shared_secret,
-                    true,
-                    peer_x25519,
-                    peer_mlkem,
-                );
+                // Audit finding #1: the ratchet's initial DH identity must be OUR
+                // OWN pairing keypair (the public halves the phone encapsulated
+                // to). The private halves stay in Rust — never cross to the
+                // renderer. Using a fresh ratchet keypair here would guarantee a
+                // permanent desync at the first rekey boundary (seq 100).
+                let our_pair = state.get_keypair();
+                match our_pair {
+                    Some(pair) => {
+                        let _ = core_crypto::ratchet_init_session_with_keypair(
+                            peer_id,
+                            shared_secret,
+                            true,
+                            pair.x25519_pk.clone(),
+                            pair.x25519_sk.clone(),
+                            pair.mlkem_pk.clone(),
+                            pair.mlkem_sk.clone(),
+                            peer_x25519,
+                            peer_mlkem,
+                        );
+                    }
+                    None => {
+                        // No local keypair registered — fall back to the legacy
+                        // fresh-keypair path (degrades the DH guarantee but keeps
+                        // symmetric-only ratchet working pre-first-rekey).
+                        let _ = core_crypto::ratchet_init_session(
+                            peer_id,
+                            shared_secret,
+                            true,
+                            peer_x25519,
+                            peer_mlkem,
+                        );
+                    }
+                }
             }
         }
         
         let pending_sk = hex::decode(&pending_key).unwrap_or_default();
         if !pending_sk.is_empty() {
-            let handle = core_crypto::session_key_create(pending_sk).unwrap_or(0);
+            // Audit finding #13: `session_key_create` can fail (duplicate key
+            // bytes, registry cap). `unwrap_or(0)` previously turned the failure
+            // into a LIVE handle 0 — every later session_key_* call then failed
+            // with "Invalid session key handle 0" and the session was silently
+            // broken. Handle the error explicitly instead: abort the SAS
+            // confirmation (the user can re-pair) rather than commit to a
+            // session that cannot encrypt.
+            let handle = match core_crypto::session_key_create(pending_sk) {
+                Ok(h) if h != 0 => h,
+                Ok(_) => {
+                    return Err(
+                        "Session key handle creation returned the reserved handle 0 — re-pair required"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to create session key handle: {e} — re-pair required"
+                    ));
+                }
+            };
             crate::handlers::DESKTOP_SESSION_KEY_HANDLE.store(handle, std::sync::atomic::Ordering::Release);
         }
     }
@@ -237,6 +283,27 @@ pub fn get_pairing_config(
         state.set_pending_pairing_nonce(config.pairing_nonce_hex.clone());
     }
     Ok(config)
+}
+
+/// Return the pending QR pairing nonce (issued by `get_pairing_config`). The
+/// renderer MUST embed this nonce in every pairing QR payload so the phone can
+/// echo it back; without it the server-side nonce check rejects every pairing
+/// request (audit finding #5 — QR-nonce contract drift). Returns an empty
+/// string when no nonce is pending (keypair not generated / already consumed).
+#[tauri::command]
+pub fn get_pairing_nonce(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    Ok(state.get_pending_pairing_nonce())
+}
+
+/// SHA-256 (hex) of the desktop server's identity certificate. Embedded in the
+/// pairing QR so the phone pins the certificate bound to the QR — never the
+/// certificate observed on a possibly MITM'd bootstrap connection (audit
+/// finding #15).
+#[tauri::command]
+pub fn get_server_cert_hash() -> Result<String, String> {
+    Ok(core_crypto::quic_server_cert_hash().unwrap_or_default())
 }
 
 #[tauri::command]
