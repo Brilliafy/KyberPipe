@@ -79,8 +79,6 @@ pub fn generate_cover_traffic_packet() -> Vec<u8> {
     dummy
 }
 
-
-
 /// Thread-safe clipboard deduplicator ring buffer with AtomicBool state flag
 /// Uses RAII Drop guard to prevent permanent lock on panic
 #[derive(Clone)]
@@ -209,9 +207,11 @@ mod tests {
         let kem_res = encapsulate_hybrid(&bob_pair.x25519_pk, &bob_pair.mlkem_pk).unwrap();
 
         let mut alice_ratchet =
-            DoubleRatchetState::new(&kem_res.combined_shared_secret.clone(), true, None, None).unwrap();
+            DoubleRatchetState::new(&kem_res.combined_shared_secret.clone(), true, None, None)
+                .unwrap();
         let mut bob_ratchet =
-            DoubleRatchetState::new(&kem_res.combined_shared_secret.clone(), false, None, None).unwrap();
+            DoubleRatchetState::new(&kem_res.combined_shared_secret.clone(), false, None, None)
+                .unwrap();
 
         let msg = alice_ratchet
             .ratchet_encrypt(b"Post-Quantum Double Ratchet Test")
@@ -336,15 +336,26 @@ mod tests {
                 .unwrap();
             alice_msgs.push(msg);
         }
-        assert!(alice_msgs[100].rekey_x25519_pk.is_some(), "rekey should attach at seq 100");
-        assert!(alice.outgoing_root_key.is_some(), "outgoing proposal must be pending");
+        assert!(
+            alice_msgs[100].rekey_x25519_pk.is_some(),
+            "rekey should attach at seq 100"
+        );
+        assert!(
+            alice.outgoing_root_key.is_some(),
+            "outgoing proposal must be pending"
+        );
 
         // Bob decrypts every message, using the rekey path when a payload is present.
         for (i, msg) in alice_msgs.iter().enumerate() {
             let nonce: [u8; 12] = msg.nonce.clone().try_into().unwrap();
             let pt = if msg.rekey_ciphertext.is_some() {
-                let xpk: [u8; 32] =
-                    msg.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
+                let xpk: [u8; 32] = msg
+                    .rekey_x25519_pk
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .try_into()
+                    .unwrap();
                 bob.ratchet_decrypt_with_rekey(
                     &nonce,
                     &msg.ciphertext,
@@ -363,7 +374,10 @@ mod tests {
         // message that carried the rekey in the SENDER's space, not Bob's send count.
         let ack_seq = bob.take_pending_rekey_ack_seq();
         assert_eq!(ack_seq, Some(100), "ACK must carry the rekey carrier seq");
-        assert_eq!(bob.ratchet_generation, 0, "receiver must not bump gen before commit");
+        assert_eq!(
+            bob.ratchet_generation, 0,
+            "receiver must not bump gen before commit"
+        );
 
         // Bob sends the encrypted RekeyAck back; Alice decrypts it and processes it.
         let ack_msg = bob.generate_rekey_ack(ack_seq.unwrap()).unwrap();
@@ -375,17 +389,31 @@ mod tests {
             crate::packets::KyberMessage::RekeyAck { seq } => assert_eq!(seq, 100),
             other => panic!("expected RekeyAck, got {other:?}"),
         }
-        assert!(alice.process_rekey_ack(100), "carrier seq must match the confirm queue");
-        assert!(alice.outgoing_root_key.is_none(), "outgoing proposal must be committed");
-        assert_eq!(alice.ratchet_generation, 1, "sender bumps gen on ACK commit");
+        assert!(
+            alice.process_rekey_ack(100),
+            "carrier seq must match the confirm queue"
+        );
+        assert!(
+            alice.outgoing_root_key.is_none(),
+            "outgoing proposal must be committed"
+        );
+        assert_eq!(
+            alice.ratchet_generation, 1,
+            "sender bumps gen on ACK commit"
+        );
 
         // Alice sends the first new-generation message; Bob's fallback commits the
         // incoming proposal and both sides converge on generation 1.
         let new_msg = alice.ratchet_encrypt(b"alice-after-rekey").unwrap();
         let nonce: [u8; 12] = new_msg.nonce.clone().try_into().unwrap();
         let pt = if new_msg.rekey_ciphertext.is_some() {
-            let xpk: [u8; 32] =
-                new_msg.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
+            let xpk: [u8; 32] = new_msg
+                .rekey_x25519_pk
+                .as_ref()
+                .unwrap()
+                .clone()
+                .try_into()
+                .unwrap();
             bob.ratchet_decrypt_with_rekey(
                 &nonce,
                 &new_msg.ciphertext,
@@ -398,23 +426,35 @@ mod tests {
             bob.ratchet_decrypt(&nonce, &new_msg.ciphertext).unwrap()
         };
         assert_eq!(pt, b"alice-after-rekey");
-        assert_eq!(bob.ratchet_generation, 1, "receiver converges to generation 1");
-        assert!(bob.pending_root_key.is_none(), "incoming proposal must be committed");
+        assert_eq!(
+            bob.ratchet_generation, 1,
+            "receiver converges to generation 1"
+        );
+        assert!(
+            bob.pending_root_key.is_none(),
+            "incoming proposal must be committed"
+        );
 
         // Reverse direction must still work after the rekey.
         let bob_msg = bob.ratchet_encrypt(b"bob-response").unwrap();
         let nonce: [u8; 12] = bob_msg.nonce.clone().try_into().unwrap();
         let pt = if bob_msg.rekey_ciphertext.is_some() {
-            let xpk: [u8; 32] =
-                bob_msg.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
-            alice.ratchet_decrypt_with_rekey(
-                &nonce,
-                &bob_msg.ciphertext,
-                bob_msg.rekey_ciphertext.as_deref(),
-                Some(&xpk),
-                bob_msg.rekey_mlkem_pk.as_deref(),
-            )
-            .unwrap()
+            let xpk: [u8; 32] = bob_msg
+                .rekey_x25519_pk
+                .as_ref()
+                .unwrap()
+                .clone()
+                .try_into()
+                .unwrap();
+            alice
+                .ratchet_decrypt_with_rekey(
+                    &nonce,
+                    &bob_msg.ciphertext,
+                    bob_msg.rekey_ciphertext.as_deref(),
+                    Some(&xpk),
+                    bob_msg.rekey_mlkem_pk.as_deref(),
+                )
+                .unwrap()
         } else {
             alice.ratchet_decrypt(&nonce, &bob_msg.ciphertext).unwrap()
         };
@@ -452,7 +492,13 @@ mod tests {
         // proposal while her own is still unacked → initiator discards Bob's).
         let bob_rekey = &bob_msgs[100];
         let nonce: [u8; 12] = bob_rekey.nonce.clone().try_into().unwrap();
-        let xpk: [u8; 32] = bob_rekey.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
+        let xpk: [u8; 32] = bob_rekey
+            .rekey_x25519_pk
+            .as_ref()
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
         let pt = alice
             .ratchet_decrypt_with_rekey(
                 &nonce,
@@ -465,15 +511,30 @@ mod tests {
         assert_eq!(String::from_utf8(pt).unwrap(), "b100");
         // Alice keeps her own proposal; Bob's tentative proposal is discarded,
         // and NO RekeyAck for Bob's proposal is recorded.
-        assert!(alice.outgoing_root_key.is_some(), "initiator keeps its own proposal");
-        assert!(alice.pending_root_key.is_none(), "initiator discards responder proposal");
-        assert!(alice.take_pending_rekey_ack_seq().is_none(), "initiator must not ACK the loser");
+        assert!(
+            alice.outgoing_root_key.is_some(),
+            "initiator keeps its own proposal"
+        );
+        assert!(
+            alice.pending_root_key.is_none(),
+            "initiator discards responder proposal"
+        );
+        assert!(
+            alice.take_pending_rekey_ack_seq().is_none(),
+            "initiator must not ACK the loser"
+        );
 
         // Deliver Alice's rekey-carrying message to Bob (responder): Bob must
         // CANCEL its own outgoing proposal and adopt Alice's, then ACK it.
         let alice_rekey = &alice_msgs[100];
         let nonce: [u8; 12] = alice_rekey.nonce.clone().try_into().unwrap();
-        let xpk: [u8; 32] = alice_rekey.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
+        let xpk: [u8; 32] = alice_rekey
+            .rekey_x25519_pk
+            .as_ref()
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
         let pt = bob
             .ratchet_decrypt_with_rekey(
                 &nonce,
@@ -488,7 +549,10 @@ mod tests {
             bob.outgoing_root_key.is_none(),
             "responder must cancel its own proposal"
         );
-        assert!(bob.pending_root_key.is_some(), "responder adopts the initiator's proposal");
+        assert!(
+            bob.pending_root_key.is_some(),
+            "responder adopts the initiator's proposal"
+        );
         let ack_seq = bob.take_pending_rekey_ack_seq();
         assert_eq!(ack_seq, Some(100), "responder ACKs the initiator's carrier");
 
@@ -502,7 +566,10 @@ mod tests {
         let nonce: [u8; 12] = new_msg.nonce.clone().try_into().unwrap();
         let pt = bob.ratchet_decrypt(&nonce, &new_msg.ciphertext).unwrap();
         assert_eq!(pt, b"post-race");
-        assert_eq!(bob.ratchet_generation, 1, "receiver must land on generation 1");
+        assert_eq!(
+            bob.ratchet_generation, 1,
+            "receiver must land on generation 1"
+        );
         assert_eq!(alice.ratchet_generation, 1);
 
         // Bidirectional continuity after the race.
@@ -538,18 +605,26 @@ mod tests {
         for i in 0..=101u64 {
             alice_msgs.push(alice.ratchet_encrypt(format!("m{i}").as_bytes()).unwrap());
         }
-        assert!(alice_msgs[100].rekey_x25519_pk.is_some(), "rekey attaches at seq 100");
+        assert!(
+            alice_msgs[100].rekey_x25519_pk.is_some(),
+            "rekey attaches at seq 100"
+        );
         for msg in &alice_msgs[..100] {
             let nonce: [u8; 12] = msg.nonce.clone().try_into().unwrap();
             bob.ratchet_decrypt(&nonce, &msg.ciphertext).unwrap();
         }
-        assert!(alice.outgoing_root_key.is_some(), "proposal must stay pending (no TTL commit)");
-        assert_eq!(alice.ratchet_generation, 0, "no TTL auto-commit: gen must not bump");
+        assert!(
+            alice.outgoing_root_key.is_some(),
+            "proposal must stay pending (no TTL commit)"
+        );
+        assert_eq!(
+            alice.ratchet_generation, 0,
+            "no TTL auto-commit: gen must not bump"
+        );
 
         // Simulate the retry TTL expiring by aging the confirm-queue entry.
         if let Some(carrier) = alice.rekey_pending_confirm_queue.back_mut() {
-            carrier.attached_at =
-                std::time::Instant::now() - std::time::Duration::from_secs(31);
+            carrier.attached_at = std::time::Instant::now() - std::time::Duration::from_secs(31);
         }
         // Next message re-attaches the SAME proposal (re-send) with a fresh carrier.
         let resent = alice.ratchet_encrypt(b"resent-carrier").unwrap();
@@ -557,13 +632,22 @@ mod tests {
             resent.rekey_x25519_pk.is_some(),
             "re-send must re-attach the rekey payload"
         );
-        assert_eq!(alice.ratchet_generation, 0, "re-send must not commit either");
+        assert_eq!(
+            alice.ratchet_generation, 0,
+            "re-send must not commit either"
+        );
         assert!(alice.outgoing_root_key.is_some());
 
         // Bob decrypts the re-sent carrier via the rekey-aware path, adopts the
         // proposal and ACKs with the NEW carrier seq (101 = message index 101).
         let nonce: [u8; 12] = resent.nonce.clone().try_into().unwrap();
-        let xpk: [u8; 32] = resent.rekey_x25519_pk.as_ref().unwrap().clone().try_into().unwrap();
+        let xpk: [u8; 32] = resent
+            .rekey_x25519_pk
+            .as_ref()
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
         let pt = bob
             .ratchet_decrypt_with_rekey(
                 &nonce,
@@ -574,9 +658,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pt, b"resent-carrier");
-        let ack_seq = bob.take_pending_rekey_ack_seq().expect("Bob must ACK the re-sent carrier");
-        assert!(alice.process_rekey_ack(ack_seq), "re-sent carrier seq must match the queue");
-        assert_eq!(alice.ratchet_generation, 1, "ACK commit bumps generation exactly once");
+        let ack_seq = bob
+            .take_pending_rekey_ack_seq()
+            .expect("Bob must ACK the re-sent carrier");
+        assert!(
+            alice.process_rekey_ack(ack_seq),
+            "re-sent carrier seq must match the queue"
+        );
+        assert_eq!(
+            alice.ratchet_generation, 1,
+            "ACK commit bumps generation exactly once"
+        );
         assert!(alice.outgoing_root_key.is_none());
     }
 

@@ -4,8 +4,39 @@
 //! session key derivation, and AEAD encryption/decryption functions.
 
 use crate::error::KyberError;
-use crate::{crypto, ensure_panic_hook_installed, session_handle, EncryptedPayload, PqKeyPair, PqKeyPairRaw, PqKemResponse};
+use crate::{
+    crypto, ensure_panic_hook_installed, session_handle, EncryptedPayload, PqKemResponse,
+    PqKeyPair, PqKeyPairRaw,
+};
+use pqcrypto_kyber::kyber768;
 use zeroize::Zeroize;
+
+// ── ML-KEM-768 size constants (audit finding #12) ──
+// Derived from the pqcrypto_traits constants instead of hard-coded literals so
+// a kyber version bump (or an ML-KEM-1024 switch) cannot silently break the
+// UniFFI boundary with stale lengths. Exported through `kem_sizes` for
+// cross-platform introspection.
+
+/// Size of an ML-KEM-768 public key (1184 bytes).
+pub const MLKEM768_PUBLIC_KEY_BYTES: usize = kyber768::public_key_bytes();
+/// Size of an ML-KEM-768 secret key (2400 bytes).
+pub const MLKEM768_SECRET_KEY_BYTES: usize = kyber768::secret_key_bytes();
+/// Size of an ML-KEM-768 ciphertext (1088 bytes).
+pub const MLKEM768_CIPHERTEXT_BYTES: usize = kyber768::ciphertext_bytes();
+
+/// Introspect the ML-KEM-768 sizes the FFI contract is built on. Exported so
+/// Android and the desktop can assert their expectations at startup instead of
+/// failing at runtime with INVALID_KEY_LENGTH after a dependency upgrade
+/// (audit finding #12).
+#[uniffi::export]
+pub fn kem_sizes() -> Vec<u64> {
+    ensure_panic_hook_installed();
+    vec![
+        MLKEM768_PUBLIC_KEY_BYTES as u64,
+        MLKEM768_SECRET_KEY_BYTES as u64,
+        MLKEM768_CIPHERTEXT_BYTES as u64,
+    ]
+}
 
 // ── Hybrid Key Generation ──
 
@@ -68,9 +99,9 @@ pub fn encapsulate_pq_secret(
     }
     let mut x25519_arr = [0u8; 32];
     x25519_arr.copy_from_slice(&peer_x25519_pk);
-    if peer_mlkem_pk.len() != 1184 {
+    if peer_mlkem_pk.len() != MLKEM768_PUBLIC_KEY_BYTES {
         return Err(KyberError::InvalidKeyLength {
-            expected: 1184,
+            expected: MLKEM768_PUBLIC_KEY_BYTES as u64,
             got: peer_mlkem_pk.len() as u64,
         });
     }
@@ -98,9 +129,9 @@ pub fn decapsulate_pq_secret(
     x25519_sk_arr.copy_from_slice(&my_x25519_sk);
     let mut my_x25519_sk = my_x25519_sk;
     my_x25519_sk.zeroize();
-    if my_mlkem_sk.len() != 2400 {
+    if my_mlkem_sk.len() != MLKEM768_SECRET_KEY_BYTES {
         return Err(KyberError::InvalidKeyLength {
-            expected: 2400,
+            expected: MLKEM768_SECRET_KEY_BYTES as u64,
             got: my_mlkem_sk.len() as u64,
         });
     }

@@ -2,9 +2,9 @@ mod clipboard;
 mod media;
 mod pairing;
 mod poll;
+mod rekey_ack;
 mod sms;
 mod unpair;
-mod rekey_ack;
 
 pub(crate) use clipboard::handle_clipboard;
 pub(crate) use media::handle_media;
@@ -12,11 +12,12 @@ pub(crate) use pairing::{handle_pairing, DESKTOP_SESSION_KEY_HANDLE};
 pub(crate) use poll::handle_poll;
 #[cfg(test)]
 pub(crate) use poll::FORCE_EMPTY_CLIPBOARD;
+pub(crate) use rekey_ack::handle_rekey_ack;
 pub(crate) use sms::handle_sms;
 pub(crate) use unpair::handle_unpair;
-pub(crate) use rekey_ack::handle_rekey_ack;
 
-pub(crate) static IS_SESSION_KEY_AUTHENTICATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static IS_SESSION_KEY_AUTHENTICATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Process-global Tauri AppHandle, set in `run()` setup. Used to push pairing
 /// state transitions (sas-ready / complete / timeout) to the webview so the UI

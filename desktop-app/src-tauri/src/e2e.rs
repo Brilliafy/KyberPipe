@@ -32,6 +32,10 @@ fn pairing_poll_clipboard_roundtrip() {
 
     // ── Server side ─────────────────────────────────────────────────────────
     let state = Arc::new(AppState::default());
+    // Mandatory QR pairing nonce (audit finding #20): the server rejects every
+    // pairing request that does not echo the nonce it issued.
+    state.issue_fresh_pairing_nonce();
+    let pairing_nonce = state.get_pending_pairing_nonce();
     let server_pair = core_crypto::generate_pq_keypair().expect("server keypair");
     state.set_keypair(Some(server_pair.clone()));
 
@@ -39,9 +43,7 @@ fn pairing_poll_clipboard_roundtrip() {
     let endpoint = block_on_io_pub(core_crypto::quic_app::QuicAppManager::bind_server(0))
         .expect("server bind");
     let server_port = endpoint.local_addr().expect("local addr").port();
-    let server_addr: std::net::SocketAddr = format!("127.0.0.1:{server_port}")
-        .parse()
-        .unwrap();
+    let server_addr: std::net::SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
 
     // Run the REAL dispatch loop (same code the production sync server uses)
     // on a dedicated thread; a oneshot lets the test stop it cleanly.
@@ -100,6 +102,7 @@ fn pairing_poll_clipboard_roundtrip() {
         "client_pk_hex": hex_encode(&client_pair.mlkem_pk),
         "client_x25519_pk_hex": hex_encode(&client_pair.x25519_pk),
         "cert_hash_hex": client_identity.sha256_hex,
+        "pairing_nonce_hex": pairing_nonce,
     })
     .to_string()
     .into_bytes();
@@ -119,7 +122,10 @@ fn pairing_poll_clipboard_roundtrip() {
     )
     .expect("sas");
     let stored_sas = state.get_sas_code();
-    assert_eq!(sas, stored_sas, "client-computed SAS must equal the server's");
+    assert_eq!(
+        sas, stored_sas,
+        "client-computed SAS must equal the server's"
+    );
 
     // 5) Confirm the SAS (server-side promotion, driven without the Tauri
     // layer). This pins the client cert and REBINDS the server with mTLS on
@@ -247,27 +253,17 @@ fn pairing_poll_clipboard_roundtrip() {
         // Poll for the server's RekeyAck + Synchronize (in server send order:
         // rekey_ack first, then sync).
         let poll = send_recv(&conn, STREAM_POLL, b"");
-        let poll_json: serde_json::Value =
-            serde_json::from_slice(&poll).expect("poll response");
+        let poll_json: serde_json::Value = serde_json::from_slice(&poll).expect("poll response");
         if let Some(ack) = poll_json.get("rekey_ack_encrypted") {
             let tlv_b64 = ack["tlv_b64"].as_str().expect("ack tlv_b64");
-            let tlv = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                tlv_b64,
-            )
-            .expect("ack tlv decode");
-            let pt = core_crypto::ratchet_decrypt_message_binary(
-                client_peer.clone(),
-                tlv,
-            )
-            .unwrap_or_else(|e| panic!("client decrypt of rekey ack failed: {e}"));
-            let msg = core_crypto::packets::KyberMessage::from_json(
-                &String::from_utf8_lossy(&pt),
-            )
-            .expect("ack packet");
+            let tlv = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64)
+                .expect("ack tlv decode");
+            let pt = core_crypto::ratchet_decrypt_message_binary(client_peer.clone(), tlv)
+                .unwrap_or_else(|e| panic!("client decrypt of rekey ack failed: {e}"));
+            let msg = core_crypto::packets::KyberMessage::from_json(&String::from_utf8_lossy(&pt))
+                .expect("ack packet");
             if let core_crypto::packets::KyberMessage::RekeyAck { seq } = msg {
-                if core_crypto::ratchet_process_rekey_ack(client_peer.clone(), seq)
-                    .unwrap_or(false)
+                if core_crypto::ratchet_process_rekey_ack(client_peer.clone(), seq).unwrap_or(false)
                 {
                     crossed_rekeys += 1;
                 }
@@ -279,11 +275,8 @@ fn pairing_poll_clipboard_roundtrip() {
         // (chain already aligned) is ignored by the core.
         if let Some(sync) = poll_json.get("sync") {
             let tlv_b64 = sync["tlv_b64"].as_str().expect("sync tlv_b64");
-            let tlv = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                tlv_b64,
-            )
-            .expect("sync tlv decode");
+            let tlv = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64)
+                .expect("sync tlv decode");
             let _ = core_crypto::ratchet_process_synchronize(client_peer.clone(), tlv);
         }
     }
@@ -309,10 +302,16 @@ fn pairing_poll_clipboard_roundtrip() {
 
 /// Block on a join handle with a timeout (std has no timed join).
 trait JoinTimeout {
-    fn join_timeout(self, _d: std::time::Duration) -> Result<(), Box<dyn std::any::Any + Send + 'static>>;
+    fn join_timeout(
+        self,
+        _d: std::time::Duration,
+    ) -> Result<(), Box<dyn std::any::Any + Send + 'static>>;
 }
 impl JoinTimeout for std::thread::JoinHandle<()> {
-    fn join_timeout(self, d: std::time::Duration) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
+    fn join_timeout(
+        self,
+        d: std::time::Duration,
+    ) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
         for _ in 0..(d.as_millis() / 100).max(1) {
             if self.is_finished() {
                 return self.join();
@@ -335,4 +334,3 @@ fn send_recv(conn: &quinn::Connection, stream_type: u8, body: &[u8]) -> Vec<u8> 
     .expect("quic send/recv")
     .into_bytes()
 }
-

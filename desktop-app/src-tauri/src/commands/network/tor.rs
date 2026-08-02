@@ -50,7 +50,6 @@ pub fn create_tor_onion(state: State<'_, std::sync::Arc<AppState>>) -> TorOnionI
     let tor_cookie: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
     let _ = std::fs::write(&tor_cookie_path, &tor_cookie);
 
-
     let torrc_content = format!(
         r#"DataDirectory {}
 ControlPort unix:{}:auto
@@ -82,7 +81,13 @@ ClientOnly 1
         let mut buf = [0u8; 4096];
 
         // Authenticate using the cookie we generated
-        let auth_cmd = format!("AUTHENTICATE {}\r\n", tor_cookie.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        let auth_cmd = format!(
+            "AUTHENTICATE {}\r\n",
+            tor_cookie
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
         let _ = stream.write_all(auth_cmd.as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(200));
         let _ = stream.read(&mut buf);

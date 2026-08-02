@@ -15,6 +15,9 @@ pub(crate) const SYNC_MAX_GAP: u64 = 1000;
 /// jumps that irreversibly discard skip keys and burn CPU).
 pub(crate) const SYNC_MAX_CUMULATIVE: u64 = 20_000;
 
+/// Skip-key map type: (generation, seq) → zeroizing message key.
+pub(crate) type SkipKeyMap = std::collections::HashMap<(u32, u64), Zeroizing<[u8; 32]>>;
+
 /// Single-pass state advancement for pending chain fallback.
 /// After AEAD verification on the pending chain, advances recv_message_count
 /// and derives skip keys in one pass — eliminates the double-decrypt pattern.
@@ -30,7 +33,13 @@ fn advance_receiving_chain(
     target_seq: u64,
     generation: u32,
     max_skip: usize,
-) -> Result<([u8; 32], std::collections::HashMap<(u32, u64), [u8; 32]>), KyberError> {
+) -> Result<
+    (
+        [u8; 32],
+        std::collections::HashMap<(u32, u64), Zeroizing<[u8; 32]>>,
+    ),
+    KyberError,
+> {
     if target_seq > base_seq {
         let diff = (target_seq - base_seq) as usize;
         if diff > max_skip {
@@ -40,30 +49,37 @@ fn advance_receiving_chain(
             )));
         }
     }
-    let mut ck = *recv_chain_key;
-    let mut skip_keys = std::collections::HashMap::new();
+    // Audit finding #18: chain keys and message keys are secret material —
+    // derive and transport them in Zeroizing buffers so error paths and drops
+    // cannot leave them in freed heap/stack memory.
+    let mut ck: Zeroizing<[u8; 32]> = Zeroizing::new(*recv_chain_key);
+    let mut skip_keys: SkipKeyMap = std::collections::HashMap::new();
     for skip_seq in base_seq..target_seq {
-        let hk = Hkdf::<Sha256>::new(Some(&ck), b"step");
-        let mut skip_key = [0u8; 32];
-        hk.expand(b"kyberpipe-msg-key", &mut skip_key)
+        let hk = Hkdf::<Sha256>::new(Some(&*ck), b"step");
+        let mut skip_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        hk.expand(b"kyberpipe-msg-key", &mut *skip_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-        hk.expand(b"kyberpipe-next-chain", &mut ck)
+        hk.expand(b"kyberpipe-next-chain", &mut *ck)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
         skip_keys.insert((generation, skip_seq), skip_key);
     }
     // The chain for the message AFTER `target_seq` is derived by stepping the
     // chain key once more. The previous implementation derived a msg-key here,
     // which desynchronized the very next message after a pending-chain commit.
-    let hk = Hkdf::<Sha256>::new(Some(&ck), b"step");
-    let mut next_ck = [0u8; 32];
-    hk.expand(b"kyberpipe-next-chain", &mut next_ck)
+    let hk = Hkdf::<Sha256>::new(Some(&*ck), b"step");
+    let mut next_ck: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    hk.expand(b"kyberpipe-next-chain", &mut *next_ck)
         .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-    Ok((next_ck, skip_keys))
+    Ok((*next_ck, skip_keys))
 }
 
 /// Bound the in-memory skip-key cache. Generation-scoped keys let us evict the
 /// oldest generation first, then the lowest seq within the current one.
-fn prune_skip_keys(store: &mut HashMap<(u32, u64), Zeroizing<[u8; 32]>>, current_gen: u32, budget: usize) {
+fn prune_skip_keys(
+    store: &mut HashMap<(u32, u64), Zeroizing<[u8; 32]>>,
+    current_gen: u32,
+    budget: usize,
+) {
     // First evict any stale generation that is not the current or previous one.
     store.retain(|&(gen, _), _| {
         gen == current_gen
@@ -131,36 +147,47 @@ impl DoubleRatchetState {
                 seq, prev_anchor
             )));
         }
-        let (next_ck, skip_map) = advance_receiving_chain(
-            &prev_ck,
-            prev_anchor,
-            seq,
-            prev_gen,
-            self.max_skip,
-        )?;
+        // Audit finding #7: the watermark freezes the highest DELIVERED
+        // previous-generation sequence number at commit time. A message at or
+        // below it was already delivered (possibly via a skip key that the
+        // commit then cleared) — accepting it again would be a replay window.
+        if let Some(watermark) = self.previous_recv_highest_delivered {
+            if seq <= watermark {
+                return Err(KyberError::CryptoError(format!(
+                    "Previous-generation message seq {} already delivered (watermark {}) — replay",
+                    seq, watermark
+                )));
+            }
+        }
+        let (next_ck, skip_map) =
+            advance_receiving_chain(&prev_ck, prev_anchor, seq, prev_gen, self.max_skip)?;
         // Derive the message key for `seq` from the advanced chain position.
-        let mut ck = prev_ck;
+        let mut ck: Zeroizing<[u8; 32]> = Zeroizing::new(prev_ck);
         for _ in prev_anchor..seq {
-            let hk = Hkdf::<Sha256>::new(Some(&ck), b"step");
-            let mut next = [0u8; 32];
-            hk.expand(b"kyberpipe-next-chain", &mut next)
+            let hk = Hkdf::<Sha256>::new(Some(&*ck), b"step");
+            let mut next: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+            hk.expand(b"kyberpipe-next-chain", &mut *next)
                 .map_err(|e| KyberError::CryptoError(e.to_string()))?;
             ck = next;
         }
-        let hk = Hkdf::<Sha256>::new(Some(&ck), b"step");
-        let mut msg_key = [0u8; 32];
-        hk.expand(b"kyberpipe-msg-key", &mut msg_key)
+        let hk = Hkdf::<Sha256>::new(Some(&*ck), b"step");
+        let mut msg_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        hk.expand(b"kyberpipe-msg-key", &mut *msg_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
         let plaintext = decrypt_chacha20(&msg_key, nonce, ciphertext, aad)?;
         // AEAD verified — commit the advance on the retained previous chain.
         self.previous_recv_chain_key = Some(next_ck);
         self.previous_recv_anchor = Some(seq + 1);
+        self.previous_recv_highest_delivered = Some(
+            self.previous_recv_highest_delivered
+                .map_or(seq, |w| w.max(seq)),
+        );
         let store = self
             .skip_message_keys
             .as_mut()
             .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?;
         for (k, v) in skip_map {
-            store.insert(k, Zeroizing::new(v));
+            store.insert(k, v);
         }
         prune_skip_keys(store, self.ratchet_generation, self.max_skip * 2);
         self.seen_sequence_numbers.insert((prev_gen, seq));
@@ -181,7 +208,9 @@ impl DoubleRatchetState {
         if nonce_gen == self.previous_recv_gen.unwrap_or(u32::MAX)
             && self.previous_recv_chain_key.is_some()
         {
-            if let Some(pt) = self.try_decrypt_previous_generation(nonce_gen, seq, nonce, ciphertext, aad)? {
+            if let Some(pt) =
+                self.try_decrypt_previous_generation(nonce_gen, seq, nonce, ciphertext, aad)?
+            {
                 return Ok(pt);
             }
         }
@@ -209,14 +238,13 @@ impl DoubleRatchetState {
                 // per-generation counters on both sides — audit finding #2), so the
                 // derivation never walks the mutable recv_message_count.
                 if let Some(pending_recv_key) = self.pending_receiving_chain_key {
-                    if let Ok(pending_msg_key) = derive_tentative_msg_key(
-                        &pending_recv_key,
-                        0,
-                        seq,
-                        self.max_skip,
-                    ) {
+                    if let Ok(pending_msg_key) =
+                        derive_tentative_msg_key(&pending_recv_key, 0, seq, self.max_skip)
+                    {
                         // Verify AEAD with AAD — capture plaintext in single pass
-                        if let Ok(plaintext) = decrypt_chacha20(&pending_msg_key, nonce, ciphertext, aad) {
+                        if let Ok(plaintext) =
+                            decrypt_chacha20(&pending_msg_key, nonce, ciphertext, aad)
+                        {
                             self.commit_pending_rekey();
                             // After the commit the receiving chain is the pending chain
                             // at position 0 with recv_message_count reset to 0.
@@ -231,10 +259,11 @@ impl DoubleRatchetState {
                             self.recv_message_count = seq + 1;
                             let store = self.skip_message_keys.as_mut().unwrap();
                             for (k, v) in new_skip {
-                                store.insert(k, zeroize::Zeroizing::new(v));
+                                store.insert(k, v);
                             }
                             prune_skip_keys(store, self.ratchet_generation, self.max_skip * 2);
-                            self.seen_sequence_numbers.insert((self.ratchet_generation, seq));
+                            self.seen_sequence_numbers
+                                .insert((self.ratchet_generation, seq));
                             return Ok(plaintext);
                         }
                     }
@@ -273,43 +302,45 @@ impl DoubleRatchetState {
             }
         }
 
-        let mut tentative_ck = self.receiving_chain_key;
+        let mut tentative_ck: Zeroizing<[u8; 32]> = Zeroizing::new(self.receiving_chain_key);
         let tentative_count = self.recv_message_count;
-        let mut tentative_skip: HashMap<(u32, u64), [u8; 32]> = HashMap::new();
+        let mut tentative_skip: SkipKeyMap = HashMap::new();
 
         for skip_seq in tentative_count..seq {
-            let hk = Hkdf::<Sha256>::new(Some(&tentative_ck), b"step");
-            let mut skip_key = [0u8; 32];
-            hk.expand(b"kyberpipe-msg-key", &mut skip_key)
+            let hk = Hkdf::<Sha256>::new(Some(&*tentative_ck), b"step");
+            let mut skip_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+            hk.expand(b"kyberpipe-msg-key", &mut *skip_key)
                 .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-            hk.expand(b"kyberpipe-next-chain", &mut tentative_ck)
+            hk.expand(b"kyberpipe-next-chain", &mut *tentative_ck)
                 .map_err(|e| KyberError::CryptoError(e.to_string()))?;
             tentative_skip.insert((self.ratchet_generation, skip_seq), skip_key);
         }
 
-        let hk = Hkdf::<Sha256>::new(Some(&tentative_ck), b"step");
-        let mut target_msg_key = [0u8; 32];
-        hk.expand(b"kyberpipe-msg-key", &mut target_msg_key)
+        let hk = Hkdf::<Sha256>::new(Some(&*tentative_ck), b"step");
+        let mut target_msg_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        hk.expand(b"kyberpipe-msg-key", &mut *target_msg_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-        let mut next_ck = [0u8; 32];
-        hk.expand(b"kyberpipe-next-chain", &mut next_ck)
+        let mut next_ck: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        hk.expand(b"kyberpipe-next-chain", &mut *next_ck)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
 
         let plaintext = decrypt_chacha20(&target_msg_key, nonce, ciphertext, aad)?;
 
         // AEAD verified — COMMIT state
-        self.receiving_chain_key = next_ck;
+        self.receiving_chain_key = *next_ck;
         self.recv_message_count = seq + 1;
-        self.seen_sequence_numbers.insert((self.ratchet_generation, seq));
-        let lower_bound = self.recv_message_count.saturating_sub((self.max_skip * 2) as u64);
-        self.seen_sequence_numbers.retain(|&(gen, s)| {
-            gen == self.ratchet_generation && s >= lower_bound
-        });
+        self.seen_sequence_numbers
+            .insert((self.ratchet_generation, seq));
+        let lower_bound = self
+            .recv_message_count
+            .saturating_sub((self.max_skip * 2) as u64);
+        self.seen_sequence_numbers
+            .retain(|&(gen, s)| gen == self.ratchet_generation && s >= lower_bound);
         // NOTE: no cross-space rekey queue mutation here. The confirm queue holds
         // OUR OWN send-space carrier seqs; this receive-space seq is on a different
         // chain. Confirmations happen only via the explicit RekeyAck protocol.
         for (k, v) in tentative_skip {
-            skip_keys.insert(k, Zeroizing::new(v));
+            skip_keys.insert(k, v);
         }
         prune_skip_keys(skip_keys, self.ratchet_generation, self.max_skip * 2);
 
@@ -348,7 +379,9 @@ impl DoubleRatchetState {
         if nonce_gen == self.previous_recv_gen.unwrap_or(u32::MAX)
             && self.previous_recv_chain_key.is_some()
         {
-            if let Some(pt) = self.try_decrypt_previous_generation(nonce_gen, seq, nonce, ciphertext, &aad)? {
+            if let Some(pt) =
+                self.try_decrypt_previous_generation(nonce_gen, seq, nonce, ciphertext, &aad)?
+            {
                 return Ok(pt);
             }
         }
@@ -377,18 +410,17 @@ impl DoubleRatchetState {
             // fall back to the retained previous keypairs: the peer may have
             // encapsulated to our previous public keys before learning of our
             // commit (audit finding #3 — the history is no longer dead code).
-            let mut ss: Option<Vec<u8>> = None;
+            // Audit finding #18: the decapsulated shared secret is secret
+            // material — keep it in a Zeroizing buffer so error paths cannot
+            // leave it in freed heap memory.
+            let mut ss: Option<Zeroizing<Vec<u8>>> = None;
             let mut ss_source: Option<usize> = None;
             for (idx, pair) in std::iter::once(&self.our_hybrid_pair)
                 .chain(self.previous_keypairs.iter())
                 .enumerate()
             {
-                if let Ok(decapsulated) = decapsulate_hybrid(
-                    ct,
-                    &pair.x25519_sk,
-                    &pair.mlkem_sk,
-                ) {
-                    ss = Some(decapsulated);
+                if let Ok(decapsulated) = decapsulate_hybrid(ct, &pair.x25519_sk, &pair.mlkem_sk) {
+                    ss = Some(Zeroizing::new(decapsulated));
                     ss_source = Some(idx);
                     break;
                 }
@@ -468,14 +500,13 @@ impl DoubleRatchetState {
                     // reset per-generation counters on both sides (audit finding
                     // #2), so derive_tentative_msg_key never walks the mutable
                     // recv_message_count of the (possibly drifted) old generation.
-                    if let Ok(pending_msg_key) = derive_tentative_msg_key(
-                        &pending_recv_key,
-                        0,
-                        seq,
-                        self.max_skip,
-                    ) {
+                    if let Ok(pending_msg_key) =
+                        derive_tentative_msg_key(&pending_recv_key, 0, seq, self.max_skip)
+                    {
                         // Single-pass: verify AEAD AND capture plaintext in one call
-                        if let Ok(plaintext) = decrypt_chacha20(&pending_msg_key, nonce, ciphertext, &aad) {
+                        if let Ok(plaintext) =
+                            decrypt_chacha20(&pending_msg_key, nonce, ciphertext, &aad)
+                        {
                             // AEAD verified on pending chain — the peer has already
                             // committed its new generation. If we still hold an
                             // unacknowledged outgoing proposal, the initiator-
@@ -501,10 +532,11 @@ impl DoubleRatchetState {
                             self.recv_message_count = seq + 1;
                             let store = self.skip_message_keys.as_mut().unwrap();
                             for (k, v) in new_skip {
-                                store.insert(k, zeroize::Zeroizing::new(v));
+                                store.insert(k, v);
                             }
                             prune_skip_keys(store, self.ratchet_generation, self.max_skip * 2);
-                            self.seen_sequence_numbers.insert((self.ratchet_generation, seq));
+                            self.seen_sequence_numbers
+                                .insert((self.ratchet_generation, seq));
                             return Ok(plaintext);
                         }
                     }
@@ -524,7 +556,9 @@ impl DoubleRatchetState {
         ]);
 
         if self.ratchet_generation == u32::MAX {
-            return Err(KyberError::CryptoError("Ratchet generation at u32::MAX — nonce reuse risk. Re-pair required.".into()));
+            return Err(KyberError::CryptoError(
+                "Ratchet generation at u32::MAX — nonce reuse risk. Re-pair required.".into(),
+            ));
         }
         // Accept the current generation, the next generation (a rekey payload or
         // first new-generation message), and the PREVIOUS generation while a
@@ -539,12 +573,17 @@ impl DoubleRatchetState {
         if !ok {
             return Err(KyberError::CryptoError(format!(
                 "Nonce generation mismatch: expected {} or {}, got {}",
-                self.ratchet_generation, self.ratchet_generation.saturating_add(1), nonce_gen
+                self.ratchet_generation,
+                self.ratchet_generation.saturating_add(1),
+                nonce_gen
             )));
         }
 
         if self.seen_sequence_numbers.contains(&(nonce_gen, seq)) {
-            return Err(KyberError::CryptoError(format!("Duplicate sequence number {} detected (replay attack)", seq)));
+            return Err(KyberError::CryptoError(format!(
+                "Duplicate sequence number {} detected (replay attack)",
+                seq
+            )));
         }
 
         Ok((nonce_gen, seq))
@@ -595,21 +634,22 @@ impl DoubleRatchetState {
                 self.resync_forward_total
             )));
         }
-        let mut ck = self.receiving_chain_key;
-        let mut skip_keys = HashMap::new();
+        // Audit finding #18: derived skip/chain keys live in Zeroizing buffers.
+        let mut ck: Zeroizing<[u8; 32]> = Zeroizing::new(self.receiving_chain_key);
+        let mut skip_keys: HashMap<(u32, u64), Zeroizing<[u8; 32]>> = HashMap::new();
         for skip_seq in cur..target_seq {
-            let hk = Hkdf::<Sha256>::new(Some(&ck), b"step");
-            let mut skip_key = [0u8; 32];
-            hk.expand(b"kyberpipe-msg-key", &mut skip_key)
+            let hk = Hkdf::<Sha256>::new(Some(&*ck), b"step");
+            let mut skip_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+            hk.expand(b"kyberpipe-msg-key", &mut *skip_key)
                 .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-            hk.expand(b"kyberpipe-next-chain", &mut ck)
+            hk.expand(b"kyberpipe-next-chain", &mut *ck)
                 .map_err(|e| KyberError::CryptoError(e.to_string()))?;
             skip_keys.insert((self.ratchet_generation, skip_seq), skip_key);
         }
         // After skipping `cur..target_seq`, the chain is positioned at
         // `target_seq` — the first non-missed message decrypts from here, so the
         // receiving chain key stays at `ck` and recv_message_count = target_seq.
-        self.receiving_chain_key = ck;
+        self.receiving_chain_key = *ck;
         self.recv_message_count = target_seq;
         self.resync_forward_total = self.resync_forward_total.saturating_add(gap);
         let store = self
@@ -617,7 +657,7 @@ impl DoubleRatchetState {
             .as_mut()
             .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?;
         for (k, v) in skip_keys {
-            store.insert(k, zeroize::Zeroizing::new(v));
+            store.insert(k, v);
         }
         prune_skip_keys(store, self.ratchet_generation, self.max_skip * 2);
         Ok(gap)

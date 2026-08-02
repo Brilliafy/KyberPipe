@@ -71,9 +71,7 @@ fn select_encryption_method(
             peer_id: peer_id.to_string(),
         }
     } else if session_key_auth && sk_handle != 0 {
-        EncryptionMethod::SessionKey {
-            handle: sk_handle,
-        }
+        EncryptionMethod::SessionKey { handle: sk_handle }
     } else {
         EncryptionMethod::None
     }
@@ -88,10 +86,8 @@ fn encrypt_clipboard_data(method: &EncryptionMethod, latest_clip: &[u8]) -> serd
             // base64-wrapped BINARY TLV (the UniFFI Record's `to_binary` framing)
             // instead of five independent hex fields — one serialization
             // contract shared by both platforms, no per-field drift surface.
-            match core_crypto::ratchet_encrypt_message_binary(
-                peer_id.clone(),
-                latest_clip.to_vec(),
-            ) {
+            match core_crypto::ratchet_encrypt_message_binary(peer_id.clone(), latest_clip.to_vec())
+            {
                 Ok(bin) => serde_json::json!({
                     "encrypted_ratchet": {
                         "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
@@ -132,7 +128,16 @@ fn sync_connection_state(s: &AppState) {
 /// Split of `handle_poll`: read the pairing/session state that drives the
 /// response. Pure in-memory reads — no filesystem, keyring, or clipboard I/O
 /// (audit finding #18).
-fn read_local_state(s: &AppState) -> (String, bool, u64, bool, serde_json::Value, serde_json::Value) {
+fn read_local_state(
+    s: &AppState,
+) -> (
+    String,
+    bool,
+    u64,
+    bool,
+    serde_json::Value,
+    serde_json::Value,
+) {
     let peer_id = s.get_pairing_initiator_pk();
     let session_key_auth = IS_SESSION_KEY_AUTHENTICATED.load(Ordering::Acquire);
     let sk_handle = DESKTOP_SESSION_KEY_HANDLE.load(Ordering::Acquire);
@@ -146,7 +151,14 @@ fn read_local_state(s: &AppState) -> (String, bool, u64, bool, serde_json::Value
         "connection_color": connection.color,
         "pending_media_action": pending_act,
     });
-    (peer_id, session_key_auth, sk_handle, is_paired, base, connection.status.clone().into())
+    (
+        peer_id,
+        session_key_auth,
+        sk_handle,
+        is_paired,
+        base,
+        connection.status.clone().into(),
+    )
 }
 
 /// Parse the peer's poll REQUEST body for an ENCRYPTED `Synchronize` packet.
@@ -163,6 +175,20 @@ fn peer_sync_packet(body: &[u8]) -> Option<Vec<u8>> {
     let v = serde_json::from_slice::<serde_json::Value>(body).ok()?;
     let sync = v.get("sync")?;
     let tlv_b64 = sync.get("tlv_b64")?.as_str()?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()
+}
+
+/// Parse the peer's poll REQUEST body for an ENCRYPTED `RekeyAck` TLV — the
+/// phone's outbound RekeyAck channel (audit finding #1). The phone attaches
+/// its ack of OUR outgoing proposal to the poll request; we decrypt it
+/// rekey-aware and commit the proposal.
+fn peer_rekey_ack_packet(body: &[u8]) -> Option<Vec<u8>> {
+    if body.is_empty() {
+        return None;
+    }
+    let v = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let ack = v.get("rekey_ack_encrypted")?;
+    let tlv_b64 = ack.get("tlv_b64")?.as_str()?;
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()
 }
 
@@ -213,14 +239,19 @@ async fn build_poll_response(
     // If this side received a rekey from the peer, build the encrypted RekeyAck
     // (carrying the rekey carrier's seq in the SENDER's space) and attach it to
     // the poll response so the peer can commit its outgoing proposal.
+    //
+    // AUDIT FINDING #6: the ack is generated NON-CONSUMING (peek). The pending
+    // carrier is cleared only after the dispatch loop successfully writes the
+    // response — if the response is lost on the wire, the ack is re-derived on
+    // the next poll instead of being silently dropped.
     if !peer_id.is_empty() {
-        if let Ok(Some(ack)) = core_crypto::ratchet_generate_rekey_ack(peer_id.to_string()) {
-            if let Ok(bin) = ack.to_binary() {
-                if let Some(obj) = resp.as_object_mut() {
-                    obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
-                        "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
-                    }));
-                }
+        if let Ok(Some(bin)) =
+            core_crypto::ratchet_generate_rekey_ack_binary_peek(peer_id.to_string())
+        {
+            if let Some(obj) = resp.as_object_mut() {
+                obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
+                    "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
+                }));
             }
         }
         // Producer for the Synchronize recovery path (audit finding #4): our
@@ -228,8 +259,7 @@ async fn build_poll_response(
         // peer can authenticate the resync target. The packet is encoded as a
         // full BINARY TLV (audit finding #12): a ratchet message may carry a
         // rekey payload at seq 100/200, and dropping those fields would make the
-        // ciphertext undecryptable (AEAD binds the rekey params). The plaintext
-        // counter is retained only as a diagnostic field and is never acted on.
+        // ciphertext undecryptable (AEAD binds the rekey params).
         if let Ok(sync_msg) = core_crypto::ratchet_synchronize_packet(peer_id.to_string()) {
             if let Ok(bin) = sync_msg.to_binary() {
                 if let Some(obj) = resp.as_object_mut() {
@@ -239,11 +269,10 @@ async fn build_poll_response(
                 }
             }
         }
-        if let Ok(send_count) = core_crypto::ratchet_send_count(peer_id.to_string()) {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.insert("ratchet_send_count".to_string(), serde_json::json!(send_count));
-            }
-        }
+        // AUDIT FINDING #4/#19: the plaintext `ratchet_send_count` field is
+        // REMOVED. The only resync trigger is the authenticated Synchronize
+        // packet above; a plaintext counter would be an unauthenticated
+        // forward-advance oracle (the legacy Android loop acted on it).
     }
 
     resp
@@ -251,8 +280,7 @@ async fn build_poll_response(
 
 pub(crate) async fn handle_poll(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
     sync_connection_state(&s);
-    let (peer_id, session_key_auth, sk_handle, _is_paired, base, _conn) =
-        read_local_state(&s);
+    let (peer_id, session_key_auth, sk_handle, _is_paired, base, _conn) = read_local_state(&s);
 
     // Consumer for the Synchronize recovery path (audit finding #4): the peer
     // sends its send counter as a RATCHET-ENCRYPTED Synchronize packet. Only an
@@ -272,6 +300,22 @@ pub(crate) async fn handle_poll(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
                 }
                 Err(e) => {
                     tracing::info!("[Sync] Synchronize from {peer_id} not applied: {e}");
+                }
+            }
+        }
+        // Consumer for the phone's outbound RekeyAck (audit finding #1): the
+        // phone attaches its encrypted ack of OUR outgoing proposal to the poll
+        // request. Processing it commits our outgoing rekey; without this
+        // channel the desktop's rekey_pending_confirm_queue would stay occupied
+        // forever (permanent deadlock).
+        if let Some(data) = peer_rekey_ack_packet(&body) {
+            match core_crypto::ratchet_process_rekey_ack_binary(peer_id.clone(), data) {
+                Ok(true) => tracing::info!(
+                    "[RekeyAck] Phone acked our outgoing rekey — committed (peer {peer_id})"
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::info!("[RekeyAck] Phone RekeyAck not applied: {e}");
                 }
             }
         }

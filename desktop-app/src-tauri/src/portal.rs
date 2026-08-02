@@ -33,8 +33,8 @@ pub async fn send_notification(title: &str, body: &str) -> Result<(), String> {
         info!("Flatpak sandbox detected: Dispatching notification via XDG Desktop Portal (ashpd)");
         match ashpd::desktop::notification::NotificationProxy::new().await {
             Ok(proxy) => {
-                let notification =
-                    ashpd::desktop::notification::Notification::new(&title).body(Some(body.as_str()));
+                let notification = ashpd::desktop::notification::Notification::new(&title)
+                    .body(Some(body.as_str()));
                 proxy
                     .add_notification("kyberpipe-notif", notification)
                     .await
@@ -68,12 +68,13 @@ pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
         info!("Native Linux detected: Syncing clipboard via arboard/fallbacks");
         // Bounded native write — arboard blocks forever on headless sessions.
         let owned = text.to_string();
-        let native_ok = crate::commands::with_timeout(std::time::Duration::from_secs(3), move || {
-            arboard::Clipboard::new()
-                .and_then(|mut b| b.set_text(owned))
-                .is_ok()
-        })
-        .unwrap_or(false);
+        let native_ok =
+            crate::commands::with_timeout(std::time::Duration::from_secs(3), move || {
+                arboard::Clipboard::new()
+                    .and_then(|mut b| b.set_text(owned))
+                    .is_ok()
+            })
+            .unwrap_or(false);
         if native_ok {
             let _ = crate::commands::write_clipboard_fallback(text);
             return Ok(());

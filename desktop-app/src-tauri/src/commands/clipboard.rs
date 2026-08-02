@@ -193,7 +193,10 @@ pub fn read_clipboard_fallback() -> Result<String, String> {
 /// session (e.g. trying to connect to a Wayland compositor that is not there),
 /// which would otherwise hang the QUIC poll/clipboard handlers indefinitely.
 /// On timeout the child is killed and treated as a failure.
-fn wait_with_timeout(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<std::process::ExitStatus> {
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {

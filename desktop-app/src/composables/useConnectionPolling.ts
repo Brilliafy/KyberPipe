@@ -42,11 +42,18 @@ export function useConnectionPolling() {
   const triggerConnectionAttempt = async () => {
     if (isConnected.value) return;
 
-    await invoke("set_connection_status_full", {
-      status: "WAITING FOR COMPANION",
-      method: "None",
-      color: "yellow"
-    });
+    // Audit finding #13: guard the invoke so a rejection (command unavailable
+    // in dev, backend busy) cannot become an unhandled promise rejection.
+    try {
+      await invoke("set_connection_status_full", {
+        status: "WAITING FOR COMPANION",
+        method: "None",
+        color: "yellow",
+      });
+    } catch (e) {
+      console.error("Connection attempt failed:", e);
+      return;
+    }
     await checkConnectionState();
   };
 
@@ -55,7 +62,10 @@ export function useConnectionPolling() {
    */
   const handleManualRetry = () => {
     attemptCount.value = 0;
-    triggerConnectionAttempt();
+    // Fire-and-forget with error containment (audit finding #13).
+    triggerConnectionAttempt().catch((e) =>
+      console.error("Manual retry failed:", e)
+    );
   };
 
   /**

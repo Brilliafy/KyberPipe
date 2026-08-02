@@ -2,7 +2,8 @@ use super::super::{
     encapsulate_hybrid, encrypt_chacha20, generate_hybrid_keypair, generate_nonce_from_seq,
     KyberError,
 };
-use super::state::{build_rekey_aad, DoubleRatchetState, RatchetEncryptedMessage, RekeyCarrier};
+use super::state::{build_rekey_aad, DoubleRatchetState, RekeyCarrier};
+use super::tlv::RatchetEncryptedMessage;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -64,14 +65,13 @@ impl DoubleRatchetState {
             // Re-send the pending proposal — same payload, updated carrier seq,
             // fresh timestamp. The peer re-derives the same pending proposal
             // (or updates its pending_rekey_ack_seq to this carrier).
-            self.rekey_pending_confirm_queue
-                .push_back(RekeyCarrier {
-                    carrier_seq: seq,
-                    attached_at: now,
-                    rekey_x25519_pk: carrier.rekey_x25519_pk.clone(),
-                    rekey_mlkem_pk: carrier.rekey_mlkem_pk.clone(),
-                    rekey_ciphertext: carrier.rekey_ciphertext.clone(),
-                });
+            self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
+                carrier_seq: seq,
+                attached_at: now,
+                rekey_x25519_pk: carrier.rekey_x25519_pk.clone(),
+                rekey_mlkem_pk: carrier.rekey_mlkem_pk.clone(),
+                rekey_ciphertext: carrier.rekey_ciphertext.clone(),
+            });
             (
                 Some(carrier.rekey_x25519_pk),
                 Some(carrier.rekey_mlkem_pk),
@@ -91,22 +91,22 @@ impl DoubleRatchetState {
                     Some(&self.root_key),
                     &kem_res.combined_shared_secret.clone(),
                 );
-                let mut new_root = [0u8; 32];
-                let mut new_send = [0u8; 32];
-                let mut new_recv = [0u8; 32];
-                hk2.expand(b"kyberpipe-next-root-key", &mut new_root)
+                let mut new_root: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
+                let mut new_send: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
+                let mut new_recv: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
+                hk2.expand(b"kyberpipe-next-root-key", &mut *new_root)
                     .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-                hk2.expand(b"kyberpipe-next-send-chain-from-rekey", &mut new_send)
+                hk2.expand(b"kyberpipe-next-send-chain-from-rekey", &mut *new_send)
                     .map_err(|e| KyberError::CryptoError(e.to_string()))?;
-                hk2.expand(b"kyberpipe-next-recv-chain-from-rekey", &mut new_recv)
+                hk2.expand(b"kyberpipe-next-recv-chain-from-rekey", &mut *new_recv)
                     .map_err(|e| KyberError::CryptoError(e.to_string()))?;
 
                 // Do NOT switch chains or swap our_hybrid_pair here — that only
                 // happens on commit_outgoing_rekey() after the peer's ACK, avoiding
                 // a lockout window where the sender can't decapsulate peer rekeys.
-                self.outgoing_root_key = Some(new_root);
-                self.outgoing_sending_chain_key = Some(new_send);
-                self.outgoing_receiving_chain_key = Some(new_recv);
+                self.outgoing_root_key = Some(*new_root);
+                self.outgoing_sending_chain_key = Some(*new_send);
+                self.outgoing_receiving_chain_key = Some(*new_recv);
                 self.outgoing_hybrid_pair = Some(our_new);
                 self.outgoing_rekey_payload = Some((
                     new_x25519_pk.to_vec(),
@@ -144,8 +144,8 @@ impl DoubleRatchetState {
         // equal the receiver's next chain key, so both sides derive it with the SAME
         // label. Direction separation happens only at the root/chain split above.
         let hk = Hkdf::<Sha256>::new(Some(&self.sending_chain_key), b"step");
-        let mut msg_key = [0u8; 32];
-        hk.expand(b"kyberpipe-msg-key", &mut msg_key)
+        let mut msg_key: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
+        hk.expand(b"kyberpipe-msg-key", &mut *msg_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
         hk.expand(b"kyberpipe-next-chain", &mut self.sending_chain_key)
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;

@@ -1,9 +1,9 @@
 mod commands;
 mod executor;
+mod handlers;
 mod portal;
 mod ratchet_store;
 mod state;
-mod handlers;
 mod sync_server;
 
 #[cfg(test)]
@@ -158,6 +158,11 @@ pub fn run() {
     setup_panic_hook();
     let state = std::sync::Arc::new(AppState::default());
 
+    // Issue the mandatory QR pairing nonce at app start (audit finding #20):
+    // every pairing request must echo a nonce this desktop issued, so a LAN
+    // peer that never scanned a QR cannot occupy the pairing slot.
+    state.issue_fresh_pairing_nonce();
+
     // Restore persisted ratchet sessions (encrypted with an INDEPENDENT
     // snapshot key — audit finding #15b, not derived from the session key) so
     // a restart does not force a full re-pair.
@@ -169,7 +174,7 @@ pub fn run() {
             ));
         }
     }
-    
+
     // SD8: PCKS#11 YubiKey warning check
     {
         let mut settings = state.settings.lock();
@@ -192,61 +197,67 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // ── Tier 0: read-only queries (no token required) ──
             get_system_info,
+            get_connection_status,
+            get_connection_status_full,
+            get_app_logs,
+            get_latest_crash_log,
+            get_pairing_status,
+            get_pairing_nonce,
+            get_server_cert_hash,
+            get_settings,
+            get_media_state,
+            get_telemetry_metrics,
+            check_flatpak_permissions,
+            check_firewall,
+            generate_wormhole_code,
+            dump_flight_recorder_events,
+            get_pairing_config,
+            read_real_clipboard,
+            // ── Tier 1: state mutation (user gesture in the UI) ──
             generate_keypair,
-            execute_boa_script,
-            execute_fallback_script,
+            save_settings,
             sync_clipboard,
-            send_desktop_notification,
             push_sensor_reading,
             push_sms_packet,
             push_notification_packet,
             send_outbound_sms,
             trigger_notification_action,
+            trigger_desktop_media_action,
+            send_desktop_notification,
             send_hardware_command,
-            get_telemetry_metrics,
-            generate_sas_pairing_code,
-            store_key_in_secure_enclave,
-            request_privilege_token,
-            check_stepup_authorization,
-            merge_mesh_crdt_state,
-            toggle_neural_anomaly_engine,
+            set_connection_status_full,
             toggle_flight_recorder,
-            dump_flight_recorder_events,
             init_sentry_desktop_telemetry,
-            bind_pkcs11_yubikey_hardware_token,
-            generate_shamir_recovery_shares,
-            reconstruct_key_from_shamir_shares,
-            trigger_panic_self_destruct,
-            get_connection_status,
-            get_app_logs,
-            get_latest_crash_log,
+            merge_mesh_crdt_state,
             perform_stun_hole_punch,
             evaluate_connection_status,
-            get_pairing_config,
-            get_pairing_nonce,
-            get_server_cert_hash,
-            confirm_pairing_sas,
-            get_pairing_status,
-            get_settings,
-            save_settings,
-            delete_connection,
-            get_connection_status_full,
-            set_connection_status_full,
-            grant_file_access,
-            read_real_clipboard,
+            generate_sas_pairing_code,
             write_real_clipboard,
-            list_mock_files,
-            open_local_file,
-            check_flatpak_permissions,
-            trigger_desktop_media_action,
-            get_media_state,
-            check_firewall,
-            request_firewall_open,
             create_p2p_group,
             register_mdns_service,
+            execute_fallback_script,
+            execute_boa_script,
+            // ── Tier 2: privileged/destructive (SINGLE-USE user-gesture token ──
+            // via `request_privilege_token` + `consume_privilege_token`) ──
+            request_privilege_token,
+            check_stepup_authorization,
+            delete_connection,
+            trigger_panic_self_destruct,
+            store_key_in_secure_enclave,
+            bind_pkcs11_yubikey_hardware_token,
+            grant_file_access,
+            open_local_file,
+            request_firewall_open,
             create_tor_onion,
-            generate_wormhole_code,
+            // Tier-2-but-not-yet-token-gated (legacy surface, kept for
+            // compatibility; see audit finding #20 for the ongoing migration):
+            list_mock_files,
+            generate_shamir_recovery_shares,
+            reconstruct_key_from_shamir_shares,
+            confirm_pairing_sas,
+            toggle_neural_anomaly_engine,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

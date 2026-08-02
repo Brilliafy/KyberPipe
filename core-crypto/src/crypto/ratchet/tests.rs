@@ -43,9 +43,10 @@ fn a2b(alice: &mut DoubleRatchetState, bob: &mut DoubleRatchetState, i: u64) {
     let msg = alice
         .ratchet_encrypt(format!("alice-{i}").as_bytes())
         .expect("alice encrypt");
-    let rekey_x = msg.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("rekey x25519 pk must be 32 bytes")
-    });
+    let rekey_x = msg
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("rekey x25519 pk must be 32 bytes"));
     let plaintext = bob
         .ratchet_decrypt_with_rekey(
             &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce 12 bytes"),
@@ -63,9 +64,10 @@ fn b2a(alice: &mut DoubleRatchetState, bob: &mut DoubleRatchetState, i: u64) {
     let msg = bob
         .ratchet_encrypt(format!("bob-{i}").as_bytes())
         .expect("bob encrypt");
-    let rekey_x = msg.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("rekey x25519 pk must be 32 bytes")
-    });
+    let rekey_x = msg
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("rekey x25519 pk must be 32 bytes"));
     let plaintext = alice
         .ratchet_decrypt_with_rekey(
             &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce 12 bytes"),
@@ -139,9 +141,10 @@ fn rekey_survives_out_of_order_delivery_at_boundary() {
         "carrier at seq 100 must carry a rekey payload"
     );
     // Bob processes the carrier: pending proposal derived, ack queued.
-    let rekey_x_carrier = carrier.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("32 bytes")
-    });
+    let rekey_x_carrier = carrier
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
     bob.ratchet_decrypt_with_rekey(
         &<[u8; 12]>::try_from(carrier.nonce.as_slice()).unwrap(),
         &carrier.ciphertext,
@@ -173,17 +176,18 @@ fn rekey_survives_out_of_order_delivery_at_boundary() {
     // flight (seq 101, 102 — sent before alice committed, delivered late).
     let post0 = alice.ratchet_encrypt(b"post0".as_ref()).expect("post0"); // gen 1, seq 0
     let post1 = alice.ratchet_encrypt(b"post1".as_ref()).expect("post1"); // gen 1, seq 1
-    // Old-generation in-flight messages (encrypted by bob's perspective is
-    // alice's gen 0 — but alice is now gen 1; the "old" messages are the ones
-    // bob would send, which is a different chain. To exercise audit #2 we must
-    // deliver the NEW-gen messages out of order, so deliver post1 first.)
+                                                                          // Old-generation in-flight messages (encrypted by bob's perspective is
+                                                                          // alice's gen 0 — but alice is now gen 1; the "old" messages are the ones
+                                                                          // bob would send, which is a different chain. To exercise audit #2 we must
+                                                                          // deliver the NEW-gen messages out of order, so deliver post1 first.)
 
     // BOB receives the FIRST new-generation message as seq 1 (seq 0 lost/delayed):
     // the pending-chain fallback must anchor at position 0, not at bob's
     // recv_message_count (101).
-    let rekey_x1 = post1.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("32 bytes")
-    });
+    let rekey_x1 = post1
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
     let pt = bob
         .ratchet_decrypt_with_rekey(
             &<[u8; 12]>::try_from(post1.nonce.as_slice()).unwrap(),
@@ -198,9 +202,10 @@ fn rekey_survives_out_of_order_delivery_at_boundary() {
     assert_eq!(bob.ratchet_generation, 1);
     // The delayed seq 0 arrives — recovered from the skip key cached during the
     // pending-chain advance.
-    let rekey_x0 = post0.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("32 bytes")
-    });
+    let rekey_x0 = post0
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
     let pt = bob
         .ratchet_decrypt_with_rekey(
             &<[u8; 12]>::try_from(post0.nonce.as_slice()).unwrap(),
@@ -236,9 +241,10 @@ fn previous_generation_messages_decrypt_after_commit() {
     );
 
     // Bob processes the carrier and ACKs it; alice commits her outgoing rekey.
-    let rekey_x_carrier = carrier.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("32 bytes")
-    });
+    let rekey_x_carrier = carrier
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
     bob.ratchet_decrypt_with_rekey(
         &<[u8; 12]>::try_from(carrier.nonce.as_slice()).unwrap(),
         &carrier.ciphertext,
@@ -265,12 +271,15 @@ fn previous_generation_messages_decrypt_after_commit() {
     assert!(alice.previous_recv_chain_key.is_some());
 
     // Bob still has in-flight OLD-generation messages (he has not yet committed).
-    let msg = bob.ratchet_encrypt(b"late-old-gen".as_ref()).expect("old gen msg");
+    let msg = bob
+        .ratchet_encrypt(b"late-old-gen".as_ref())
+        .expect("old gen msg");
     // This message is (gen 0, seq 0) — bob's sending chain was never reset, so
     // it is bob's first message and still on the old generation.
-    let rekey_x = msg.rekey_x25519_pk.as_deref().map(|v| {
-        <[u8; 32]>::try_from(v).expect("32 bytes")
-    });
+    let rekey_x = msg
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
     let pt = alice
         .ratchet_decrypt_with_rekey(
             &<[u8; 12]>::try_from(msg.nonce.as_slice()).unwrap(),
@@ -319,7 +328,7 @@ fn ratchet_message_binary_tlv_roundtrip() {
     // Audit finding #12: the binary TLV framing must round-trip every field,
     // including the optional rekey payload, so both platforms can exchange the
     // typed record without hex-in-JSON drift.
-    let with_rekey = super::state::RatchetEncryptedMessage {
+    let with_rekey = super::tlv::RatchetEncryptedMessage {
         nonce: vec![1u8; 12],
         ciphertext: vec![2u8; 64],
         rekey_x25519_pk: Some(vec![3u8; 32]),
@@ -327,21 +336,22 @@ fn ratchet_message_binary_tlv_roundtrip() {
         rekey_ciphertext: Some(vec![5u8; 1088]),
     };
     let bytes = with_rekey.to_binary().unwrap();
-    let decoded = super::state::RatchetEncryptedMessage::from_binary(&bytes).unwrap();
+    let decoded = super::tlv::RatchetEncryptedMessage::from_binary(&bytes).unwrap();
     assert_eq!(decoded.nonce, with_rekey.nonce);
     assert_eq!(decoded.ciphertext, with_rekey.ciphertext);
     assert_eq!(decoded.rekey_x25519_pk, with_rekey.rekey_x25519_pk);
     assert_eq!(decoded.rekey_mlkem_pk, with_rekey.rekey_mlkem_pk);
     assert_eq!(decoded.rekey_ciphertext, with_rekey.rekey_ciphertext);
 
-    let no_rekey = super::state::RatchetEncryptedMessage {
+    let no_rekey = super::tlv::RatchetEncryptedMessage {
         nonce: vec![9u8; 12],
         ciphertext: vec![8u8; 32],
         rekey_x25519_pk: None,
         rekey_mlkem_pk: None,
         rekey_ciphertext: None,
     };
-    let decoded = super::state::RatchetEncryptedMessage::from_binary(&no_rekey.to_binary().unwrap()).unwrap();
+    let decoded =
+        super::tlv::RatchetEncryptedMessage::from_binary(&no_rekey.to_binary().unwrap()).unwrap();
     assert_eq!(decoded.nonce, no_rekey.nonce);
     assert_eq!(decoded.ciphertext, no_rekey.ciphertext);
     assert!(decoded.rekey_x25519_pk.is_none());
@@ -371,7 +381,8 @@ fn snapshot_roundtrip_preserves_previous_chain_and_budget() {
     snap_holder.previous_recv_gen = Some(0);
     snap_holder.resync_forward_total = 1234;
     let bytes = serde_json::to_vec(&snap_holder.to_snapshot()).unwrap();
-    let restored = DoubleRatchetState::from_snapshot(&serde_json::from_slice(&bytes).unwrap()).unwrap();
+    let restored =
+        DoubleRatchetState::from_snapshot(&serde_json::from_slice(&bytes).unwrap()).unwrap();
     assert_eq!(restored.previous_recv_chain_key, Some([9u8; 32]));
     assert_eq!(restored.previous_recv_anchor, Some(42));
     assert_eq!(restored.previous_recv_gen, Some(0));

@@ -41,11 +41,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // connection/pairing is established, fail honestly instead of
             // printing "Sent" for a payload that never left the machine.
             println!("🔒 Encapsulating payload with PQ-Double Ratchet...");
-            match core_crypto::quic_send_and_recv(0x02, serde_json::json!({ "plaintext": payload }).to_string()) {
+            match core_crypto::quic_send_and_recv(
+                0x02,
+                serde_json::json!({ "plaintext": payload }).to_string(),
+            ) {
                 Ok(resp) => println!("Sent via QUIC: {resp}"),
                 Err(e) => {
                     eprintln!("SEND FAILED: {e}");
-                    eprintln!("Hint: pair the desktop app first and ensure the QUIC bridge is connected.");
+                    eprintln!(
+                        "Hint: pair the desktop app first and ensure the QUIC bridge is connected."
+                    );
                     std::process::exit(1);
                 }
             }
@@ -62,7 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "🔒 Non-TTY input detected ({} bytes). Streaming over QUIC...",
                     buffer.len()
                 );
-                match core_crypto::quic_send_and_recv(0x02, serde_json::json!({ "plaintext": text.trim() }).to_string()) {
+                match core_crypto::quic_send_and_recv(
+                    0x02,
+                    serde_json::json!({ "plaintext": text.trim() }).to_string(),
+                ) {
                     Ok(resp) => println!("Streamed via QUIC: {resp}"),
                     Err(e) => {
                         eprintln!("STREAM FAILED: {e}");

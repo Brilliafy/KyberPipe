@@ -165,7 +165,6 @@ fn store_server_endpoint(ep: Endpoint) -> Option<Endpoint> {
     old
 }
 
-
 /// Store the pinned client cert hash after successful SAS pairing and rebind
 /// the server so mTLS enforcement takes effect IMMEDIATELY — not on the next
 /// startup. Rejects empty/malformed hashes (audit findings #8/#8b: an empty
@@ -283,8 +282,6 @@ impl QuicAppManager {
         Ok(())
     }
 
-
-
     pub async fn connect(
         server_addr: std::net::SocketAddr,
         pinned_cert_hash: Option<String>,
@@ -362,9 +359,7 @@ impl QuicAppManager {
     /// authorizes the stream from the header BEFORE reading the body, so an
     /// unauthenticated peer cannot force the server to buffer up to 1 MiB per
     /// stream before being rejected (audit finding #8).
-    pub async fn recv_frame_header(
-        recv: &mut RecvStream,
-    ) -> Result<(u8, usize), KyberError> {
+    pub async fn recv_frame_header(recv: &mut RecvStream) -> Result<(u8, usize), KyberError> {
         let mut header = [0u8; 5];
         recv.read_exact(&mut header)
             .await
@@ -409,4 +404,3 @@ impl QuicAppManager {
         Ok(body)
     }
 }
-

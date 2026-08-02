@@ -123,7 +123,7 @@ pub async fn perform_sas_confirmation(
                 }
             }
         }
-        
+
         let pending_sk = hex::decode(&pending_key).unwrap_or_default();
         if !pending_sk.is_empty() {
             // Audit finding #13: `session_key_create` can fail (duplicate key
@@ -147,7 +147,8 @@ pub async fn perform_sas_confirmation(
                     ));
                 }
             };
-            crate::handlers::DESKTOP_SESSION_KEY_HANDLE.store(handle, std::sync::atomic::Ordering::Release);
+            crate::handlers::DESKTOP_SESSION_KEY_HANDLE
+                .store(handle, std::sync::atomic::Ordering::Release);
         }
     }
     // Store pinned client cert hash and rebind server with mTLS BEFORE marking as paired
@@ -162,12 +163,15 @@ pub async fn perform_sas_confirmation(
                 tracing::info!("[Pairing] Server rebound with mTLS enforcement completed prior to pairing state promotion");
             }
             Err(e) => {
-                tracing::warn!("[Pairing] Server rebind failed: {e} — mTLS will take effect on next restart");
+                tracing::warn!(
+                    "[Pairing] Server rebind failed: {e} — mTLS will take effect on next restart"
+                );
             }
         }
     }
-    state.set_pending_shared_secret(SecureString::new(String::new()));
-    state.clear_sas_code();
+    // Transition: SasPending → Confirmed (audit finding #24 — the single
+    // confirmation transition clears the pending handshake fields).
+    state.confirm_pairing();
     {
         let mut settings = state.settings.lock();
         settings.is_paired = true;
@@ -178,16 +182,16 @@ pub async fn perform_sas_confirmation(
     state.set_connection_status("ACTIVE".to_string());
     state.set_connection_method("QUIC mTLS".to_string());
     state.set_connection_color("green".to_string());
-    state.add_log("[Pairing] SAS verified. Server rebound with mTLS. Session key promoted. Fully paired.".to_string());
+    state.add_log(
+        "[Pairing] SAS verified. Server rebound with mTLS. Session key promoted. Fully paired."
+            .to_string(),
+    );
 
     state.reset_sas_attempt_count();
 
     // Push the completion event so the webview can reconcile without polling
     // get_settings (audit finding #7 / #13).
-    crate::handlers::emit_app_event(
-        "pairing::complete",
-        serde_json::json!({"is_paired": true}),
-    );
+    crate::handlers::emit_app_event("pairing::complete", serde_json::json!({"is_paired": true}));
 
     Ok("Paired successfully".to_string())
 }
@@ -257,10 +261,7 @@ pub fn store_key_in_secure_enclave(
     token: String,
 ) -> Result<(), String> {
     // Key-material write — requires a fresh user-gesture token (audit #13).
-    if !crate::commands::security::consume_privilege_token(
-        "store_key_in_secure_enclave",
-        &token,
-    ) {
+    if !crate::commands::security::consume_privilege_token("store_key_in_secure_enclave", &token) {
         return Err("Privileged action requires a fresh confirmation token".into());
     }
     // Validate that the payload is hex so we never store garbage.
@@ -275,13 +276,16 @@ pub fn get_pairing_config(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::PairingConfig, String> {
     state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
-    let config = core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
+    let mut config = core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
         .map_err(|e| e.to_string())?;
-    // Store the issued QR nonce so handle_pairing can reject pairing payloads
-    // from peers that did not scan OUR QR (audit finding #20).
-    if !config.pairing_nonce_hex.is_empty() {
-        state.set_pending_pairing_nonce(config.pairing_nonce_hex.clone());
-    }
+    // Audit finding #20: the QR nonce gate is MANDATORY and the nonce is issued
+    // by the backend (at app start AND refreshed here on every QR build) — the
+    // phone must echo THIS nonce in its pairing payload. Overriding the
+    // config's internally-generated nonce with the app-issued one keeps the QR
+    // and the server-side gate in lockstep (a stale internally-generated nonce
+    // would otherwise desync the check).
+    let nonce = state.issue_fresh_pairing_nonce();
+    config.pairing_nonce_hex = nonce;
     Ok(config)
 }
 
@@ -291,9 +295,7 @@ pub fn get_pairing_config(
 /// request (audit finding #5 — QR-nonce contract drift). Returns an empty
 /// string when no nonce is pending (keypair not generated / already consumed).
 #[tauri::command]
-pub fn get_pairing_nonce(
-    state: State<'_, std::sync::Arc<AppState>>,
-) -> Result<String, String> {
+pub fn get_pairing_nonce(state: State<'_, std::sync::Arc<AppState>>) -> Result<String, String> {
     Ok(state.get_pending_pairing_nonce())
 }
 
@@ -343,7 +345,10 @@ mod keyring_tests {
         let secret_hex = "deadbeefcafebabec0ffee42";
         write_keyring_secret("test_roundtrip_key", secret_hex).unwrap();
         let read_back = read_keyring_secret("test_roundtrip_key").expect("secret must persist");
-        assert_eq!(read_back, secret_hex, "stored secret must round-trip verbatim");
+        assert_eq!(
+            read_back, secret_hex,
+            "stored secret must round-trip verbatim"
+        );
         // Cleanup
         let _ = keyring::Entry::new(KEYRING_SERVICE, "test_roundtrip_key")
             .and_then(|e| e.delete_password());
@@ -365,7 +370,10 @@ mod keyring_tests {
         write_keyring_secret("test_plain_key", secret_hex).unwrap();
         let entry = keyring::Entry::new(KEYRING_SERVICE, "test_plain_key").unwrap();
         let stored = entry.get_password().unwrap();
-        assert_eq!(stored, secret_hex, "keyring stores the plain secret hex directly");
+        assert_eq!(
+            stored, secret_hex,
+            "keyring stores the plain secret hex directly"
+        );
         let _ = entry.delete_password();
     }
 }

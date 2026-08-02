@@ -84,7 +84,10 @@ mod tests {
         let mut crdt = LwwRegisterCRDT::new("local".to_string(), "node_a".to_string(), 100);
         let future = now_ms() + MAX_CLOCK_DRIFT_MS + 10_000;
         let attacker = LwwRegisterCRDT::new("pwned".to_string(), "node_b".to_string(), future);
-        assert!(!crdt.merge(attacker), "far-future timestamp must be rejected");
+        assert!(
+            !crdt.merge(attacker),
+            "far-future timestamp must be rejected"
+        );
         assert_eq!(crdt.value, "local");
     }
 

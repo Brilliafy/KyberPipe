@@ -12,9 +12,15 @@
 //!   pairing (certificate hash preferred, IP as fallback). This closes the
 //!   unauthenticated poll/unpair hole.
 
-use crate::handlers::{handle_clipboard, handle_media, handle_pairing, handle_poll, handle_sms, handle_unpair, handle_rekey_ack};
+use crate::handlers::{
+    handle_clipboard, handle_media, handle_pairing, handle_poll, handle_rekey_ack, handle_sms,
+    handle_unpair,
+};
 use crate::state::AppState;
-use core_crypto::quic_app::{BoxFuture, QuicFrame, STREAM_PAIRING, STREAM_CLIPBOARD, STREAM_MEDIA, STREAM_POLL, STREAM_UNPAIR, STREAM_REKEY_ACK, STREAM_SMS};
+use core_crypto::quic_app::{
+    BoxFuture, QuicFrame, STREAM_CLIPBOARD, STREAM_MEDIA, STREAM_PAIRING, STREAM_POLL,
+    STREAM_REKEY_ACK, STREAM_SMS, STREAM_UNPAIR,
+};
 use sha2::Digest;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -130,29 +136,33 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                 }
             };
 
-            // Beacon broadcast loop — rate limited to 30s to reduce the
-            // continuous presence/IP disclosure on the LAN (was 3s).
+            // Beacon broadcast loop — OPT-IN (audit finding #20): the 30s
+            // cleartext UDP beacon previously disclosed device name + LAN IP +
+            // truncated key hash to every LAN host unconditionally. Now it only
+            // runs when the user explicitly enables discovery, and the payload
+            // never carries the device name (identity disclosure removed); it
+            // is multicast-scoped by the p2p_group layer.
             let beacon_state = state.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let enabled = { beacon_state.settings.lock().beacon_discovery_enabled };
+                    if !enabled {
+                        continue;
+                    }
                     let host_pk = {
                         beacon_state
                             .get_keypair()
                             .map(|p| p.mlkem_pk.clone())
                             .unwrap_or_default()
                     };
-                    let device_name = {
-                        let s = beacon_state.settings.lock();
-                        s.device_name
-                            .clone()
-                            .unwrap_or_else(|| "Desktop".to_string())
-                    };
                     let local_ip = core_crypto::system_net::get_system_local_ip();
                     if !host_pk.is_empty() && !local_ip.is_empty() {
                         let hash = sha2::Sha256::digest(&host_pk);
                         let pk_hash = hex::encode(&hash[..16]);
-                        let payload = format!("{}:{}:{}", pk_hash, local_ip, device_name);
+                        // Identity-minimal payload: truncated pk hash + LAN IP
+                        // only — no device name on an unauthenticated channel.
+                        let payload = format!("{pk_hash}:{local_ip}");
                         let _ = core_crypto::p2p_group::send_beacon_payload(payload).await;
                     }
                 }
@@ -177,11 +187,12 @@ pub async fn run_server_dispatch(
 ) {
     let mut stop_rx = stop;
     let pairing_state = state.clone();
-    let on_pairing = move |body: Vec<u8>, peer_ip: IpAddr, peer_cert_hash: String| -> BoxFuture<Vec<u8>> {
+    let on_pairing = move |body: Vec<u8>,
+                           peer_ip: IpAddr,
+                           peer_cert_hash: String|
+          -> BoxFuture<Vec<u8>> {
         let state = pairing_state.clone();
-        Box::pin(async move {
-            handle_pairing(body, Some(peer_ip), peer_cert_hash, state).await
-        })
+        Box::pin(async move { handle_pairing(body, Some(peer_ip), peer_cert_hash, state).await })
     };
 
     let s = state.clone();
@@ -211,9 +222,7 @@ pub async fn run_server_dispatch(
     let s = state.clone();
     let on_unpair = move |peer_cert_hash: String, peer_ip: IpAddr| -> BoxFuture<()> {
         let s = s.clone();
-        Box::pin(async move {
-            handle_unpair(s, peer_cert_hash, peer_ip.to_string()).await
-        })
+        Box::pin(async move { handle_unpair(s, peer_cert_hash, peer_ip.to_string()).await })
     };
 
     let s = state.clone();
@@ -234,8 +243,10 @@ pub async fn run_server_dispatch(
     // A pre-pairing desktop is a public pairing server on 0.0.0.0:9876. Without
     // caps, an attacker on the LAN could open N connections × M streams and
     // force the server to buffer up to 1 MiB per stream before authorization.
-    let connection_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
-    let global_stream_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_GLOBAL_STREAMS));
+    let connection_semaphore =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let global_stream_semaphore =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_GLOBAL_STREAMS));
 
     loop {
         let incoming = match stop_rx.as_mut() {
@@ -336,7 +347,10 @@ pub async fn run_server_dispatch(
                                             &mut send,
                                             &QuicFrame {
                                                 stream_type,
-                                                body: format!(r#"{{"status":"error","reason":"{reason}"}}"#).into_bytes(),
+                                                body: format!(
+                                                    r#"{{"status":"error","reason":"{reason}"}}"#
+                                                )
+                                                .into_bytes(),
                                             },
                                         )
                                         .await;
@@ -352,16 +366,60 @@ pub async fn run_server_dispatch(
                                         }
                                     };
                                     let response = match stream_type {
-                                        STREAM_PAIRING => QuicFrame { stream_type: STREAM_PAIRING, body: pairing_cb(body, peer_ip, peer_cert_hash.clone()).await },
-                                        STREAM_CLIPBOARD => QuicFrame { stream_type: STREAM_CLIPBOARD, body: clipboard_cb(body).await },
-                                        STREAM_MEDIA => QuicFrame { stream_type: STREAM_MEDIA, body: media_cb(body).await },
-                                        STREAM_POLL => QuicFrame { stream_type: STREAM_POLL, body: poll_cb(body).await },
-                                        STREAM_UNPAIR => { unpair_cb(peer_cert_hash.clone(), peer_ip).await; QuicFrame { stream_type: STREAM_UNPAIR, body: vec![] } },
-                                        STREAM_REKEY_ACK => QuicFrame { stream_type: STREAM_REKEY_ACK, body: rekey_ack_cb(body).await },
-                                        STREAM_SMS => QuicFrame { stream_type: STREAM_SMS, body: sms_cb(body).await },
-                                        _ => QuicFrame { stream_type, body: vec![] },
+                                        STREAM_PAIRING => QuicFrame {
+                                            stream_type: STREAM_PAIRING,
+                                            body: pairing_cb(body, peer_ip, peer_cert_hash.clone())
+                                                .await,
+                                        },
+                                        STREAM_CLIPBOARD => QuicFrame {
+                                            stream_type: STREAM_CLIPBOARD,
+                                            body: clipboard_cb(body).await,
+                                        },
+                                        STREAM_MEDIA => QuicFrame {
+                                            stream_type: STREAM_MEDIA,
+                                            body: media_cb(body).await,
+                                        },
+                                        STREAM_POLL => QuicFrame {
+                                            stream_type: STREAM_POLL,
+                                            body: poll_cb(body).await,
+                                        },
+                                        STREAM_UNPAIR => {
+                                            unpair_cb(peer_cert_hash.clone(), peer_ip).await;
+                                            QuicFrame {
+                                                stream_type: STREAM_UNPAIR,
+                                                body: vec![],
+                                            }
+                                        }
+                                        STREAM_REKEY_ACK => QuicFrame {
+                                            stream_type: STREAM_REKEY_ACK,
+                                            body: rekey_ack_cb(body).await,
+                                        },
+                                        STREAM_SMS => QuicFrame {
+                                            stream_type: STREAM_SMS,
+                                            body: sms_cb(body).await,
+                                        },
+                                        _ => QuicFrame {
+                                            stream_type,
+                                            body: vec![],
+                                        },
                                     };
-                                    let _ = core_crypto::quic_app::QuicAppManager::send_frame(&mut send, &response).await;
+                                    // Audit finding #6: the poll response carries a
+                                    // PEEKED RekeyAck (generated non-destructively).
+                                    // Only after the response is successfully written
+                                    // do we clear the pending carrier — a lost
+                                    // response retains the ack so the next poll
+                                    // re-derives it instead of dropping it silently.
+                                    let poll_stream = stream_type == STREAM_POLL;
+                                    let sent = core_crypto::quic_app::QuicAppManager::send_frame(
+                                        &mut send, &response,
+                                    )
+                                    .await;
+                                    if poll_stream && sent.is_ok() {
+                                        let peer = state.get_pairing_initiator_pk();
+                                        if !peer.is_empty() {
+                                            let _ = core_crypto::ratchet_consume_rekey_ack(peer);
+                                        }
+                                    }
                                 });
                             }
                         }

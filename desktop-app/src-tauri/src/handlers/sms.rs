@@ -33,9 +33,7 @@ pub(crate) async fn handle_sms(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
             )
             .ok()
         })
-        .and_then(|d| {
-            serde_json::from_slice::<core_crypto::packets::SmsPacket>(&d).ok()
-        });
+        .and_then(|d| serde_json::from_slice::<core_crypto::packets::SmsPacket>(&d).ok());
 
     match decrypted {
         Some(pkt) => {

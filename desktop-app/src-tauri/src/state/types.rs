@@ -65,6 +65,13 @@ pub struct AppSettings {
     pub wireguard_active: bool,
     #[serde(default)]
     pub yubikey_bound: bool,
+    /// Opt-in LAN beacon discovery (audit finding #20: the 30s cleartext UDP
+    /// beacon disclosed device name + LAN IP + a truncated key hash to every
+    /// host on the LAN). Default OFF — the phone can always pair via the QR
+    /// (which carries the IP); beacons are only emitted when the user
+    /// explicitly enables discovery, and never carry the device name.
+    #[serde(default)]
+    pub beacon_discovery_enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -117,8 +124,31 @@ pub struct CryptoState {
     pub session_key: SecureString,
 }
 
+/// Explicit pairing-flow phase machine (audit finding #24). Every pairing
+/// state change flows through ONE transition method on `PairingService`, so the
+/// wire handler, the SAS-confirmation command and the timeout task can never
+/// diverge on what the current phase is or which fields are valid in it — the
+/// class of bug that previously split pairing policy across four files with two
+/// different "clear" semantics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PairingPhase {
+    #[default]
+    Idle,
+    /// KEM handshake accepted; SAS computed, not yet displayed.
+    PendingKem,
+    /// SAS displayed — awaiting the user's OOB confirmation.
+    SasPending,
+    /// SAS verified; session key + ratchet promoted.
+    Confirmed,
+    /// SAS window expired without confirmation.
+    TimedOut,
+    /// Explicit rejection (nonce mismatch, rate limit, bad KEM).
+    Failed,
+}
+
 #[derive(Default)]
 pub struct PairingState {
+    pub phase: PairingPhase,
     pub sas_code: String,
     pub pending_session_key: SecureString,
     pub pending_shared_secret: SecureString,

@@ -23,6 +23,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var settingsManager: SettingsManager
     private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val deepLinkData = mutableStateOf<String?>(null)
+    // Audit finding #22: a warning set when the deep link lacks the expected
+    // pairing token / cert pin — the UI must surface it before consuming the
+    // payload.
+    private val deepLinkWarning = mutableStateOf<String?>(null)
 
     // Image Picker Launcher
     private val pickImageLauncher = registerForActivityResult(
@@ -48,6 +52,7 @@ class MainActivity : ComponentActivity() {
         val result = DeepLinkHandler.parse(intent)
         if (result.valid && result.data != null) {
             deepLinkData.value = result.data
+            deepLinkWarning.value = result.warning
         }
 
         setContent {
@@ -58,7 +63,11 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     settings = settingsManager,
                     initialPairingConfig = deepLinkData.value,
-                    onClearInitialPairingConfig = { deepLinkData.value = null },
+                    initialPairingConfigWarning = deepLinkWarning.value,
+                    onClearInitialPairingConfig = {
+                        deepLinkData.value = null
+                        deepLinkWarning.value = null
+                    },
                     onAvatarPickerClick = { pickImageLauncher.launch("image/*") },
                     onStartService = { startPipeForegroundService() },
                     onStopService = { stopPipeForegroundService() },
@@ -76,6 +85,7 @@ class MainActivity : ComponentActivity() {
         val result = DeepLinkHandler.parse(intent)
         if (result.valid && result.data != null) {
             deepLinkData.value = result.data
+            deepLinkWarning.value = result.warning
         }
     }
 

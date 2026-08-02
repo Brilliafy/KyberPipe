@@ -58,68 +58,82 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
     stride: jint,
     rotation: jint,
 ) -> jstring {
-    let w = width as usize;
-    let h = height as usize;
-    let stride = if stride <= 0 { w } else { stride as usize };
+    // Audit finding #13/#17: a panic must NEVER unwind across the JNI boundary
+    // (undefined behavior). The release profile is `panic = "unwind"`, so
+    // `catch_unwind` is the containment mechanism — a panic inside the decoder
+    // is converted to a null return instead of aborting the process. The
+    // caller (QrCodeScannerView) treats null as "no code detected".
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let w = width as usize;
+        let h = height as usize;
+        let stride = if stride <= 0 { w } else { stride as usize };
 
-    debug(&format!(
-        "decodeQrCode: {}x{} stride={} rot={}",
-        w, h, stride, rotation
-    ));
+        debug(&format!(
+            "decodeQrCode: {}x{} stride={} rot={}",
+            w, h, stride, rotation
+        ));
 
-    let bytes = match env.convert_byte_array(&y_bytes) {
-        Ok(b) => b,
-        Err(_) => {
-            debug("convert_byte_array FAILED");
-            return std::ptr::null_mut();
-        }
-    };
-
-    debug(&format!("y_bytes len={}", bytes.len()));
-
-    // strip stride padding
-    let luma: Vec<u8> = if stride == w {
-        bytes
-    } else {
-        let mut clean = Vec::with_capacity(w * h);
-        for row in 0..h {
-            let start = row * stride;
-            if start + w <= bytes.len() {
-                clean.extend_from_slice(&bytes[start..start + w]);
-            }
-        }
-        clean
-    };
-
-    let result = match rotation {
-        90 => try_decode(&rotate_90(&luma, w, h), h, w)
-            .or_else(|| try_decode(&luma, w, h))
-            .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
-            .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-        180 => try_decode(&rotate_180(&luma, w, h), w, h)
-            .or_else(|| try_decode(&luma, w, h))
-            .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-            .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-        270 => try_decode(&rotate_270(&luma, w, h), h, w)
-            .or_else(|| try_decode(&luma, w, h))
-            .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-            .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h)),
-        _ => try_decode(&luma, w, h)
-            .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-            .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
-            .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-    };
-
-    match result {
-        Some(text) => match env.new_string(&text) {
-            Ok(s) => s.into_raw(),
+        let bytes = match env.convert_byte_array(&y_bytes) {
+            Ok(b) => b,
             Err(_) => {
-                debug("new_string FAILED");
-                std::ptr::null_mut()
+                debug("convert_byte_array FAILED");
+                return None;
             }
-        },
-        None => {
-            debug("all attempts failed");
+        };
+
+        debug(&format!("y_bytes len={}", bytes.len()));
+
+        // strip stride padding
+        let luma: Vec<u8> = if stride == w {
+            bytes
+        } else {
+            let mut clean = Vec::with_capacity(w * h);
+            for row in 0..h {
+                let start = row * stride;
+                if start + w <= bytes.len() {
+                    clean.extend_from_slice(&bytes[start..start + w]);
+                }
+            }
+            clean
+        };
+
+        let result = match rotation {
+            90 => try_decode(&rotate_90(&luma, w, h), h, w)
+                .or_else(|| try_decode(&luma, w, h))
+                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
+                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
+            180 => try_decode(&rotate_180(&luma, w, h), w, h)
+                .or_else(|| try_decode(&luma, w, h))
+                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
+                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
+            270 => try_decode(&rotate_270(&luma, w, h), h, w)
+                .or_else(|| try_decode(&luma, w, h))
+                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
+                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h)),
+            _ => try_decode(&luma, w, h)
+                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
+                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
+                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
+        };
+
+        match result {
+            Some(text) => match env.new_string(&text) {
+                Ok(s) => Some(s.into_raw()),
+                Err(_) => {
+                    debug("new_string FAILED");
+                    None
+                }
+            },
+            None => {
+                debug("all attempts failed");
+                None
+            }
+        }
+    }));
+    match outcome {
+        Ok(Some(raw)) => raw,
+        _ => {
+            debug("QR decode contained by panic catch_unwind — returning null");
             std::ptr::null_mut()
         }
     }

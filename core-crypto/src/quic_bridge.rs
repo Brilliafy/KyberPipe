@@ -2,7 +2,7 @@ use crate::error::KyberError;
 use quinn::Connection;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 struct ConnConfig {
     addr: SocketAddr,
@@ -54,16 +54,37 @@ struct ReconnectGuard {
 /// of reconnect storms when a network handoff fails.
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Single mutex + condvar for reconnect coordination.
-static RECONNECT_GUARD: LazyLock<(Mutex<ReconnectGuard>, Condvar)> = LazyLock::new(|| {
-    (
-        Mutex::new(ReconnectGuard {
-            state: ReconnectState::Idle,
-            last_attempt: std::time::Instant::now() - std::time::Duration::from_secs(60),
-        }),
-        Condvar::new(),
-    )
-});
+type ReconnectStateHandle = Arc<(Mutex<ReconnectGuard>, Condvar)>;
+
+/// Per-PEER reconnect coordination (audit finding #10). Each peer gets its own
+/// (Mutex, Condvar) pair, so a Wi-Fi→cellular handoff that reconnects ONE peer
+/// can never serialize every other peer's QUIC FFI calls — the old single
+/// process-global Condvar parked ALL callers (including SMS encrypt and
+/// snapshot persist) behind the one reconnecting peer for up to 5s.
+static RECONNECT_STATES: LazyLock<Mutex<HashMap<String, Arc<(Mutex<ReconnectGuard>, Condvar)>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn reconnect_state_for(peer_key: &str) -> ReconnectStateHandle {
+    let mut map = RECONNECT_STATES.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(peer_key.to_string())
+        .or_insert_with(|| {
+            Arc::new((
+                Mutex::new(ReconnectGuard {
+                    state: ReconnectState::Idle,
+                    last_attempt: std::time::Instant::now() - std::time::Duration::from_secs(60),
+                }),
+                Condvar::new(),
+            ))
+        })
+        .clone()
+}
+
+/// Drop per-peer reconnect state (used when a peer is unpaired/closed).
+pub fn drop_reconnect_state(peer_key: &str) {
+    if let Ok(mut map) = RECONNECT_STATES.lock() {
+        map.remove(peer_key);
+    }
+}
 
 fn connections() -> &'static Mutex<HashMap<String, ManagedConnection>> {
     &QUIC_CONNECTIONS
@@ -72,9 +93,8 @@ fn connections() -> &'static Mutex<HashMap<String, ManagedConnection>> {
 /// Check whether ANY peer connection is alive (recent activity within 30 s).
 pub fn is_quic_connected() -> bool {
     let map = connections().lock().unwrap_or_else(|e| e.into_inner());
-    map.values().any(|c| {
-        c.conn.is_some() && c.last_activity.elapsed() < std::time::Duration::from_secs(30)
-    })
+    map.values()
+        .any(|c| c.conn.is_some() && c.last_activity.elapsed() < std::time::Duration::from_secs(30))
 }
 
 /// List every registered peer key.
@@ -138,6 +158,9 @@ pub fn close_peer(peer_key: &str) {
             *active = None;
         }
     }
+    // Drop the peer's reconnect state so a later re-pair starts fresh
+    // (audit finding #10).
+    drop_reconnect_state(peer_key);
 }
 
 /// Record that the active connection is still alive (poll handler).
@@ -176,7 +199,9 @@ pub fn get_or_reconnect() -> Result<Connection, KyberError> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .ok_or_else(|| {
-            KyberError::NetworkError("No active QUIC connection and no reconnect info available".into())
+            KyberError::NetworkError(
+                "No active QUIC connection and no reconnect info available".into(),
+            )
         })?;
     get_or_reconnect_for(&active)
 }
@@ -199,7 +224,7 @@ pub fn get_or_reconnect_for(peer_key: &str) -> Result<Connection, KyberError> {
         }
     }
 
-    let (lock, cvar) = &*RECONNECT_GUARD;
+    let (lock, cvar) = &*reconnect_state_for(peer_key);
 
     // Claim the reconnect slot WITHOUT holding the lock across I/O.
     {
@@ -238,51 +263,64 @@ pub fn get_or_reconnect_for(peer_key: &str) -> Result<Connection, KyberError> {
         guard.last_attempt = std::time::Instant::now();
     } // guard dropped BEFORE the blocking connect
 
-    // Perform the reconnect without holding any shared lock.
-    let result = (|| -> Result<Connection, KyberError> {
-        let config = {
-            let map = connections().lock().unwrap_or_else(|e| e.into_inner());
-            map.get(peer_key)
-                .and_then(|mc| {
+    // Perform the reconnect without holding any shared lock. The blocking
+    // connect is driven through the FFI runtime's BLOCKING POOL (spawn_blocking
+    // → max_blocking_threads=64), NOT on one of the 2 worker threads, so a
+    // handoff reconnect never starves concurrent UniFFI crypto calls (audit
+    // finding #10).
+    let result = crate::block_on_sync(async move {
+        let peer_key = peer_key.to_string();
+        let inner = tokio::task::spawn_blocking(move || -> Result<Connection, KyberError> {
+            let config = {
+                let map = connections().lock().unwrap_or_else(|e| e.into_inner());
+                map.get(&peer_key).and_then(|mc| {
                     mc.config.as_ref().map(|c| ConnConfig {
                         addr: c.addr,
                         pinned_cert_hash: c.pinned_cert_hash.clone(),
                         client_certs: c.client_certs.clone(),
                     })
                 })
-        };
-        let config = config.ok_or_else(|| {
-            KyberError::NetworkError(format!(
-                "No reconnect info available for peer '{peer_key}'"
-            ))
-        })?;
+            };
+            let config = config.ok_or_else(|| {
+                KyberError::NetworkError(format!(
+                    "No reconnect info available for peer '{peer_key}'"
+                ))
+            })?;
 
-        let client_certs = config.client_certs.clone().map(|(cert_der, key_der)| {
-            (
-                vec![rustls::pki_types::CertificateDer::from(cert_der)],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
-            )
-        });
-        let new_conn = crate::block_on_sync(crate::quic_app::QuicAppManager::connect(
-            config.addr,
-            config.pinned_cert_hash,
-            client_certs,
-        ))?;
-
-        let mut map = connections().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mc) = map.get_mut(peer_key) {
-            mc.conn = Some(new_conn.clone());
-            mc.last_activity = std::time::Instant::now();
-        }
-        Ok(new_conn)
-    })();
+            let client_certs = config.client_certs.clone().map(|(cert_der, key_der)| {
+                (
+                    vec![rustls::pki_types::CertificateDer::from(cert_der)],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+                )
+            });
+            let new_conn = crate::block_on_sync(crate::quic_app::QuicAppManager::connect(
+                config.addr,
+                config.pinned_cert_hash,
+                client_certs,
+            ))?;
+            Ok(new_conn)
+        })
+        .await
+        .map_err(|e| KyberError::NetworkError(format!("Reconnect task join failed: {e}")))??;
+        Ok::<Connection, KyberError>(inner)
+    });
 
     {
         let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         guard.state = ReconnectState::Done;
     }
     cvar.notify_all();
-    result
+    match result {
+        Ok(conn) => {
+            let mut map = connections().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mc) = map.get_mut(peer_key) {
+                mc.conn = Some(conn.clone());
+                mc.last_activity = std::time::Instant::now();
+            }
+            Ok(conn)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn quic_send_and_recv_impl(

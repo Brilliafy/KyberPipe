@@ -217,7 +217,10 @@ pub fn store_tofu_cert_hash(hash: String) {
 /// confirmed the SAS out-of-band. This is the ONLY capture path — the legacy
 /// first-connection TOFU auto-pin was removed (audit finding #15).
 pub fn capture_server_cert_hash_no_store(conn: &quinn::Connection) -> Option<String> {
-    let certs = conn.peer_identity()?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    let certs = conn
+        .peer_identity()?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .ok()?;
     let cert = certs.first()?;
     Some(hex::encode(sha2::Sha256::digest(cert.as_ref())))
 }

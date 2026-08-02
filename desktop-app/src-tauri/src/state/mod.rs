@@ -2,8 +2,7 @@ pub mod services;
 pub mod types;
 
 pub use services::{
-    ClipboardService, CryptoService, NetworkService, PairingService, SettingsService,
-    UiService,
+    ClipboardService, CryptoService, NetworkService, PairingService, SettingsService, UiService,
 };
 pub use types::*;
 
@@ -38,12 +37,19 @@ impl Default for AppState {
             .to_string_lossy()
             .to_string();
 
+        let clipboard = ClipboardService::new(notifications_path.clone());
+        // Restore encrypted notification/SMS history at startup (audit finding
+        // #21): the at-rest blob is AEAD-wrapped; load + decrypt it now.
+        for record in clipboard.load_notifications() {
+            clipboard.add_notification(record);
+        }
+
         Self {
             crypto: CryptoService::default(),
             pairing: PairingService::default(),
             network: NetworkService::default(),
             ui: UiService::default(),
-            clipboard: ClipboardService::new(notifications_path.clone()),
+            clipboard,
             settings: SettingsService::new(settings_path.clone()),
             settings_path,
             notifications_path,
@@ -116,6 +122,11 @@ impl AppState {
     }
     pub fn add_notification(&self, pkt: NotificationRecord) {
         self.clipboard.add_notification(pkt);
+        // Persist the (encrypted) history immediately — audit finding #21:
+        // forwarded SMS/notification content must survive restarts and must
+        // never be written in plaintext. The coalescing persist channel makes
+        // per-notification writes cheap.
+        self.clipboard.save_notifications();
     }
 
     // ── Pairing Delegates ──────────────────────────────────────────────
@@ -174,6 +185,31 @@ impl AppState {
 
     pub fn set_pending_pairing_nonce(&self, nonce: String) {
         self.pairing.set_pending_pairing_nonce(nonce);
+    }
+
+    /// Issue a fresh mandatory QR pairing nonce (audit finding #20).
+    pub fn issue_fresh_pairing_nonce(&self) -> String {
+        self.pairing.issue_fresh_nonce()
+    }
+
+    // ── Pairing phase transitions (audit finding #24) ──
+    pub fn begin_pairing_attempt(&self) -> types::PairingPhase {
+        self.pairing.begin_pairing_attempt()
+    }
+    pub fn promote_to_sas_pending(&self) -> types::PairingPhase {
+        self.pairing.promote_to_sas_pending()
+    }
+    pub fn confirm_pairing(&self) -> types::PairingPhase {
+        self.pairing.confirm_pairing()
+    }
+    pub fn timeout_pairing(&self) -> types::PairingPhase {
+        self.pairing.timeout_pairing()
+    }
+    pub fn fail_pairing(&self) -> types::PairingPhase {
+        self.pairing.fail_pairing()
+    }
+    pub fn pairing_phase(&self) -> types::PairingPhase {
+        self.pairing.phase()
     }
 
     pub fn get_paired_client_cert_hash(&self) -> String {

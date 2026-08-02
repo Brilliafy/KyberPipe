@@ -63,6 +63,40 @@ fn wrap_key(snapshot_key_hex: &str) -> Option<[u8; 32]> {
     .ok()
 }
 
+/// Domain-separated wrap-key context for the notification/SMS history store
+/// (audit finding #21): the same independent snapshot key derives a DIFFERENT
+/// key here than for ratchet snapshots, so the two stores never share a
+/// (key, purpose) derivation context.
+fn notif_wrap_key(snapshot_key_hex: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(snapshot_key_hex).ok()?;
+    core_crypto::crypto::derive_session_key(
+        &bytes,
+        b"kyberpipe-notif-persist-salt",
+        b"kyberpipe-notif-store-v1",
+    )
+    .ok()
+}
+
+/// AEAD-wrap the notification/SMS history JSON with the independent snapshot
+/// key (audit finding #21): forwarded Signal/WhatsApp content must not sit on
+/// disk in plaintext. Returns "{nonce_hex}:{ciphertext_hex}".
+pub fn encrypt_notifications_data(snapshot_key_hex: &str, data: &[u8]) -> Option<String> {
+    let wk = notif_wrap_key(snapshot_key_hex)?;
+    let mut nonce = [0u8; 12];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+    let ct = core_crypto::crypto::encrypt_chacha20(&wk, &nonce, data, &[]).ok()?;
+    Some(format!("{}:{}", hex::encode(nonce), hex::encode(ct)))
+}
+
+/// Decrypt a notification history blob written by `encrypt_notifications_data`.
+pub fn decrypt_notifications_data(snapshot_key_hex: &str, blob: &str) -> Option<Vec<u8>> {
+    let (nonce_hex, ct_hex) = blob.split_once(':')?;
+    let (nonce, ct) = (hex::decode(nonce_hex).ok()?, hex::decode(ct_hex).ok()?);
+    let nonce_arr = <[u8; 12]>::try_from(nonce.as_slice()).ok()?;
+    let wk = notif_wrap_key(snapshot_key_hex)?;
+    core_crypto::crypto::decrypt_chacha20(&wk, &nonce_arr, &ct, &[]).ok()
+}
+
 fn store_path() -> PathBuf {
     let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
         .map(|p| p.data_dir().to_path_buf())

@@ -4,7 +4,10 @@
 //! path challenge verification, and hardware command packet creation.
 
 use crate::error::KyberError;
-use crate::{crypto, ensure_panic_hook_installed, ffi, network, PairingConfig, PathChallengeResult, system_net};
+use crate::{
+    crypto, ensure_panic_hook_installed, ffi, network, system_net, PairingConfig,
+    PathChallengeResult,
+};
 
 // ── SAS & Pairing ──
 
@@ -127,7 +130,12 @@ pub fn create_notification_action_packet(
     timestamp: u64,
 ) -> Result<String, KyberError> {
     ensure_panic_hook_installed();
-    ffi::packets::create_notification_action_packet_impl(sbn_key, action_index, action_title, timestamp)
+    ffi::packets::create_notification_action_packet_impl(
+        sbn_key,
+        action_index,
+        action_title,
+        timestamp,
+    )
 }
 
 #[uniffi::export]

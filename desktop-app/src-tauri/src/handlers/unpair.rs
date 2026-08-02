@@ -26,7 +26,11 @@ pub(crate) async fn handle_unpair(s: Arc<AppState>, peer_cert_hash: String, peer
     if !peer_is_authorized(&s, &peer_cert_hash, &peer_ip) {
         s.add_log(format!(
             "[Pairing] Unpair rejected: unauthenticated peer (cert={}, ip={})",
-            if peer_cert_hash.is_empty() { "none" } else { "<hash>" },
+            if peer_cert_hash.is_empty() {
+                "none"
+            } else {
+                "<hash>"
+            },
             peer_ip
         ));
         return;

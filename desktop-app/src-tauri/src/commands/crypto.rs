@@ -1,5 +1,9 @@
 #[tauri::command]
-pub fn generate_shamir_recovery_shares(k: usize, n: usize, token: String) -> Result<Vec<String>, String> {
+pub fn generate_shamir_recovery_shares(
+    k: usize,
+    n: usize,
+    token: String,
+) -> Result<Vec<String>, String> {
     if !crate::commands::security::consume_privilege_token(
         "generate_shamir_recovery_shares",
         &token,

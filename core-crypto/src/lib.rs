@@ -24,6 +24,7 @@ pub use pairing_api::*;
 
 use error::KyberError;
 use std::future::Future;
+use zeroize::Zeroize;
 
 uniffi::setup_scaffolding!();
 
@@ -31,11 +32,40 @@ uniffi::setup_scaffolding!();
 /// which causes Undefined Behavior.
 static PANIC_HOOK_INIT: std::sync::Once = std::sync::Once::new();
 
+/// Zeroize the process-global pairing keypair registry (audit finding #13).
+/// Invoked from the panic hook as a last-resort defense: if a panic cannot be
+/// contained (e.g. a double panic that aborts), the raw private halves held in
+/// the process-global registry are wiped before the process dies. Safe under
+/// poison — a panicked thread that held the lock leaves a poisoned mutex,
+/// which we recover via into_inner and take (zeroizing first).
+fn zeroize_process_key_registry() {
+    if let Some(cell) = PAIRING_KEYPAIR.get() {
+        match cell.lock() {
+            Ok(mut guard) => {
+                if let Some(pair) = guard.as_mut() {
+                    pair.zeroize();
+                }
+                guard.take();
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                if let Some(pair) = guard.as_mut() {
+                    pair.zeroize();
+                }
+                guard.take();
+            }
+        }
+    }
+}
+
 pub fn ensure_panic_hook_installed() {
     PANIC_HOOK_INIT.call_once(|| {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             eprintln!("[CRITICAL ERROR] Panic occurred in core-crypto native layer: {info}");
+            // Last-resort key wipe before the process can abort (double panic)
+            // or before unwinding continues.
+            zeroize_process_key_registry();
             prev_hook(info);
             // Do NOT abort. UniFFI's generated scaffolding wraps every exported
             // function in `panic::catch_unwind` and converts a panic into a
@@ -43,6 +73,8 @@ pub fn ensure_panic_hook_installed() {
             // returned to the caller as a structured error — it never unwinds
             // across the C ABI. Aborting here would kill the whole app (and its
             // in-memory key material) for panics that are fully recoverable
+            // (audit finding #13). The release profile is `panic = "unwind"` so
+            // catch_unwind actually functions — the abort-contradiction is fixed
             // (audit finding #13).
         }));
     });
@@ -86,11 +118,10 @@ pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
 /// Block on a future with timeout using the FFI runtime.
 /// Returns `None` if the timeout expires. Use from FFI boundaries (e.g.,
 /// Android JNI) where blocking indefinitely would exhaust the platform thread pool.
-pub fn block_on_sync_timeout<F: Future>(
-    fut: F,
-    timeout: std::time::Duration,
-) -> Option<F::Output> {
-    FFI_RUNTIME.block_on(tokio::time::timeout(timeout, fut)).ok()
+pub fn block_on_sync_timeout<F: Future>(fut: F, timeout: std::time::Duration) -> Option<F::Output> {
+    FFI_RUNTIME
+        .block_on(tokio::time::timeout(timeout, fut))
+        .ok()
 }
 
 /// Block on a future using the IO runtime. Used for long-lived tasks (accept loop).
@@ -128,7 +159,14 @@ pub fn increment_destruct_generation() {
     DESTRUCT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
-#[derive(Clone, serde::Serialize, uniffi::Record)]
+/// Post-quantum hybrid keypair crossing the UniFFI boundary. Audit finding
+/// #16: the private halves must not persist in freed heap after unpairing or
+/// self-destruct. UniFFI's Record derive cannot coexist with a Drop impl
+/// (its field move-out is incompatible with Drop), so zeroization is done
+/// explicitly: every disposal path (desktop `CryptoState::set_keypair(None)`,
+/// `clear_all_pairing`, self-destruct, the process-global registry) calls
+/// `zeroize()` on the pair before dropping it.
+#[derive(Clone, serde::Serialize, uniffi::Record, zeroize::Zeroize)]
 pub struct PqKeyPair {
     pub x25519_pk: Vec<u8>,
     pub x25519_sk: Vec<u8>,
@@ -136,7 +174,7 @@ pub struct PqKeyPair {
     pub mlkem_sk: Vec<u8>,
 }
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, zeroize::Zeroize)]
 pub struct PqKeyPairRaw {
     pub x25519_pk: Vec<u8>,
     pub x25519_sk: Vec<u8>,
@@ -245,6 +283,11 @@ pub fn generate_pq_pairing_public() -> Result<PqPairingPublic, KyberError> {
     // Persist the FULL keypair so a future pairing handler can decapsulate.
     let cell = PAIRING_KEYPAIR.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = cell.lock() {
+        // Zeroize any previously-registered pair before replacing it (audit
+        // finding #16: old private halves must not linger in the registry).
+        if let Some(prev) = guard.as_mut() {
+            prev.zeroize();
+        }
         *guard = Some(keypair.clone());
     }
     Ok(PqPairingPublic::from(&keypair))
@@ -314,12 +357,7 @@ pub fn ratchet_init_session_with_keypair(
         &peer_identity,
         &master_shared_secret,
         is_initiator,
-        Some((
-            our_x25519_pk,
-            our_x25519_sk,
-            our_mlkem_pk,
-            our_mlkem_sk,
-        )),
+        Some((our_x25519_pk, our_x25519_sk, our_mlkem_pk, our_mlkem_sk)),
         x25519,
         mlkem,
     )?;
@@ -377,12 +415,16 @@ pub fn ratchet_decrypt_message_binary(
         || msg.rekey_mlkem_pk.is_some()
         || msg.rekey_ciphertext.is_some()
     {
-        let rekey_x = msg.rekey_x25519_pk.as_deref().map(|s| {
-            <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
-                expected: 32,
-                got: s.len() as u64,
+        let rekey_x = msg
+            .rekey_x25519_pk
+            .as_deref()
+            .map(|s| {
+                <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                    expected: 32,
+                    got: s.len() as u64,
+                })
             })
-        }).transpose()?;
+            .transpose()?;
         ratchet_ffi::ratchet_decrypt_with_rekey_message_impl(
             &peer_identity,
             &msg.nonce,
@@ -427,11 +469,9 @@ pub fn ratchet_decrypt_with_rekey_message(
         ));
     }
     let rekey_x25519 = match rekey_x25519_pk.as_deref() {
-        Some(s) => Some(s.try_into().map_err(|_| {
-            KyberError::InvalidKeyLength {
-                expected: 32,
-                got: s.len() as u64,
-            }
+        Some(s) => Some(s.try_into().map_err(|_| KyberError::InvalidKeyLength {
+            expected: 32,
+            got: s.len() as u64,
         })?),
         None => None,
     };
@@ -455,10 +495,7 @@ pub fn generate_rekey_ack_message(
 }
 
 #[uniffi::export]
-pub fn ratchet_process_rekey_ack(
-    peer_identity: String,
-    seq: u64,
-) -> Result<bool, KyberError> {
+pub fn ratchet_process_rekey_ack(peer_identity: String, seq: u64) -> Result<bool, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_process_rekey_ack_impl(&peer_identity, seq)
 }
@@ -473,12 +510,57 @@ pub fn ratchet_generate_rekey_ack(
     ratchet_ffi::ratchet_generate_rekey_ack_impl(&peer_identity)
 }
 
+/// Take the pending RekeyAck carrier seq and produce the encrypted ACK as a
+/// BINARY TLV (audit finding #12), consuming the carrier in the same session
+/// lock. This is the phone's outbound RekeyAck channel: the phone attaches the
+/// returned TLV to its next poll request so the desktop can commit its
+/// outgoing proposal (audit finding #1 — the missing phone→desktop ack).
+#[uniffi::export]
+pub fn ratchet_generate_rekey_ack_binary(
+    peer_identity: String,
+) -> Result<Option<Vec<u8>>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_generate_rekey_ack_binary_impl(&peer_identity)
+}
+
+/// NON-CONSUMING variant of `ratchet_generate_rekey_ack_binary`: produces the
+/// ack TLV without clearing the pending carrier, so a poll response lost on
+/// the wire can be retried (audit finding #6). Callers MUST clear the carrier
+/// with `ratchet_consume_rekey_ack` only after the response is written.
+#[uniffi::export]
+pub fn ratchet_generate_rekey_ack_binary_peek(
+    peer_identity: String,
+) -> Result<Option<Vec<u8>>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_generate_rekey_ack_binary_peek_impl(&peer_identity)
+}
+
+/// Clear the pending RekeyAck carrier — called after a poll response carrying
+/// the peeked ack has been successfully written (audit finding #6).
+#[uniffi::export]
+pub fn ratchet_consume_rekey_ack(peer_identity: String) -> bool {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_consume_rekey_ack_impl(&peer_identity)
+}
+
+/// Decrypt (rekey-aware) and process a peer's RekeyAck carried as a BINARY TLV
+/// (audit finding #12): commits the peer's ack of OUR outgoing proposal. The
+/// ack is decrypted rekey-aware because a ratchet message at a rekey boundary
+/// carries a rekey payload whose AEAD tag binds those fields (audit finding
+/// #3 — the non-rekey decrypt would drop it).
+#[uniffi::export]
+pub fn ratchet_process_rekey_ack_binary(
+    peer_identity: String,
+    data: Vec<u8>,
+) -> Result<bool, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_process_rekey_ack_binary_impl(&peer_identity, &data)
+}
+
 /// Export a ratchet session as a serialized snapshot (JSON bytes) for
 /// encrypted persistence. Returns None if no session exists for the peer.
 #[uniffi::export]
-pub fn ratchet_export_session(
-    peer_identity: String,
-) -> Result<Option<Vec<u8>>, KyberError> {
+pub fn ratchet_export_session(peer_identity: String) -> Result<Option<Vec<u8>>, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_export_session_impl(&peer_identity)
 }
@@ -486,10 +568,7 @@ pub fn ratchet_export_session(
 /// Restore a ratchet session from a previously exported (and decrypted)
 /// snapshot. Replaces any existing session for the peer.
 #[uniffi::export]
-pub fn ratchet_import_session(
-    peer_identity: String,
-    data: Vec<u8>,
-) -> Result<(), KyberError> {
+pub fn ratchet_import_session(peer_identity: String, data: Vec<u8>) -> Result<(), KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_import_session_impl(&peer_identity, &data)
 }
@@ -521,9 +600,7 @@ pub fn ratchet_synchronize_packet(
 /// returns the full TLV framing including any rekey payload the packet carried,
 /// so the peer can process it rekey-aware via `ratchet_process_synchronize`.
 #[uniffi::export]
-pub fn ratchet_synchronize_packet_binary(
-    peer_identity: String,
-) -> Result<Vec<u8>, KyberError> {
+pub fn ratchet_synchronize_packet_binary(peer_identity: String) -> Result<Vec<u8>, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_synchronize_packet_binary_impl(&peer_identity)
 }
@@ -546,9 +623,7 @@ pub fn ratchet_process_synchronize(
 /// The receiver's current recv counter — used to build a Synchronize request
 /// when a gap exceeds max_skip.
 #[uniffi::export]
-pub fn ratchet_recv_count(
-    peer_identity: String,
-) -> Result<u64, KyberError> {
+pub fn ratchet_recv_count(peer_identity: String) -> Result<u64, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_recv_count_impl(&peer_identity)
 }
@@ -557,9 +632,7 @@ pub fn ratchet_recv_count(
 /// peer can detect a receive-chain gap exceeding max_skip and resync (the
 /// Synchronize recovery path, audit finding #4).
 #[uniffi::export]
-pub fn ratchet_send_count(
-    peer_identity: String,
-) -> Result<u64, KyberError> {
+pub fn ratchet_send_count(peer_identity: String) -> Result<u64, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_send_count_impl(&peer_identity)
 }
@@ -599,8 +672,17 @@ mod tests {
         let public = generate_pq_pairing_public().expect("pairing public");
         let stored = get_pq_pairing_keypair().expect("private half must survive");
         assert_eq!(stored.mlkem_pk, hex::decode(&public.mlkem_pk_hex).unwrap());
-        assert_eq!(stored.x25519_pk, hex::decode(&public.x25519_pk_hex).unwrap());
-        assert!(!stored.mlkem_sk.is_empty(), "mlkem private key must be retained");
-        assert!(!stored.x25519_sk.is_empty(), "x25519 private key must be retained");
+        assert_eq!(
+            stored.x25519_pk,
+            hex::decode(&public.x25519_pk_hex).unwrap()
+        );
+        assert!(
+            !stored.mlkem_sk.is_empty(),
+            "mlkem private key must be retained"
+        );
+        assert!(
+            !stored.x25519_sk.is_empty(),
+            "x25519 private key must be retained"
+        );
     }
 }
