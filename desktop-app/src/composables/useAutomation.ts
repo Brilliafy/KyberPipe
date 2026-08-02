@@ -18,26 +18,36 @@ export function useAutomation(refreshLogs: () => Promise<void>) {
     onCompletionCode?: string
   ) => {
     try {
-      const res = await invoke<ScriptResult>('execute_boa_script', {
+      // Tier-2 destructive command (arbitrary JS) — request the single-use
+      // user-gesture token (audit finding #20: per-tier enforcement).
+      const token = await invoke<string>("request_privilege_token", {
+        action: "execute_boa_script",
+      });
+      const res = await invoke<ScriptResult>("execute_boa_script", {
         scriptCode: code,
         isSandboxed: isSandboxed,
         lux: Number(currentLux.value),
         feedSourceCommand: feedSourceCommand,
-      })
+        token,
+      });
       scriptResult.value = res
       await refreshLogs()
 
       if (res.success && onCompletionCode && onCompletionCode.trim()) {
-        await invoke('execute_boa_script', {
+        const token2 = await invoke<string>("request_privilege_token", {
+          action: "execute_boa_script",
+        });
+        await invoke("execute_boa_script", {
           scriptCode: onCompletionCode,
           isSandboxed: false,
           lux: Number(currentLux.value),
-          feedSourceCommand: '',
+          feedSourceCommand: "",
+          token: token2,
         })
         await refreshLogs()
       }
     } catch (e) {
-      console.error('Execution failed: ', e)
+      console.error("Execution failed: ", e)
     }
   }
 

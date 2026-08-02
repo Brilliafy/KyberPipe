@@ -294,9 +294,15 @@ fn pairing_poll_clipboard_roundtrip() {
     // Signal the dispatch loop to stop and join the thread so the test process
     // exits cleanly (no lingering runtime holding the binary open).
     let _ = stop_tx.send(());
-    let _ = dispatch.join_timeout(std::time::Duration::from_secs(10));
-    // Stop the shared IO runtime so its worker threads do not keep the test
-    // process alive after the assertions complete.
+    // Drop the client connection so its quinn driver task finishes; the server
+    // endpoint is held by the process-global static, so release it too.
+    drop(conn);
+    let _ = core_crypto::quic_app::release_server_endpoint_for_tests();
+    // Join with a generous bound — the dispatch loop breaks on the oneshot and
+    // the per-connection tasks abort when the thread's runtime drops.
+    let _ = dispatch.join_timeout(std::time::Duration::from_secs(20));
+    // Stop the shared IO runtime (bounded blocking) so its worker threads do
+    // not keep the test process alive after the assertions complete.
     core_crypto::shutdown_io_runtime();
 }
 

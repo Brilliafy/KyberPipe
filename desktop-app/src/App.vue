@@ -40,7 +40,7 @@ const {
   deviceName, devicePicture, pairedDeviceName, pairedDevicePicture,
   ddnsHostname, enableUpnp, enableDdns, isPaired,
   fileAccessGrantedDesktop, fileAccessGrantedPhone,
-  themeMode, loadSettings, saveSettings,
+  themeMode, beaconDiscoveryEnabled, loadSettings, saveSettings,
   currentThemeClass
 } = useSettings();
 
@@ -576,6 +576,7 @@ onUnmounted(() => {
             v-else-if="currentTab === 'settings'" 
             :flightRecorderEnabled="flightRecorderEnabled"
             :neuralAnomalyEnabled="neuralAnomalyEnabled"
+            :beaconDiscoveryEnabled="beaconDiscoveryEnabled"
             :keyPair="keyPair"
             :deviceName="deviceName"
             :devicePicture="devicePicture"
@@ -589,6 +590,7 @@ onUnmounted(() => {
             :themeMode="themeMode"
             @update:flightRecorderEnabled="handleToggleFlightRecorder"
             @update:neuralAnomalyEnabled="handleToggleNeuralAnomaly"
+            @update:beaconDiscoveryEnabled="beaconDiscoveryEnabled = $event"
             @update:deviceName="deviceName = $event"
             @update:devicePicture="devicePicture = $event"
             @update:ddnsHostname="ddnsHostname = $event"

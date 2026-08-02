@@ -21,6 +21,7 @@ interface KeyPair {
 defineProps<{
   flightRecorderEnabled: boolean;
   neuralAnomalyEnabled: boolean;
+  beaconDiscoveryEnabled: boolean;
   keyPair: KeyPair | null;
   deviceName: string;
   devicePicture: string;
@@ -37,6 +38,7 @@ defineProps<{
 const emit = defineEmits<{
   (e: "update:flightRecorderEnabled", val: boolean): void;
   (e: "update:neuralAnomalyEnabled", val: boolean): void;
+  (e: "update:beaconDiscoveryEnabled", val: boolean): void;
   (e: "update:deviceName", val: string): void;
   (e: "update:devicePicture", val: string): void;
   (e: "update:ddnsHostname", val: string): void;
@@ -209,8 +211,8 @@ const handleFileChange = (event: Event) => {
       </div>
 
       <div class="card" style="padding: 1.5rem;">
-        <h3><ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Neuromorphic Anomaly Engine</h3>
-        <p class="card-desc">Real-time eBPF packet-timing anomaly detection & auto-isolation.</p>
+        <h3><ShieldAlert style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> Anomaly Detection (placeholder)</h3>
+        <p class="card-desc">No on-device anomaly engine is bundled — this toggle only stores a preference.</p>
         <div style="display: flex; align-items: center; gap: 0.75rem;">
           <label class="toggle-switch">
             <input 
@@ -221,7 +223,24 @@ const handleFileChange = (event: Event) => {
             />
             <span class="toggle-slider"></span>
           </label>
-          <label for="check-anomaly" style="color: var(--text-primary); cursor: pointer; font-size: 0.85rem;">Enable eBPF ONNX Engine</label>
+          <label for="check-anomaly" style="color: var(--text-primary); cursor: pointer; font-size: 0.85rem;">Preference only — no engine</label>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 1.5rem;">
+        <h3><Activity style="display:inline-block; vertical-align:middle; margin-right:0.25rem;" :size="16" /> LAN Discovery Beacon</h3>
+        <p class="card-desc">OPT-IN: when enabled, broadcasts your truncated key hash + LAN IP every 30s so companion devices can discover this desktop. Off by default (privacy). Never includes your device name.</p>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <label class="toggle-switch">
+            <input 
+              type="checkbox" 
+              id="check-beacon" 
+              :checked="beaconDiscoveryEnabled" 
+              @change="emit('update:beaconDiscoveryEnabled', ($event.target as HTMLInputElement).checked)" 
+            />
+            <span class="toggle-slider"></span>
+          </label>
+          <label for="check-beacon" style="color: var(--text-primary); cursor: pointer; font-size: 0.85rem;">Enable LAN discovery beacons</label>
         </div>
       </div>
     </div>

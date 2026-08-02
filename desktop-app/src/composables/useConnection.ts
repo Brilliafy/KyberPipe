@@ -68,6 +68,7 @@ export function useConnection() {
   const mediaState = ref<MediaState | null>(null);
   const neuralAnomalyEnabled = ref(false);
   const flightRecorderEnabled = ref(false);
+  const beaconDiscoveryEnabled = ref(false);
 
   const latencyColor = computed(() => {
     const ms = currentLatency.value;
@@ -110,6 +111,7 @@ export function useConnection() {
       fileAccessGrantedPhone.value = s.file_access_granted_phone || false;
       themeMode.value = s.theme_mode || "auto";
       pathwayOrder.value = s.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
+      beaconDiscoveryEnabled.value = s.beacon_discovery_enabled || false;
     } catch (e) {
       console.error("Load settings error:", e);
     }
@@ -128,6 +130,7 @@ export function useConnection() {
         themeMode: themeMode.value,
         pathwayOrder: pathwayOrder.value,
         wireguardActive: true,
+        beaconDiscoveryEnabled: beaconDiscoveryEnabled.value,
       });
     } catch (e) {
       console.error("Save settings error:", e);
@@ -225,6 +228,7 @@ const handleDeleteConnection = async () => {
     fileAccessGrantedDesktop, fileAccessGrantedPhone,
     pathwayOrder, themeMode,
     mediaState, neuralAnomalyEnabled, flightRecorderEnabled,
+    beaconDiscoveryEnabled,
     fetchMediaState, handleMediaAction, loadSettings, saveSettings,
     checkConnectionState, handleGenerateKeyPair, handleDeleteConnection,
     loadPairingConfig,

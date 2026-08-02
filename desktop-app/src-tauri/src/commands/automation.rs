@@ -134,8 +134,12 @@ pub async fn execute_boa_script(
     is_sandboxed: bool,
     lux: f64,
     feed_source_command: String,
+    token: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<ScriptExecutionResult, String> {
+    // Tier-2 destructive command (arbitrary JS execution) — uniform
+    // user-gesture token gate (audit finding #20).
+    crate::commands::gate_tier2("execute_boa_script", &token)?;
     let mut feed_value = String::new();
     if !feed_source_command.trim().is_empty() {
         state.add_log(format!(

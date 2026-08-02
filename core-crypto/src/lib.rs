@@ -136,11 +136,14 @@ pub fn block_on_io<F: Future>(fut: F) -> F::Output {
 /// Shut down the IO runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide
 /// LazyLock; calling this in production would break the accept loop. The e2e
 /// test calls it after the dispatch loop stops so the test process can exit
-/// (the worker threads would otherwise keep the process alive forever).
+/// (the worker threads would otherwise keep the process alive forever). Uses a
+/// BOUNDED BLOCKING shutdown (audit finding #4 follow-up): `shutdown_background`
+/// could leave worker threads running past the test and keep the harness pipe
+/// open; `shutdown_timeout` drains for up to 5s then hard-stops the workers.
 pub fn shutdown_io_runtime() {
     if let Ok(mut guard) = IO_RUNTIME.lock() {
         if let Some(rt) = guard.take() {
-            rt.shutdown_background();
+            rt.shutdown_timeout(std::time::Duration::from_secs(5));
         }
     }
 }
