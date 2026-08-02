@@ -73,6 +73,95 @@ pub struct RatchetEncryptedMessage {
     pub rekey_ciphertext: Option<Vec<u8>>,
 }
 
+/// Binary TLV framing for `RatchetEncryptedMessage` (audit finding #12). This
+/// is the single cross-platform serialization contract for ratchet payloads —
+/// length-prefixed fields, no hex-in-JSON drift surface, ~2x smaller than hex.
+///
+/// Layout (all lengths big-endian u32):
+/// ```text
+/// [1B version=0x01][1B has_rekey]
+/// [4B nonce_len][nonce]
+/// [4B ct_len][ct]
+/// [4B rekey_x_len][rekey_x]   (only if has_rekey)
+/// [4B rekey_m_len][rekey_m]   (only if has_rekey)
+/// [4B rekey_ct_len][rekey_ct] (only if has_rekey)
+/// ```
+impl RatchetEncryptedMessage {
+    pub fn to_binary(&self) -> Result<Vec<u8>, KyberError> {
+        let has_rekey = self.rekey_x25519_pk.is_some()
+            || self.rekey_mlkem_pk.is_some()
+            || self.rekey_ciphertext.is_some();
+        let mut buf = Vec::with_capacity(6 + self.nonce.len() + self.ciphertext.len() + 48);
+        buf.push(0x01); // version
+        buf.push(has_rekey as u8);
+        buf.extend_from_slice(&(self.nonce.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&self.nonce);
+        buf.extend_from_slice(&(self.ciphertext.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&self.ciphertext);
+        if has_rekey {
+            for field in [
+                self.rekey_x25519_pk.as_deref(),
+                self.rekey_mlkem_pk.as_deref(),
+                self.rekey_ciphertext.as_deref(),
+            ] {
+                match field {
+                    Some(bytes) => {
+                        buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(bytes);
+                    }
+                    // A rekey payload is all-or-nothing; treat a missing field
+                    // as zero-length so the decoder stays in sync.
+                    None => buf.extend_from_slice(&0u32.to_be_bytes()),
+                }
+            }
+        }
+        Ok(buf)
+    }
+
+    pub fn from_binary(data: &[u8]) -> Result<Self, KyberError> {
+        let mut cursor = 0usize;
+        let mut take = |n: usize, what: &str| -> Result<&[u8], KyberError> {
+            if data.len() < cursor + n {
+                return Err(KyberError::SerializationError(format!(
+                    "Ratchet TLV truncated at {what}"
+                )));
+            }
+            let slice = &data[cursor..cursor + n];
+            cursor += n;
+            Ok(slice)
+        };
+        let version = take(1, "version")?[0];
+        if version != 0x01 {
+            return Err(KyberError::SerializationError(format!(
+                "Unsupported ratchet TLV version {version}"
+            )));
+        }
+        let has_rekey = take(1, "has_rekey")?[0] != 0;
+        let mut read_bytes = |what: &str| -> Result<Vec<u8>, KyberError> {
+            let len = u32::from_be_bytes(take(4, what)?.try_into().unwrap()) as usize;
+            Ok(take(len, what)?.to_vec())
+        };
+        let nonce = read_bytes("nonce")?;
+        let ciphertext = read_bytes("ciphertext")?;
+        let (rekey_x25519_pk, rekey_mlkem_pk, rekey_ciphertext) = if has_rekey {
+            (
+                Some(read_bytes("rekey_x")?),   
+                Some(read_bytes("rekey_m")?),   
+                Some(read_bytes("rekey_ct")?),  
+            )
+        } else {
+            (None, None, None)
+        };
+        Ok(Self {
+            nonce,
+            ciphertext,
+            rekey_x25519_pk,
+            rekey_mlkem_pk,
+            rekey_ciphertext,
+        })
+    }
+}
+
 /// Serializable snapshot of a DoubleRatchetState for persistence across
 /// restarts. The caller is responsible for encrypting the serialized bytes
 /// (e.g. wrapped by the device/session key) before writing them to disk.
@@ -110,12 +199,23 @@ pub struct RatchetSnapshot {
     pub previous_x25519_sk: Vec<[u8; 32]>,
     pub previous_mlkem_pk: Vec<Vec<u8>>,
     pub previous_mlkem_sk: Vec<Vec<u8>>,
-    pub skip_message_keys: Vec<(u64, [u8; 32])>,
-    pub seen_sequence_numbers: Vec<u64>,
+    pub skip_message_keys: Vec<((u32, u64), [u8; 32])>,
+    pub seen_sequence_numbers: Vec<(u32, u64)>,
+    /// Receiving chain key from the previous ratchet generation, retained so
+    /// in-flight previous-generation messages can still be decrypted after this
+    /// side commits a rekey (audit finding #3).
+    pub previous_recv_chain_key: Option<[u8; 32]>,
+    /// Receive position at which `previous_recv_chain_key` was abandoned.
+    pub previous_recv_anchor: Option<u64>,
+    /// Generation that `previous_recv_chain_key` belongs to.
+    pub previous_recv_gen: Option<u32>,
     /// Pending rekey confirmations (carrier seqs only — timestamps reset on
     /// restore; payloads are reconstructed from `outgoing_rekey_payload`).
     pub rekey_pending_confirm_queue: Vec<u64>,
     pub pending_rekey_ack_seq: Option<u64>,
+    /// Cumulative forward advancement budget consumed by resyncs (audit #4).
+    #[serde(default)]
+    pub resync_forward_total: u64,
     /// Whether this side initiated the session (desktop = initiator). Used as
     /// the deterministic tie-break for the two-sided rekey race (audit #5):
     /// the initiator's proposal always takes precedence over the responder's.
@@ -142,6 +242,13 @@ pub struct DoubleRatchetState {
     pub peer_mlkem_pk: Option<Vec<u8>>,
     pub rekey_interval: u64,
     pub ratchet_generation: u32,
+    /// Receiving-chain key from the previous ratchet generation. Retained after
+    /// a rekey commit so messages the peer sent on the previous generation but
+    /// that are still in flight (out-of-order delivery) can still be decrypted
+    /// (audit finding #3). The anchor and generation scope the retained chain.
+    pub previous_recv_chain_key: Option<[u8; 32]>,
+    pub previous_recv_anchor: Option<u64>,
+    pub previous_recv_gen: Option<u32>,
     /// ── INCOMING proposal (received rekey payload from the peer). ──
     /// Deriving/committing these does NOT touch our own outgoing proposal.
     /// The peer that sends a rekey payload derives its next sending chain with
@@ -174,8 +281,11 @@ pub struct DoubleRatchetState {
     /// Swapped into our_hybrid_pair on commit_outgoing_rekey().
     #[zeroize(skip)]
     pub outgoing_hybrid_pair: Option<HybridKeyPair>,
+    /// Cached skip keys keyed by (ratchet_generation, seq). Generation-scoped
+    /// so keys from the previous generation's receive chain cannot collide with
+    /// the current generation's after a rekey commit resets the counters.
     #[zeroize(skip)]
-    pub skip_message_keys: Option<HashMap<u64, Zeroizing<[u8; 32]>>>,
+    pub skip_message_keys: Option<HashMap<(u32, u64), Zeroizing<[u8; 32]>>>,
     pub max_skip: usize,
     /// Historical keypairs from previous ratchet generations — kept until peer acknowledges
     /// the new generation by sending a message encrypted under the new chain.
@@ -193,8 +303,11 @@ pub struct DoubleRatchetState {
     /// Max 2 entries to bound memory.
     #[zeroize(skip)]
     pub rekey_pending_confirm_queue: VecDeque<RekeyCarrier>,
+    /// Seen (generation, seq) pairs for replay detection. Generation-scoped so
+    /// a previous-generation message cannot be mis-identified as a replay of a
+    /// current-generation one after the counters reset on a rekey commit.
     #[zeroize(skip)]
-    pub seen_sequence_numbers: std::collections::HashSet<u64>,
+    pub seen_sequence_numbers: std::collections::HashSet<(u32, u64)>,
     /// Set when a rekey is committed during decryption. Caller should send a RekeyAck.
     /// Cleared by take_pending_rekey_ack_seq().
     #[zeroize(skip)]
@@ -207,6 +320,11 @@ pub struct DoubleRatchetState {
     /// Rekey payload of the pending outgoing proposal, retained for re-send.
     #[zeroize(skip)]
     pub outgoing_rekey_payload: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    /// Cumulative number of sequence positions advanced by explicit resyncs
+    /// (`resync_receiving_chain`) over this session's lifetime. Persisted in the
+    /// snapshot and capped by `SYNC_MAX_CUMULATIVE` so a compromised peer cannot
+    /// force unbounded forward jumps / KDF work (audit finding #4).
+    pub resync_forward_total: u64,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -245,9 +363,43 @@ impl DoubleRatchetState {
     /// the first 100 messages use symmetric-only ratchet. To enable immediate
     /// post-compromise security, exchange hybrid public keys during the pairing
     /// handshake so both sides can populate peer keys at init time.
+    /// Initialize a Double Ratchet session with a FRESH, never-exchanged hybrid
+    /// keypair. The fresh keypair is never shared with the peer, so the peer
+    /// encapsulates rekey payloads to OUR pairing public keys while we would
+    /// decapsulate with this unrelated private key — a guaranteed permanent
+    /// desync at the first rekey boundary (audit finding #1).
+    ///
+    /// Production callers MUST use [`DoubleRatchetState::new_with_keypair`] and
+    /// pass their own pairing keypair (the one exchanged out-of-band during the
+    /// KEM handshake). This constructor is retained for legacy tests only.
     pub fn new(
         master_shared_secret: &[u8],
         is_initiator: bool,
+        peer_x25519_pk: Option<[u8; 32]>,
+        peer_mlkem_pk: Option<Vec<u8>>,
+    ) -> Result<Self, KyberError> {
+        Self::new_with_keypair(
+            master_shared_secret,
+            is_initiator,
+            generate_hybrid_keypair(),
+            peer_x25519_pk,
+            peer_mlkem_pk,
+        )
+    }
+
+    /// Initialize a Double Ratchet session from a master shared secret, using
+    /// the caller's OWN pairing keypair as the initial identity.
+    ///
+    /// This is the fix for audit finding #1: the ratchet's DH identity must be
+    /// the keypair whose public halves were exchanged during pairing. The peer
+    /// encapsulates rekey payloads to our pairing public keys, so we must
+    /// decapsulate with the matching pairing private keys — never a fresh,
+    /// unexchanged keypair. The private halves stay in Rust on the desktop; on
+    /// Android the caller passes the pairing keypair the client already holds.
+    pub fn new_with_keypair(
+        master_shared_secret: &[u8],
+        is_initiator: bool,
+        our_hybrid_pair: HybridKeyPair,
         peer_x25519_pk: Option<[u8; 32]>,
         peer_mlkem_pk: Option<Vec<u8>>,
     ) -> Result<Self, KyberError> {
@@ -300,11 +452,14 @@ impl DoubleRatchetState {
             receiving_chain_key: receiving_ck,
             send_message_count: 0,
             recv_message_count: 0,
-            our_hybrid_pair: generate_hybrid_keypair(),
+            our_hybrid_pair,
             peer_x25519_pk,
             peer_mlkem_pk,
             rekey_interval: RATCHET_REKEY_INTERVAL,
             ratchet_generation: 0,
+            previous_recv_chain_key: None,
+            previous_recv_anchor: None,
+            previous_recv_gen: None,
             pending_root_key: None,
             pending_sending_chain_key: None,
             pending_receiving_chain_key: None,
@@ -325,7 +480,35 @@ impl DoubleRatchetState {
             pending_rekey_ack_seq: None,
             is_initiator,
             outgoing_rekey_payload: None,
+            resync_forward_total: 0,
         })
+    }
+
+    /// Retain the current receiving chain as the PREVIOUS-generation chain so
+    /// in-flight messages from the old generation can still be decrypted after
+    /// a rekey commit (audit finding #3). Only the immediately-previous chain is
+    /// kept: a rekey cannot be ACKed until the previous one is committed, so the
+    /// peer can never be more than one generation ahead in our receive space.
+    fn retain_previous_receiving_chain(&mut self) {
+        self.previous_recv_chain_key = Some(self.receiving_chain_key);
+        self.previous_recv_anchor = Some(self.recv_message_count);
+        self.previous_recv_gen = Some(self.ratchet_generation);
+    }
+
+    /// Reset per-generation counters and caches after a rekey commit. The new
+    /// generation's chains start at position 0 on BOTH sides, which makes the
+    /// pending-chain anchor deterministic (audit finding #2) and lets the
+    /// receiver derive the first new-generation message key from position 0
+    /// regardless of how many old-generation messages were still in flight.
+    fn reset_generation_counters(&mut self) {
+        self.send_message_count = 0;
+        self.recv_message_count = 0;
+        // Skip keys and seen-seqs are generation-scoped (keyed by generation), so
+        // the new generation starts with empty caches.
+        if let Some(store) = self.skip_message_keys.as_mut() {
+            store.clear();
+        }
+        self.seen_sequence_numbers.clear();
     }
 
     /// Commit the INCOMING rekey proposal (derived from a rekey payload sent by
@@ -338,6 +521,9 @@ impl DoubleRatchetState {
             self.pending_sending_chain_key,
             self.pending_receiving_chain_key,
         ) {
+            // Retain the old receiving chain so late previous-generation messages
+            // (in flight when this commit happened) still decrypt.
+            self.retain_previous_receiving_chain();
             self.root_key = pk;
             self.sending_chain_key = psk;
             self.receiving_chain_key = prk;
@@ -351,9 +537,7 @@ impl DoubleRatchetState {
                 self.ratchet_generation = self.ratchet_generation.saturating_add(1);
                 self.pending_generation_bump = false;
             }
-            // The peer has acknowledged the new generation — clear historical
-            // keypairs kept only for the pre-commit window.
-            self.previous_keypairs.clear();
+            self.reset_generation_counters();
         }
         // Always clear the pending slot, even on partial/no-op commit.
         self.pending_root_key = None;
@@ -379,18 +563,24 @@ impl DoubleRatchetState {
             self.outgoing_sending_chain_key,
             self.outgoing_receiving_chain_key,
         ) {
+            // Retain the old receiving chain: the peer may still send messages on
+            // the previous generation while it catches up (audit finding #3).
+            self.retain_previous_receiving_chain();
             self.root_key = ok;
             self.sending_chain_key = osk;
             self.receiving_chain_key = ork;
             if let Some(new_pair) = self.outgoing_hybrid_pair.take() {
                 let old_pair = std::mem::replace(&mut self.our_hybrid_pair, new_pair);
+                // Keep a bounded history of our own old keypairs so rekey payloads
+                // the peer encapsulated to our previous public keys (sent before it
+                // learned of our commit) can still be decapsulated.
                 self.previous_keypairs.push_back(old_pair);
                 while self.previous_keypairs.len() > self.max_key_history {
                     self.previous_keypairs.pop_front();
                 }
                 self.ratchet_generation = self.ratchet_generation.saturating_add(1);
             }
-            self.previous_keypairs.clear();
+            self.reset_generation_counters();
         }
         self.outgoing_root_key = None;
         self.outgoing_sending_chain_key = None;
@@ -415,8 +605,15 @@ impl DoubleRatchetState {
     /// received and processed a rekey payload.
     /// Take the pending rekey ACK sequence number, clearing it.
     /// Returns None if no ACK is pending.
+    ///
+    /// Also clears `pending_rekey_carrier_seq`: once the ACK has been handed to
+    /// the caller, a later `commit_pending_rekey` must NOT re-queue a duplicate
+    /// ACK for the same carrier (the peer ignores stale ACKs, but they are dead
+    /// traffic and confuse the ack round-trip logic).
     pub fn take_pending_rekey_ack_seq(&mut self) -> Option<u64> {
-        self.pending_rekey_ack_seq.take()
+        let seq = self.pending_rekey_ack_seq.take();
+        self.pending_rekey_carrier_seq = None;
+        seq
     }
 
     /// Process a REKEY_ACK from the peer. `seq` is the send-space sequence
@@ -505,6 +702,9 @@ impl DoubleRatchetState {
                 .flat_map(|m| m.iter().map(|(k, v)| (*k, **v)))
                 .collect(),
             seen_sequence_numbers: self.seen_sequence_numbers.iter().copied().collect(),
+            previous_recv_chain_key: self.previous_recv_chain_key,
+            previous_recv_anchor: self.previous_recv_anchor,
+            previous_recv_gen: self.previous_recv_gen,
             rekey_pending_confirm_queue: self
                 .rekey_pending_confirm_queue
                 .iter()
@@ -513,6 +713,7 @@ impl DoubleRatchetState {
             pending_rekey_ack_seq: self.pending_rekey_ack_seq,
             is_initiator: self.is_initiator,
             outgoing_rekey_payload: self.outgoing_rekey_payload.clone(),
+            resync_forward_total: self.resync_forward_total,
         }
     }
 
@@ -588,6 +789,9 @@ impl DoubleRatchetState {
             peer_mlkem_pk: snap.peer_mlkem_pk.clone(),
             rekey_interval: RATCHET_REKEY_INTERVAL,
             ratchet_generation: snap.ratchet_generation,
+            previous_recv_chain_key: snap.previous_recv_chain_key,
+            previous_recv_anchor: snap.previous_recv_anchor,
+            previous_recv_gen: snap.previous_recv_gen,
             pending_root_key: snap.pending_root_key,
             pending_sending_chain_key: snap.pending_sending_chain_key,
             pending_receiving_chain_key: snap.pending_receiving_chain_key,
@@ -608,6 +812,7 @@ impl DoubleRatchetState {
             pending_rekey_ack_seq: snap.pending_rekey_ack_seq,
             is_initiator: snap.is_initiator,
             outgoing_rekey_payload: snap.outgoing_rekey_payload.clone(),
+            resync_forward_total: snap.resync_forward_total,
         })
     }
 }
