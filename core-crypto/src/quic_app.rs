@@ -64,6 +64,53 @@ impl QuicFrame {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding #8: a frame whose declared body length exceeds
+    /// MAX_MESSAGE_SIZE must be rejected from the header alone — the server
+    /// never buffers an oversized body from an unauthenticated peer.
+    #[test]
+    fn frame_body_size_cap_enforced() {
+        // Encode a frame with an oversized body length.
+        let mut buf = vec![0u8; 5];
+        buf[0] = 0x04; // STREAM_POLL
+        buf[1..5].copy_from_slice(&(MAX_MESSAGE_SIZE as u32 + 1).to_be_bytes());
+        assert!(QuicFrame::decode(&buf).is_err());
+        // A valid small frame decodes.
+        let frame = QuicFrame {
+            stream_type: 0x04,
+            body: b"hello".to_vec(),
+        };
+        let encoded = frame.encode();
+        let decoded = QuicFrame::decode(&encoded).expect("valid frame decodes");
+        assert_eq!(decoded.stream_type, 0x04);
+        assert_eq!(decoded.body, b"hello");
+    }
+
+    /// Audit finding #8: the binary TLV round-trip of a ratchet message (the
+    /// wire format used for clipboard / rekey-ack / sync payloads) must reject
+    /// truncated input.
+    #[test]
+    fn ratchet_tlv_rejects_truncation() {
+        let msg = crate::crypto::RatchetEncryptedMessage {
+            nonce: vec![1u8; 12],
+            ciphertext: vec![2u8; 16],
+            rekey_x25519_pk: None,
+            rekey_mlkem_pk: None,
+            rekey_ciphertext: None,
+        };
+        let bin = msg.to_binary().unwrap();
+        for cut in 0..bin.len() {
+            assert!(
+                crate::crypto::RatchetEncryptedMessage::from_binary(&bin[..cut]).is_err(),
+                "truncated TLV at {cut} must be rejected"
+            );
+        }
+    }
+}
+
 /// High-level QUIC application connection manager
 pub struct QuicAppManager;
 
@@ -82,6 +129,18 @@ pub fn get_server_endpoint() -> Option<Endpoint> {
         .get()
         .and_then(|m| m.lock().ok())
         .and_then(|e| e.clone())
+}
+
+/// SHA-256 hash (hex) of the server's own persisted identity certificate.
+/// Exposed so the pairing QR can embed the REAL server cert hash, letting the
+/// phone pin the certificate whose public key was bound into the QR instead of
+/// pinning whatever certificate a bootstrap MITM happened to present on the
+/// wire (audit finding #15 — first-connection MITM pin capture).
+pub fn server_cert_sha256() -> Option<String> {
+    use sha2::Digest;
+    let (certs, _key) = load_or_generate_cert().ok()?;
+    let cert = certs.first()?;
+    Some(hex::encode(sha2::Sha256::digest(cert.as_ref())))
 }
 
 /// Extract the SHA-256 hash (hex) of the peer's end-entity certificate.
@@ -294,6 +353,18 @@ impl QuicAppManager {
     }
 
     pub async fn recv_frame(recv: &mut RecvStream) -> Result<QuicFrame, KyberError> {
+        let (stream_type, body_len) = Self::recv_frame_header(recv).await?;
+        let body = Self::recv_frame_body(recv, body_len).await?;
+        Ok(QuicFrame { stream_type, body })
+    }
+
+    /// Read ONLY the 5-byte frame header (stream_type + body_len). The server
+    /// authorizes the stream from the header BEFORE reading the body, so an
+    /// unauthenticated peer cannot force the server to buffer up to 1 MiB per
+    /// stream before being rejected (audit finding #8).
+    pub async fn recv_frame_header(
+        recv: &mut RecvStream,
+    ) -> Result<(u8, usize), KyberError> {
         let mut header = [0u8; 5];
         recv.read_exact(&mut header)
             .await
@@ -304,10 +375,24 @@ impl QuicAppManager {
         let body_len = u32::from_be_bytes(len_bytes) as usize;
         if body_len > MAX_MESSAGE_SIZE {
             return Err(KyberError::NetworkError(format!(
-                "Frame body too large: {body_len}"
+                "Frame body too large: {body_len} > {MAX_MESSAGE_SIZE}"
             )));
         }
-        let mut body = Vec::with_capacity((body_len).min(8192));
+        Ok((stream_type, body_len))
+    }
+
+    /// Read the frame body of `body_len` bytes (bounded by MAX_MESSAGE_SIZE,
+    /// already validated in `recv_frame_header`).
+    pub async fn recv_frame_body(
+        recv: &mut RecvStream,
+        body_len: usize,
+    ) -> Result<Vec<u8>, KyberError> {
+        if body_len > MAX_MESSAGE_SIZE {
+            return Err(KyberError::NetworkError(format!(
+                "Frame body too large: {body_len} > {MAX_MESSAGE_SIZE}"
+            )));
+        }
+        let mut body = Vec::with_capacity(body_len.min(8192));
         if body_len > 0 {
             let mut limited = recv.take(body_len as u64);
             limited
@@ -321,7 +406,7 @@ impl QuicAppManager {
                 )));
             }
         }
-        Ok(QuicFrame { stream_type, body })
+        Ok(body)
     }
 }
 

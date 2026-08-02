@@ -24,17 +24,35 @@ pub fn quic_connect(
     ffi::network::quic_connect_impl(host, port, pinned_cert_hash_hex)
 }
 
-/// Bootstrap-pairing connect: permits private (LAN) addresses with an empty
-/// pin because pairing must happen before any pin exists. Loopback is always
-/// blocked. ONLY use from the pairing flow (audit finding #6 — the SSRF guard
+/// Bootstrap-pairing connect: permits private (LAN) addresses. Loopback is
+/// always blocked. `pinned_cert_hash_hex` is the SHA-256 of the server
+/// certificate that was bound into the pairing QR (audit finding #15): when
+/// provided, the client verifies the server cert against it BEFORE the KEM
+/// handshake, so a bootstrap MITM cannot present its own certificate and later
+/// become the pinned identity. Empty (legacy QR without a hash) falls back to
+/// accepting any cert for the handshake — content stays protected by the
+/// app-layer ratchet, but the pin must then be re-derived from a connection
+/// authenticated with the derived session key.
+/// ONLY use from the pairing flow (audit finding #6 — the SSRF guard
 /// previously made LAN pairing unreachable).
 #[uniffi::export]
 pub fn quic_connect_pairing_bootstrap(
     host: String,
     port: u16,
+    pinned_cert_hash_hex: String,
 ) -> Result<bool, KyberError> {
     ensure_panic_hook_installed();
-    ffi::network::quic_connect_pairing_bootstrap_impl(host, port)
+    ffi::network::quic_connect_pairing_bootstrap_impl(host, port, pinned_cert_hash_hex)
+}
+
+/// SHA-256 hash (hex) of the desktop server's own identity certificate.
+/// Embedded in the pairing QR so the phone pins the certificate bound to the
+/// QR rather than the certificate observed on a (possibly MITM'd) bootstrap
+/// connection (audit finding #15).
+#[uniffi::export]
+pub fn quic_server_cert_hash() -> Option<String> {
+    ensure_panic_hook_installed();
+    crate::quic_app::server_cert_sha256()
 }
 
 /// Post-pairing connect that presents a per-install client identity certificate

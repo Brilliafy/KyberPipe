@@ -37,11 +37,13 @@ pub fn ensure_panic_hook_installed() {
         std::panic::set_hook(Box::new(move |info| {
             eprintln!("[CRITICAL ERROR] Panic occurred in core-crypto native layer: {info}");
             prev_hook(info);
-            // Never unwind across the C ABI (UB). Abort — except in this crate's
-            // own test binary, where the test harness must observe the failure.
-            if !cfg!(test) {
-                std::process::abort();
-            }
+            // Do NOT abort. UniFFI's generated scaffolding wraps every exported
+            // function in `panic::catch_unwind` and converts a panic into a
+            // CALL_PANIC status, so a panic inside an FFI call is contained and
+            // returned to the caller as a structured error — it never unwinds
+            // across the C ABI. Aborting here would kill the whole app (and its
+            // in-memory key material) for panics that are fully recoverable
+            // (audit finding #13).
         }));
     });
 }
@@ -277,6 +279,53 @@ pub fn ratchet_init_session(
     Ok("Session initialized".to_string())
 }
 
+/// Initialize a Double Ratchet session using the caller's OWN pairing keypair
+/// as the ratchet's initial DH identity. This is the correct production entry
+/// point (audit finding #1): the peer encapsulates rekey payloads to our
+/// pairing public keys, so decapsulation must use the matching pairing private
+/// keys — never a fresh, unexchanged keypair.
+///
+/// `our_x25519_pk`, `our_x25519_sk`, `our_mlkem_pk`, `our_mlkem_sk` are the
+/// caller's own hybrid keypair (the public halves exchanged during pairing).
+#[uniffi::export]
+pub fn ratchet_init_session_with_keypair(
+    peer_identity: String,
+    master_shared_secret: Vec<u8>,
+    is_initiator: bool,
+    our_x25519_pk: Vec<u8>,
+    our_x25519_sk: Vec<u8>,
+    our_mlkem_pk: Vec<u8>,
+    our_mlkem_sk: Vec<u8>,
+    peer_x25519_pk: Vec<u8>,
+    peer_mlkem_pk: Vec<u8>,
+) -> Result<String, KyberError> {
+    ensure_panic_hook_installed();
+    let x25519 = if peer_x25519_pk.is_empty() {
+        None
+    } else {
+        Some(peer_x25519_pk.as_slice())
+    };
+    let mlkem = if peer_mlkem_pk.is_empty() {
+        None
+    } else {
+        Some(peer_mlkem_pk.as_slice())
+    };
+    ratchet_ffi::ratchet_init_session_with_keypair_impl(
+        &peer_identity,
+        &master_shared_secret,
+        is_initiator,
+        Some((
+            our_x25519_pk,
+            our_x25519_sk,
+            our_mlkem_pk,
+            our_mlkem_sk,
+        )),
+        x25519,
+        mlkem,
+    )?;
+    Ok("Session initialized".to_string())
+}
+
 #[uniffi::export]
 pub fn ratchet_remove_session(peer_identity: String) -> bool {
     ensure_panic_hook_installed();
@@ -299,6 +348,52 @@ pub fn ratchet_encrypt_message(
 ) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_encrypt_message_impl(&peer_identity, &plaintext)
+}
+
+/// Encrypt a plaintext and return the ratchet message as a BINARY TLV frame
+/// (audit finding #12). The binary framing is the single cross-platform
+/// serialization contract — no hex-in-JSON drift surface and ~2x smaller than
+/// hex-encoded fields.
+#[uniffi::export]
+pub fn ratchet_encrypt_message_binary(
+    peer_identity: String,
+    plaintext: Vec<u8>,
+) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    let msg = ratchet_ffi::ratchet_encrypt_message_impl(&peer_identity, &plaintext)?;
+    msg.to_binary()
+}
+
+/// Decrypt a ratchet message from a BINARY TLV frame, rekey-aware (audit
+/// finding #12). Handles the same rekey payloads as the hex path.
+#[uniffi::export]
+pub fn ratchet_decrypt_message_binary(
+    peer_identity: String,
+    data: Vec<u8>,
+) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    let msg = crypto::RatchetEncryptedMessage::from_binary(&data)?;
+    if msg.rekey_x25519_pk.is_some()
+        || msg.rekey_mlkem_pk.is_some()
+        || msg.rekey_ciphertext.is_some()
+    {
+        let rekey_x = msg.rekey_x25519_pk.as_deref().map(|s| {
+            <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                expected: 32,
+                got: s.len() as u64,
+            })
+        }).transpose()?;
+        ratchet_ffi::ratchet_decrypt_with_rekey_message_impl(
+            &peer_identity,
+            &msg.nonce,
+            &msg.ciphertext,
+            msg.rekey_ciphertext.as_deref(),
+            rekey_x.as_ref(),
+            msg.rekey_mlkem_pk.as_deref(),
+        )
+    } else {
+        ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &msg.nonce, &msg.ciphertext)
+    }
 }
 
 #[uniffi::export]
@@ -408,6 +503,44 @@ pub fn ratchet_synchronize_session(
 ) -> Result<u64, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_synchronize_session_impl(&peer_identity, target_seq)
+}
+
+/// Build an encrypted `Synchronize` packet carrying our current send counter.
+/// The peer processes it via `ratchet_process_synchronize` — the ONLY path that
+/// honors a resync target (audit finding #4: the plaintext counter in the poll
+/// body is never acted on).
+#[uniffi::export]
+pub fn ratchet_synchronize_packet(
+    peer_identity: String,
+) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_synchronize_packet_impl(&peer_identity)
+}
+
+/// Binary-TLV variant of `ratchet_synchronize_packet` (audit finding #12):
+/// returns the full TLV framing including any rekey payload the packet carried,
+/// so the peer can process it rekey-aware via `ratchet_process_synchronize`.
+#[uniffi::export]
+pub fn ratchet_synchronize_packet_binary(
+    peer_identity: String,
+) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_synchronize_packet_binary_impl(&peer_identity)
+}
+
+/// Process a peer's encrypted Synchronize packet carried as a BINARY TLV:
+/// decrypts it rekey-aware (authenticating the sender and adopting any rekey
+/// payload the packet carried), verifies it is a `Synchronize`, and only then
+/// resyncs our receiving chain to the authenticated target. Returns the number
+/// of skipped messages. Refuses (rate-limited / pending rekey / budget
+/// exhausted) per the audit finding #4 hardening.
+#[uniffi::export]
+pub fn ratchet_process_synchronize(
+    peer_identity: String,
+    data: Vec<u8>,
+) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_process_synchronize_impl(&peer_identity, &data)
 }
 
 /// The receiver's current recv counter — used to build a Synchronize request

@@ -144,6 +144,15 @@ pub fn session_key_destroy(handle: u64) {
     session_handle::session_key_destroy(handle)
 }
 
+/// Destroy EVERY live session key handle, zeroizing all key bytes. Used by the
+/// panic self-destruct path so no handle (not just the desktop's) survives with
+/// its key material in memory (audit finding #16).
+#[uniffi::export]
+pub fn session_key_destroy_all() {
+    ensure_panic_hook_installed();
+    session_handle::session_key_destroy_all()
+}
+
 #[uniffi::export]
 pub fn session_key_encrypt(handle: u64, data: Vec<u8>) -> Result<EncryptedPayload, KyberError> {
     ensure_panic_hook_installed();

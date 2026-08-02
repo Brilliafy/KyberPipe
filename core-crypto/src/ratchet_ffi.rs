@@ -14,10 +14,43 @@ pub(crate) static RATCHET_SESSIONS: LazyLock<
 /// Initialize a Double Ratchet session for a given peer identity.
 /// Returns an error if a session already exists for this peer
 /// (caller must explicitly remove it first to prevent silent overwrite).
+///
+/// The ratchet's initial DH identity is a FRESH, never-exchanged keypair — the
+/// peer encapsulates rekey payloads to our pairing public keys, so decapsulating
+/// with this unrelated private key would permanently desync the session at the
+/// first rekey boundary (audit finding #1). Production callers MUST use
+/// [`ratchet_init_session_with_keypair_impl`] and pass their own pairing keypair.
 pub fn ratchet_init_session_impl(
     peer_identity: &str,
     master_shared_secret: &[u8],
     is_initiator: bool,
+    peer_x25519_pk: Option<&[u8]>,
+    peer_mlkem_pk: Option<&[u8]>,
+) -> Result<(), KyberError> {
+    ratchet_init_session_with_keypair_impl(
+        peer_identity,
+        master_shared_secret,
+        is_initiator,
+        None,
+        peer_x25519_pk,
+        peer_mlkem_pk,
+    )
+}
+
+/// Initialize a Double Ratchet session using the caller's OWN pairing keypair as
+/// the ratchet's initial DH identity (audit finding #1).
+///
+/// `our_keypair` — when `Some` — carries the X25519/ML-KEM secret AND public
+/// halves whose PUBLIC halves were exchanged with the peer during the KEM
+/// pairing handshake. The peer encapsulates rekey payloads to those public keys,
+/// so we must decapsulate with these matching private keys. On Android the
+/// caller passes the pairing keypair the client already holds; on the desktop
+/// the private halves stay in Rust (the pairing handler's stored keypair).
+pub fn ratchet_init_session_with_keypair_impl(
+    peer_identity: &str,
+    master_shared_secret: &[u8],
+    is_initiator: bool,
+    our_keypair: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>, // (x25519_pk, x25519_sk, mlkem_pk, mlkem_sk)
     peer_x25519_pk: Option<&[u8]>,
     peer_mlkem_pk: Option<&[u8]>,
 ) -> Result<(), KyberError> {
@@ -26,9 +59,31 @@ pub fn ratchet_init_session_impl(
         arr.copy_from_slice(pk);
         arr
     });
-    let ratchet = DoubleRatchetState::new(
+    let our_pair = match our_keypair {
+        Some((xpk, xsk, mpk, msk)) => {
+            let mut x25519_pk = [0u8; 32];
+            let mut x25519_sk = [0u8; 32];
+            if xpk.len() != 32 || xsk.len() != 32 {
+                return Err(KyberError::InvalidKeyLength {
+                    expected: 32,
+                    got: xpk.len() as u64,
+                });
+            }
+            x25519_pk.copy_from_slice(&xpk);
+            x25519_sk.copy_from_slice(&xsk);
+            crate::crypto::HybridKeyPair {
+                x25519_pk,
+                x25519_sk,
+                mlkem_pk: mpk,
+                mlkem_sk: msk,
+            }
+        }
+        None => crate::crypto::generate_hybrid_keypair(),
+    };
+    let ratchet = DoubleRatchetState::new_with_keypair(
         master_shared_secret,
         is_initiator,
+        our_pair,
         x25519_arr,
         peer_mlkem_pk.map(|v| v.to_vec()),
     )?;
@@ -225,14 +280,119 @@ pub fn ratchet_import_session_impl(
     Ok(())
 }
 
+/// Minimum interval between accepted resyncs for the same peer. A compromised
+/// peer that somehow reaches the (now authenticated) resync path cannot spam
+/// polls to force repeated forward jumps (audit finding #4).
+const SYNC_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+static LAST_SYNC_AT: std::sync::LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Resynchronize a ratchet session after the peer's authenticated Synchronize
 /// message: re-derive skip keys for the missed range and advance the receiving
 /// chain. Returns the number of messages skipped.
+///
+/// Audit finding #4: the resync is rate-limited per peer (15s window). The
+/// generation-blindness and unbounded-cumulative problems are handled inside
+/// `DoubleRatchetState::resync_receiving_chain` (pending-rekey refusal +
+/// persisted cumulative budget).
 pub fn ratchet_synchronize_session_impl(
     peer_identity: &str,
     target_seq: u64,
 ) -> Result<u64, KyberError> {
+    // Rate-limit per peer BEFORE touching the session.
+    {
+        let mut last = LAST_SYNC_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = last.get(peer_identity) {
+            if at.elapsed() < SYNC_RATE_WINDOW {
+                return Err(KyberError::CryptoError(format!(
+                    "Synchronize rate-limited for peer {peer_identity} — retry in {}s",
+                    SYNC_RATE_WINDOW.as_secs()
+                )));
+            }
+        }
+        last.insert(peer_identity.to_string(), std::time::Instant::now());
+    }
     with_ratchet_session(peer_identity, |ratchet| ratchet.resync_receiving_chain(target_seq))
+}
+
+/// Build an encrypted `KyberMessage::Synchronize` packet carrying the current
+/// send counter. The peer processes it via
+/// [`ratchet_process_synchronize_impl`] — the ONLY path that honors a resync
+/// target (audit finding #4: the plaintext counter in the poll body is never
+/// acted on).
+pub fn ratchet_synchronize_packet_impl(
+    peer_identity: &str,
+) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
+    with_ratchet_session(peer_identity, |ratchet| {
+        let msg = crate::packets::KyberMessage::Synchronize {
+            send_count: ratchet.send_message_count,
+        };
+        ratchet.ratchet_encrypt(msg.to_json()?.as_bytes())
+    })
+}
+
+/// Binary-TLV variant of [`ratchet_synchronize_packet_impl`] — returns the full
+/// TLV framing (including any rekey payload the message carried), so the peer
+/// can process it rekey-aware (audit finding #12).
+pub fn ratchet_synchronize_packet_binary_impl(
+    peer_identity: &str,
+) -> Result<Vec<u8>, KyberError> {
+    ratchet_synchronize_packet_impl(peer_identity)?.to_binary()
+}
+
+/// Process a peer's encrypted Synchronize packet carried as a BINARY TLV
+/// (audit finding #12): decrypts it rekey-aware with our receiving chain
+/// (authenticating the sender and adopting any DH rekey payload the packet
+/// carried at seq 100/200), verifies the packet type, and only then resyncs
+/// the receiving chain to the authenticated target. This is the ONLY resync
+/// path the wire protocol should use (audit finding #4).
+pub fn ratchet_process_synchronize_impl(
+    peer_identity: &str,
+    data: &[u8],
+) -> Result<u64, KyberError> {
+    let msg = crate::crypto::RatchetEncryptedMessage::from_binary(data)?;
+    if msg.nonce.len() != 12 {
+        return Err(KyberError::DecryptionFailed("Nonce must be 12 bytes".into()));
+    }
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(&msg.nonce);
+    // Decrypt — this authenticates the packet (AEAD) and positions the
+    // receiving chain within max_skip. If the gap already exceeds max_skip the
+    // decrypt fails and NO resync happens (session must be re-paired), which is
+    // the secure behavior.
+    let plaintext = with_ratchet_session(peer_identity, |ratchet| {
+        if msg.rekey_x25519_pk.is_some()
+            || msg.rekey_mlkem_pk.is_some()
+            || msg.rekey_ciphertext.is_some()
+        {
+            let rekey_x = msg.rekey_x25519_pk.as_deref().map(|s| {
+                <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                    expected: 32,
+                    got: s.len() as u64,
+                })
+            }).transpose()?;
+            ratchet.ratchet_decrypt_with_rekey(
+                &nonce_arr,
+                &msg.ciphertext,
+                msg.rekey_ciphertext.as_deref(),
+                rekey_x.as_ref(),
+                msg.rekey_mlkem_pk.as_deref(),
+            )
+        } else {
+            ratchet.ratchet_decrypt(&nonce_arr, &msg.ciphertext)
+        }
+    })?;
+    let msg = crate::packets::KyberMessage::from_json(&String::from_utf8_lossy(&plaintext))
+        .map_err(|_| {
+            KyberError::CryptoError("Decrypted Synchronize payload is not a valid packet".into())
+        })?;
+    let crate::packets::KyberMessage::Synchronize { send_count } = msg else {
+        return Err(KyberError::CryptoError(
+            "Decrypted payload is not a Synchronize packet".into(),
+        ));
+    };
+    ratchet_synchronize_session_impl(peer_identity, send_count)
 }
 
 /// The receiver's current recv counter, used to build a Synchronize request
