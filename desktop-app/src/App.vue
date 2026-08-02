@@ -154,6 +154,14 @@ const loadPairingConfig = async () => {
 };
 
 const handleDeleteConnection = async () => {
+  // Destructive backend action — request a single-use user-gesture token after
+  // surfacing a native confirmation (audit finding #9).
+  if (!window.confirm("Delete this connection? This clears the session key, ratchet state, and all pairing data on this desktop.")) {
+    return;
+  }
+  const token = await invoke<string>("request_privilege_token", {
+    action: "delete_connection",
+  });
   isPaired.value = false;
   pairedDeviceName.value = "";
   pairedDevicePicture.value = "";
@@ -161,6 +169,7 @@ const handleDeleteConnection = async () => {
   remoteMethod.value = "";
   localActive.value = false;
   remoteActive.value = false;
+  await invoke("delete_connection", { token });
   await invoke("set_connection_status_full", {
     status: "DISCONNECTED",
     method: "None",
