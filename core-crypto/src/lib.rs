@@ -100,28 +100,53 @@ static IO_RUNTIME: std::sync::LazyLock<std::sync::Mutex<Option<tokio::runtime::R
 
 /// FFI runtime for short-lived blocking calls from UniFFI (encrypt, decrypt, key ops).
 /// Separate from IO_RUNTIME to prevent worker-thread exhaustion under concurrent FFI load.
-static FFI_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("kyberpipe-ffi")
-        .worker_threads(2)
-        .max_blocking_threads(64)
-        .build()
-        .expect("Failed to create FFI runtime")
-});
+/// Stored as `Mutex<Option<Runtime>>` so `shutdown_ffi_runtime()` (test teardown) can take
+/// ownership and stop the worker threads — a plain `LazyLock<Runtime>` can never be shut
+/// down and would keep a test process alive forever.
+static FFI_RUNTIME: std::sync::LazyLock<std::sync::Mutex<Option<tokio::runtime::Runtime>>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("kyberpipe-ffi")
+                .worker_threads(2)
+                .max_blocking_threads(64)
+                .build()
+                .expect("Failed to create FFI runtime"),
+        ))
+    });
 
 /// Block on a future using the FFI runtime. Used for short-lived UniFFI bridge calls.
 pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
-    FFI_RUNTIME.block_on(fut)
+    let guard = FFI_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .expect("FFI runtime was shut down (shutdown_ffi_runtime)")
+        .block_on(fut)
 }
 
 /// Block on a future with timeout using the FFI runtime.
 /// Returns `None` if the timeout expires. Use from FFI boundaries (e.g.,
 /// Android JNI) where blocking indefinitely would exhaust the platform thread pool.
 pub fn block_on_sync_timeout<F: Future>(fut: F, timeout: std::time::Duration) -> Option<F::Output> {
-    FFI_RUNTIME
+    let guard = FFI_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .expect("FFI runtime was shut down (shutdown_ffi_runtime)")
         .block_on(tokio::time::timeout(timeout, fut))
         .ok()
+}
+
+/// Shut down the FFI runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide
+/// LazyLock; calling this in production would break every UniFFI bridge call.
+/// The e2e test calls it so the worker threads do not keep the test process
+/// alive. Bounded blocking shutdown (drain up to 5s, then hard-stop).
+pub fn shutdown_ffi_runtime() {
+    if let Ok(mut guard) = FFI_RUNTIME.lock() {
+        if let Some(rt) = guard.take() {
+            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+        }
+    }
 }
 
 /// Block on a future using the IO runtime. Used for long-lived tasks (accept loop).

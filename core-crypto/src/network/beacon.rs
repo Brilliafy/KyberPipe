@@ -68,10 +68,13 @@ pub async fn send_p2p_beacon(
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
     let nonce_hex = hex::encode(nonce);
 
-    // Sanitize payload: replace colons with underscores to prevent delimiter
-    // injection if device_name contains ':' characters.
-    let sanitized_payload = payload_str.replace(':', "_");
-    let signed_region = format!("{sanitized_payload}:{timestamp}:{nonce_hex}");
+    // The payload is a colon-delimited field set (`pk:ip[:...]`) produced by
+    // trusted callers (sync_server emits `pk_hash:local_ip`). The payload is
+    // SIGNED below, so a tampered or injected delimiter can never slip in
+    // undetected — sanitization is neither needed nor safe (replacing ':' with
+    // '_' corrupted the field structure and made every receiver unable to
+    // parse the beacon).
+    let signed_region = format!("{payload_str}:{timestamp}:{nonce_hex}");
 
     let (pk, sk) = device_signing_key();
     let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), &sk).unwrap_or_default();
@@ -109,6 +112,111 @@ pub async fn listen_for_beacons(
 /// (a device key learned during pairing), beacons whose ML-DSA signature does
 /// not verify against that key are dropped. The signed region is
 /// `pk:ip:name:timestamp:nonce`.
+/// Parse and validate a UDP discovery beacon payload (the portion after
+/// `BEACON_MAGIC:`). Returns the discovered host's `(pk_hash, ip, display-name)`
+/// or None when the beacon is malformed, stale (older than 60 s), spoofed
+/// (declared IP != source socket), or fails ML-DSA signature verification.
+///
+/// Wire formats accepted:
+///  - Signed (identity-minimal, current): `pk:ip:ts:nonce:signing_pk:sig`
+///  - Legacy unsigned (pre-signing): `pk:ip`
+/// The device name is deliberately NOT part of either format — the unauthenticated
+/// discovery channel must not disclose identity; receivers show a neutral name.
+fn parse_beacon_payload(
+    payload: &str,
+    source_ip: &std::net::IpAddr,
+    expected_signing_pk: Option<&[u8]>,
+) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = payload.splitn(7, ':').collect();
+    if parts.len() >= 6 {
+        // Signed format: pk:ip:ts:nonce:signing_pk:sig
+        let host_pk = parts[0].to_string();
+        let local_ip = parts[1].to_string();
+        let ts_str = parts[2];
+        let nonce_hex = parts[3];
+        let signing_pk_hex = parts[4];
+        let sig_hex = parts[5];
+        // Timestamp replay protection (beacon max age: 60s).
+        if let Ok(ts) = ts_str.parse::<u64>() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.saturating_sub(ts) > 60 {
+                warn!(
+                    "Stale beacon from {} ({}s old) — discarding",
+                    source_ip,
+                    now.saturating_sub(ts)
+                );
+                return None;
+            }
+        }
+        // Anti-spoofing: declared IP must equal the source socket address
+        // (mirrors the Android MdnsBeaconListener check).
+        if local_ip != source_ip.to_string() {
+            warn!(
+                "Beacon IP mismatch: declared={} source={} — dropping",
+                local_ip, source_ip
+            );
+            return None;
+        }
+        // The signed region is the four fields BEFORE the embedded signing key
+        // — reconstruct exactly what the sender signed (audit finding: the
+        // sender must NOT colon-sanitize, or the reconstruction drifts).
+        let signed_region = format!("{host_pk}:{local_ip}:{ts_str}:{nonce_hex}");
+        let sig_ok = match (hex::decode(sig_hex), hex::decode(signing_pk_hex)) {
+            (Ok(sig), Ok(pk)) => crate::crypto::verify_mldsa_signature(
+                signed_region.as_bytes(),
+                &sig,
+                &pk,
+            ),
+            _ => false,
+        };
+        if !sig_ok {
+            warn!(
+                "Beacon signature verification failed for {} — dropping",
+                source_ip
+            );
+            return None;
+        }
+        // When a trusted device key is known (learned during pairing), the
+        // embedded signing key must MATCH it; an impostor key is dropped.
+        if let Some(expected) = expected_signing_pk {
+            if expected
+                != hex::decode(&signing_pk_hex)
+                    .unwrap_or_default()
+                    .as_slice()
+            {
+                warn!("Beacon signing key does not match the paired device key — dropping");
+                return None;
+            }
+        } else {
+            // Discovery phase: the self-consistent signature is accepted; the
+            // signing key is adopted during pairing.
+            info!(
+                "Beacon from {} (discovery): sign_pk={}",
+                source_ip,
+                &signing_pk_hex[..16.min(signing_pk_hex.len())]
+            );
+        }
+        return Some((host_pk, local_ip, "Desktop".to_string()));
+    }
+    if parts.len() >= 2 {
+        // Legacy unsigned format (pre-signing): pk:ip
+        let host_pk = parts[0].to_string();
+        let local_ip = parts[1].to_string();
+        if local_ip != source_ip.to_string() {
+            warn!(
+                "Beacon IP mismatch: declared={} source={} — dropping",
+                local_ip, source_ip
+            );
+            return None;
+        }
+        return Some((host_pk, local_ip, "Desktop".to_string()));
+    }
+    None
+}
+
 pub async fn listen_for_beacons_with_expected_key(
     bind_port: u16,
     timeout_secs: u64,
@@ -142,93 +250,16 @@ pub async fn listen_for_beacons_with_expected_key(
                 if raw.starts_with(BEACON_MAGIC) {
                     let payload = &raw[BEACON_MAGIC.len() + 1..];
                     if let Ok(s) = String::from_utf8(payload.to_vec()) {
-                        // Extended format: pk:ip:name:ts:nonce:signing_pk:sig
-                        let parts: Vec<&str> = s.splitn(8, ':').collect();
-                        if parts.len() >= 7 {
-                            let host_pk = parts[0].to_string();
-                            let local_ip = parts[1].to_string();
-                            let device_name = parts[2].to_string();
-                            let ts_str = parts[3];
-                            let nonce_hex = parts[4];
-                            let signing_pk_hex = parts[5];
-                            let sig_hex = parts[6];
-                            // Validate timestamp for replay protection (beacon max age: 60s)
-                            if let Ok(ts) = ts_str.parse::<u64>() {
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs();
-                                if now.saturating_sub(ts) > 60 {
-                                    warn!(
-                                        "Stale beacon from {} ({}s old) — discarding",
-                                        addr,
-                                        now.saturating_sub(ts)
-                                    );
-                                    continue;
-                                }
-                            }
-                            // Anti-spoofing: reject beacons whose declared IP does
-                            // not match the source socket address (mirrors the
-                            // Android MdnsBeaconListener check).
-                            if local_ip != addr.ip().to_string() {
-                                warn!(
-                                    "Beacon IP mismatch: declared={} source={} — dropping",
-                                    local_ip,
-                                    addr.ip()
-                                );
-                                continue;
-                            }
-                            // Signature verification against a known device key.
-                            if let Some(expected) = &expected_pk {
-                                let signed_region = format!(
-                                    "{host_pk}:{local_ip}:{device_name}:{ts_str}:{nonce_hex}"
-                                );
-                                let ok = match (hex::decode(sig_hex), hex::decode(signing_pk_hex)) {
-                                    (Ok(sig), Ok(pk)) => crate::crypto::verify_mldsa_signature(
-                                        signed_region.as_bytes(),
-                                        &sig,
-                                        &pk,
-                                    ),
-                                    _ => false,
-                                };
-                                if !ok {
-                                    warn!(
-                                        "Beacon signature verification failed for {} — dropping",
-                                        addr
-                                    );
-                                    continue;
-                                }
-                                let _ = expected;
-                            } else {
-                                // No expected key yet (discovery phase): accept the
-                                // beacon; the signing key is adopted during pairing.
-                                info!(
-                                    "Beacon from {} (unverified discovery): sign_pk={}",
-                                    addr,
-                                    &signing_pk_hex[..16.min(signing_pk_hex.len())]
-                                );
-                            }
+                        if let Some((host_pk, local_ip, display_name)) =
+                            parse_beacon_payload(&s, &addr.ip(), expected_pk.as_deref())
+                        {
                             info!(
                                 "Beacon received from {}: host={} ip={}",
                                 addr,
                                 &host_pk[..16.min(host_pk.len())],
                                 local_ip
                             );
-                            results.push((host_pk, local_ip, device_name));
-                        } else if parts.len() >= 2 {
-                            // Legacy unsigned format (pre-signing): pk:ip:name
-                            let host_pk = parts[0].to_string();
-                            let local_ip = parts.get(1).unwrap_or(&"").to_string();
-                            let device_name = parts.get(2).unwrap_or(&"Desktop").to_string();
-                            if local_ip != addr.ip().to_string() {
-                                warn!(
-                                    "Beacon IP mismatch: declared={} source={} — dropping",
-                                    local_ip,
-                                    addr.ip()
-                                );
-                                continue;
-                            }
-                            results.push((host_pk, local_ip, device_name));
+                            results.push((host_pk, local_ip, display_name));
                         }
                     }
                 }
@@ -247,4 +278,85 @@ pub async fn listen_for_beacons_with_expected_key(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Build a signed beacon payload exactly as `send_p2p_beacon` does
+    /// (colon-delimited, NO sanitization). Returns the payload and the signing
+    /// keypair so a test can exercise tampering / key-mismatch paths.
+    fn build_signed(payload: &str) -> (String, Vec<u8>, Vec<u8>) {
+        let (pk, sk) = crate::crypto::generate_mldsa_keypair();
+        let ts = now_secs();
+        let nonce = hex::encode([0x11u8; 8]);
+        let signed_region = format!("{payload}:{ts}:{nonce}");
+        let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), &sk).unwrap();
+        (
+            format!("{payload}:{ts}:{nonce}:{}:{}", hex::encode(&pk), hex::encode(&sig)),
+            pk,
+            sk,
+        )
+    }
+
+    #[test]
+    fn signed_beacon_roundtrip_parses() {
+        let src: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        // The payload is `pk_hash:local_ip` — no device name (identity-minimal).
+        let (payload, pk, _sk) = build_signed("aabbccddeeff0011:192.168.1.50");
+        let parsed = parse_beacon_payload(&payload, &src, None).expect("valid beacon");
+        assert_eq!(parsed, ("aabbccddeeff0011".to_string(), "192.168.1.50".to_string(), "Desktop".to_string()));
+        // The same beacon with the KNOWN trusted key also parses.
+        assert!(parse_beacon_payload(&payload, &src, Some(&pk)).is_some());
+    }
+
+    #[test]
+    fn signed_beacon_rejects_forgery_and_spoofing() {
+        let src: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        let (mut payload, _pk, _sk) = build_signed("aabb:192.168.1.50");
+        // Tamper one byte of the signature — signature verification must fail.
+        let sig_start = payload.rfind(':').unwrap();
+        let tampered = payload.clone();
+        payload = format!(
+            "{}:{}",
+            &tampered[..sig_start + 1],
+            if tampered.as_bytes()[tampered.len() - 1] == b'0' { "1" } else { "0" }
+        );
+        assert!(parse_beacon_payload(&payload, &src, None).is_none(), "tampered sig must be rejected");
+        // Declared IP that does not match the source socket is spoofed.
+        let (payload2, _, _) = build_signed("aabb:10.0.0.99");
+        let other: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        assert!(parse_beacon_payload(&payload2, &other, None).is_none(), "IP mismatch must be rejected");
+        // A beacon signed by an UNKNOWN key is rejected when a trusted key is expected.
+        let (payload3, _, _) = build_signed("aabb:192.168.1.50");
+        let (trusted_pk, _) = crate::crypto::generate_mldsa_keypair();
+        assert!(
+            parse_beacon_payload(&payload3, &src, Some(&trusted_pk)).is_none(),
+            "impostor signing key must be rejected"
+        );
+    }
+
+    #[test]
+    fn stale_and_legacy_beacons() {
+        let src: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        // Stale timestamp (> 60 s) is rejected.
+        let stale = format!("aabb:192.168.1.50:{}:deadbeef:{}:{}", now_secs() - 120, "00", "00");
+        assert!(parse_beacon_payload(&stale, &src, None).is_none(), "stale beacon must be rejected");
+        // Legacy unsigned `pk:ip` is still accepted (discovery fallback).
+        assert_eq!(
+            parse_beacon_payload("aabb:192.168.1.50", &src, None),
+            Some(("aabb".to_string(), "192.168.1.50".to_string(), "Desktop".to_string()))
+        );
+        // Malformed / truncated payloads are rejected.
+        assert!(parse_beacon_payload("", &src, None).is_none());
+        assert!(parse_beacon_payload("onlyone", &src, None).is_none());
+    }
 }

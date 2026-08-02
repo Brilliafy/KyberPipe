@@ -8,6 +8,15 @@ use std::sync::OnceLock;
 
 type PersistJob = (String, String);
 
+/// (sender, writer-thread) pair. The sender is held in a `Mutex<Option<_>>` so
+/// a test teardown can drop it — dropping the last sender closes the channel,
+/// the writer's `rx.recv()` errors, and the thread exits instead of keeping
+/// the test process alive forever.
+static PERSIST_STATE: OnceLock<(
+    Mutex<Option<mpsc::Sender<PersistJob>>>,
+    Mutex<Option<std::thread::JoinHandle<()>>>,
+)> = OnceLock::new();
+
 /// Non-blocking, COALESCING persistence channel (audit finding #22). The
 /// consumer drains the queue on every wake and writes only the LATEST value
 /// per path, so a slow filesystem never blocks a Tauri command on the main
@@ -16,11 +25,14 @@ type PersistJob = (String, String);
 /// `persist()` is a pure enqueue that can never block even under a full
 /// buffer; the drain-and-coalesce consumer bounds memory in practice (only one
 /// value per path is retained at write time).
-fn persist_channel() -> &'static mpsc::Sender<PersistJob> {
-    static CHAN: OnceLock<mpsc::Sender<PersistJob>> = OnceLock::new();
-    CHAN.get_or_init(|| {
+fn persist_channel(
+) -> &'static (
+    Mutex<Option<mpsc::Sender<PersistJob>>>,
+    Mutex<Option<std::thread::JoinHandle<()>>>,
+) {
+    PERSIST_STATE.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<PersistJob>();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut latest: HashMap<String, String> = HashMap::new();
             while let Ok((path, data)) = rx.recv() {
                 latest.insert(path, data);
@@ -34,7 +46,7 @@ fn persist_channel() -> &'static mpsc::Sender<PersistJob> {
                 }
             }
         });
-        tx
+        (Mutex::new(Some(tx)), Mutex::new(Some(handle)))
     })
 }
 
@@ -42,7 +54,32 @@ fn persist_channel() -> &'static mpsc::Sender<PersistJob> {
 /// on an unbounded channel never blocks, so a slow FS or a busy persistence
 /// thread can never stall a Tauri command (audit finding #22).
 fn persist(path: String, data: String) {
-    let _ = persist_channel().send((path, data));
+    let (tx, _handle) = persist_channel();
+    if let Some(sender) = tx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        let _ = sender.send((path, data));
+    }
+}
+
+/// TEST/TEARDOWN ONLY: drop the sender (closing the channel, so the writer
+/// thread's `recv()` errors and it exits) and join the writer. After this call
+/// `persist()` is a no-op. Without this, the writer thread blocks on `recv()`
+/// forever and keeps the test process alive (the e2e's save_settings creates
+/// it via the first persist call).
+pub fn shutdown_persist_for_tests() {
+    if let Some((tx, handle)) = PERSIST_STATE.get() {
+        if let Ok(mut s) = tx.lock() {
+            *s = None;
+        }
+        if let Ok(mut h) = handle.lock() {
+            if let Some(handle) = h.take() {
+                let _ = handle.join();
+            }
+        }
+    }
 }
 
 pub fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
