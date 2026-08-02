@@ -155,7 +155,17 @@ export function useConnection() {
     }
   };
 
-  const handleDeleteConnection = async () => {
+const handleDeleteConnection = async () => {
+    // The renderer surfaces a user-gesture confirmation, then requests the
+    // single-use privilege token so the destructive backend command is gated
+    // like every other destructive action (audit finding #9).
+    const confirmed = window.confirm(
+      "Delete this connection? This clears the session key, ratchet state, and all pairing data on this desktop."
+    );
+    if (!confirmed) return;
+    const token = await invoke<string>("request_privilege_token", {
+      action: "delete_connection",
+    });
     isPaired.value = false;
     pairedDeviceName.value = "";
     pairedDevicePicture.value = "";
@@ -163,7 +173,7 @@ export function useConnection() {
     remoteMethod.value = "";
     localActive.value = false;
     remoteActive.value = false;
-    await invoke("delete_connection");
+    await invoke("delete_connection", { token });
     await invoke("set_connection_status_full", {
       status: "DISCONNECTED",
       method: "None",

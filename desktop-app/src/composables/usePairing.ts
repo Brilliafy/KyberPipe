@@ -67,6 +67,53 @@ export function usePairing(deps: PairingDeps) {
   const manualIpInput = ref("");
   const manualPortInput = ref("9876");
 
+  /// Fetch the QR pairing nonce issued by the backend (audit finding #5) and the
+  /// server certificate hash (audit finding #15). The renderer must embed BOTH
+  /// in every pairing QR payload: the phone echoes the nonce so the server's
+  /// blind-race check passes, and pins the QR-bound cert hash so a bootstrap
+  /// MITM cannot become the permanent trusted identity.
+  const fetchQrBindingFields = async (): Promise<Record<string, string>> => {
+    let nonce = "";
+    let serverCertHash = "";
+    try {
+      nonce = (await invoke<string>("get_pairing_nonce")) || "";
+    } catch (e) {
+      console.warn("get_pairing_nonce failed:", e);
+    }
+    try {
+      serverCertHash = (await invoke<string>("get_server_cert_hash")) || "";
+    } catch (e) {
+      console.warn("get_server_cert_hash failed:", e);
+    }
+    return {
+      pairing_nonce_hex: nonce,
+      server_cert_hash: serverCertHash,
+    };
+  };
+
+  /// Merge the QR binding fields into a payload object, dropping empty entries.
+  const withQrBinding = (
+    payload: Record<string, unknown>,
+    binding: Record<string, string>,
+  ): Record<string, unknown> => {
+    const merged: Record<string, unknown> = { ...payload };
+    if (binding.pairing_nonce_hex) merged.pairing_nonce_hex = binding.pairing_nonce_hex;
+    if (binding.server_cert_hash) merged.server_cert_hash = binding.server_cert_hash;
+    return merged;
+  };
+
+  /// Render a QR payload with the binding fields already merged.
+  const buildPairingQr = async (payload: Record<string, unknown>) => {
+    const binding = await fetchQrBindingFields();
+    pairingQrData.value = JSON.stringify(withQrBinding(payload, binding));
+    pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
+      margin: 2,
+      scale: 6,
+      errorCorrectionLevel: "L",
+    });
+    showPairingQr.value = true;
+  };
+
   // Firewall state
   const showFirewallModal = ref(false);
   const firewallStatus = ref<FirewallStatus | null>(null);
@@ -154,7 +201,7 @@ export function usePairing(deps: PairingDeps) {
     if (method === "wifi_direct") {
       try {
         const p2pInfo = await invoke<any>("create_p2p_group");
-        pairingQrData.value = JSON.stringify({
+        await buildPairingQr({
           method: "p2p",
           ssid: p2pInfo.ssid,
           pass: p2pInfo.passphrase,
@@ -163,29 +210,17 @@ export function usePairing(deps: PairingDeps) {
           pqc_pub: keyPair.value?.mlkem_pk_hex || "",
           x25519_pub: keyPair.value?.x25519_pk_hex || "",
         });
-        pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
-          margin: 2,
-          scale: 6,
-          errorCorrectionLevel: "L",
-        });
-        showPairingQr.value = true;
       } catch (e) {
         console.error("P2P group creation failed:", e);
       }
     } else if (method === "mdns") {
-      pairingQrData.value = JSON.stringify({
+      await buildPairingQr({
         method: "mdns",
         service: "_kyberpipe._tcp.local",
         name: deviceName.value,
         pqc_pub: keyPair.value?.mlkem_pk_hex || "",
         x25519_pub: keyPair.value?.x25519_pk_hex || "",
       });
-      pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
-        margin: 2,
-        scale: 6,
-        errorCorrectionLevel: "L",
-      });
-      showPairingQr.value = true;
     } else if (method === "manual_ip") {
       showManualIpDialog.value = true;
     }
@@ -197,18 +232,12 @@ export function usePairing(deps: PairingDeps) {
     if (method === "wormhole") {
       try {
         const code = await invoke<string>("generate_wormhole_code");
-        pairingQrData.value = JSON.stringify({
+        await buildPairingQr({
           method: "wormhole",
           code: code,
           pqc_pub: keyPair.value?.mlkem_pk_hex || "",
           x25519_pub: keyPair.value?.x25519_pk_hex || "",
         });
-        pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
-          margin: 2,
-          scale: 6,
-          errorCorrectionLevel: "L",
-        });
-        showPairingQr.value = true;
       } catch (e) {
         console.error("Wormhole code generation failed:", e);
       }
@@ -216,19 +245,13 @@ export function usePairing(deps: PairingDeps) {
       try {
         const onion = await invoke<any>("create_tor_onion");
         if (onion.onion_address) {
-          pairingQrData.value = JSON.stringify({
+          await buildPairingQr({
             method: "tor",
             onion: onion.onion_address,
             auth_key: onion.auth_key,
             pqc_pub: keyPair.value?.mlkem_pk_hex || "",
             x25519_pub: keyPair.value?.x25519_pk_hex || "",
           });
-          pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
-            margin: 2,
-            scale: 6,
-            errorCorrectionLevel: "L",
-          });
-          showPairingQr.value = true;
         }
       } catch (e) {
         console.error("Tor onion creation failed:", e);
@@ -239,20 +262,14 @@ export function usePairing(deps: PairingDeps) {
   const submitManualPairing = async () => {
     const ip = manualIpInput.value.trim();
     if (!ip) return;
-    pairingQrData.value = JSON.stringify({
+    await buildPairingQr({
       method: "manual_ip",
       host: ip,
       port: parseInt(manualPortInput.value) || 9876,
       pqc_pub: keyPair.value?.mlkem_pk_hex || "",
       x25519_pub: keyPair.value?.x25519_pk_hex || "",
     });
-    pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, {
-      margin: 2,
-      scale: 6,
-      errorCorrectionLevel: "L",
-    });
     showManualIpDialog.value = false;
-    showPairingQr.value = true;
   };
 
 
