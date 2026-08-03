@@ -46,6 +46,13 @@ pub(crate) async fn handle_unpair(s: Arc<AppState>, peer_cert_hash: String, peer
     if !peer_id.is_empty() {
         core_crypto::ratchet_remove_session(peer_id.clone());
     }
+    // Audit KYP-2026-02 #15: unpair must ALSO clear the pairing keypair
+    // REGISTRY (not just the in-memory AppState copy) and destroy every
+    // opaque keypair/KEM handle so a later re-pair can never observe a stale
+    // registered keypair or a secret-bearing handle.
+    core_crypto::clear_pq_pairing_registry();
+    core_crypto::destroy_all_pq_keypair_handles();
+    core_crypto::destroy_all_kem_handles();
     let handle = super::DESKTOP_SESSION_KEY_HANDLE.swap(0, std::sync::atomic::Ordering::AcqRel);
     if handle != 0 {
         core_crypto::session_key_destroy(handle);

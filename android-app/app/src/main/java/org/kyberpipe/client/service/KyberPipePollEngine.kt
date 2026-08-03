@@ -1,7 +1,6 @@
 package org.kyberpipe.client.service
 
 import android.content.Context
-import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +64,41 @@ object KyberPipePollEngine {
     private var loopScope: CoroutineScope? = null
     private var currentSettings: SettingsManager? = null
 
+    /// AUDIT FINDING #20: the wire protocol (request build + response parse +
+    /// update emission) lives in the extracted [PollTransport] class. The
+    /// engine owns ONLY the loop, reconnect gating and persistence.
+    private var transport: PollTransport? = null
+
+    /// Timestamp of the last SUCCESSFUL connectWithIdentity. Combined with
+    /// quicRegisteredPeers() this gates reconnects so a fresh QUIC connection is
+    /// not opened every 2.5s poll (audit finding F8).
+    private var lastConnectSuccessAt = 0L
+
+    /// AUDIT FINDING #16: whether the phone's receive chain needs realignment
+    /// and the NEXT poll request must carry an authenticated Synchronize +
+    /// `need_sync` (so the desktop attaches ITS carrier in response). Set when
+    /// a decrypt gap is observed (the desktop is ahead of our receive chain),
+    /// and additionally on a slow heartbeat so the desktop's position is
+    /// periodically refreshed without advancing our send chain on EVERY poll.
+    private var needSync = false
+
+    /// AUDIT FINDING #16: heartbeat counter — every N polls, request a sync
+    /// even without a detected gap, so long-lived sessions stay aligned even
+    /// when no payload ever fails to decrypt (the failure signal is absent
+    /// until it is too late). Kept far below the 15s desktop rate window
+    /// (2.5s × 30 = 75s per heartbeat) so it never collides with the limiter.
+    private var pollsSinceSyncRequest = 0
+    private val SYNC_HEARTBEAT_EVERY = 30
+
+    /**
+     * Request a Synchronize on the next poll (audit finding #16). Called by the
+     * decrypt path when a gap beyond max_skip is observed.
+     */
+    @Synchronized
+    fun requestSync() {
+        needSync = true
+    }
+
     /**
      * Start the single poll loop. Idempotent — repeated calls (service restart,
      * onStartCommand, activity recreation) never stack a second loop.
@@ -75,6 +109,15 @@ object KyberPipePollEngine {
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         loopScope = scope
         currentSettings = SettingsManager(context.applicationContext)
+        // AUDIT FINDING #20: instantiate the extracted wire protocol once per
+        // loop start; it re-reads SettingsManager on each poll.
+        if (transport == null) {
+            transport = PollTransport(
+                context.applicationContext,
+                currentSettings!!,
+                requestSync = { needSync = true },
+            )
+        }
         val ctx = context.applicationContext
         loopJob = scope.launch {
             var backoffMs = 1000L
@@ -84,6 +127,22 @@ object KyberPipePollEngine {
                     backoffMs = 1000L
                 } catch (e: Exception) {
                     Log.d(TAG, "Poll failed: ${e.message}")
+                    // AUDIT F5: a failed/timed-out poll must surface as a
+                    // DISCONNECTED update so the UI reflects reality instead of
+                    // staying green. The Rust side tears down the wedged QUIC
+                    // connection on timeout, so the next poll reconnects.
+                    _updates.tryEmit(
+                        PollUpdate(
+                            connected = false,
+                            status = "DISCONNECTED",
+                            method = "None",
+                            color = "red",
+                            isPaired = false,
+                            remoteClipboard = null,
+                            pendingMediaAction = null,
+                            pairingConfirmed = false,
+                        )
+                    )
                     delay(backoffMs)
                     backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
                     continue
@@ -102,6 +161,7 @@ object KyberPipePollEngine {
         loopScope?.cancel()
         loopScope = null
         currentSettings = null
+        transport = null
     }
 
     @Synchronized
@@ -118,24 +178,71 @@ object KyberPipePollEngine {
 
         pollMutex.withLock {
             try {
-                // Ensure the QUIC bridge is established (post-pairing presents
-                // the per-install identity cert — audit finding #8).
-                try {
-                    PairingManager.connectWithIdentity(
-                        targetHostIp, 9876.toUShort(), settings.serverCertPin, context
-                    )
+                // Audit finding F8: do NOT open a fresh QUIC connection every
+                // poll. Skip reconnecting when the peer is still registered in
+                // the Rust bridge AND the last connect succeeded within ~10s.
+                // Only reconnect when the peer dropped out or the last attempt
+                // failed. The peer key is the pinned server cert hash (what the
+                // bridge registers under when a pin is present — audit #8), with
+                // the ratchet identity as a fallback for pin-less states.
+                val peerKey = settings.serverCertPin.takeIf { it.isNotEmpty() }
+                    ?: settings.peerRatchetIdentity
+                val registeredPeers = try {
+                    uniffi.core_crypto.quicRegisteredPeers()
                 } catch (_: Exception) {
+                    emptyList()
+                }
+                val peerRegistered = peerKey.isNotEmpty() && registeredPeers.contains(peerKey)
+                val recentlyConnected =
+                    System.currentTimeMillis() - lastConnectSuccessAt < 10_000L
+                if (!peerRegistered || !recentlyConnected) {
+                    // Ensure the QUIC bridge is established (post-pairing presents
+                    // the per-install identity cert — audit finding #8).
+                    var connected = false
                     try {
-                        uniffi.core_crypto.quicConnect(
-                            targetHostIp, 9876.toUShort(), settings.serverCertPin
+                        connected = PairingManager.connectWithIdentity(
+                            targetHostIp, 9876.toUShort(), settings.serverCertPin, context
                         )
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                        connected = false
+                    }
+                    if (!connected) {
+                        try {
+                            connected = uniffi.core_crypto.quicConnect(
+                                targetHostIp, 9876.toUShort(), settings.serverCertPin
+                            )
+                        } catch (_: Exception) {
+                            connected = false
+                        }
+                    }
+                    if (connected) {
+                        lastConnectSuccessAt = System.currentTimeMillis()
+                    }
                 }
 
                 // ── Build the poll REQUEST body ────────────────────────────
-                val requestBody = buildRequestBody(peer)
+                // AUDIT FINDING #16: request a sync when a gap was detected OR
+                // on the slow heartbeat; the flag is cleared once the request
+                // is built so the next poll is quiet again.
+                pollsSinceSyncRequest++
+                val wantSync = needSync || pollsSinceSyncRequest >= SYNC_HEARTBEAT_EVERY
+                if (wantSync) {
+                    pollsSinceSyncRequest = 0
+                }
+                needSync = false
+                // AUDIT FINDING #20: the wire protocol lives in the extracted
+                // [PollTransport]; the engine owns only the loop.
+                val transport = this.transport ?: return@withLock
+                val requestBody = transport.buildRequestBody(peer, wantSync)
 
-                val resp = uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
+                // Audit finding F10: route by peer key so a multi-peer mesh
+                // never hits the wrong connection. Fall back to the legacy
+                // ACTIVE_PEER API only when no peer identity is known (no pair).
+                val resp = if (peerKey.isNotEmpty()) {
+                    uniffi.core_crypto.quicSendAndRecvTo(peerKey, 0x04.toUByte(), requestBody)
+                } else {
+                    uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
+                }
                 // The round-trip succeeded — the request (including any peeked
                 // RekeyAck) reached the desktop. Consume the ack carrier ONLY
                 // now (audit finding #6): a failed round-trip retains it for the
@@ -148,17 +255,27 @@ object KyberPipePollEngine {
 
                 val json = try { JSONObject(resp) } catch (_: Exception) { null }
                 if (json != null) {
-                    processResponse(context, settings, peer, json)
+                    transport.processResponse(peer, json) { j, clip, p ->
+                        transport.decryptClip(j, clip, p)
+                    }
                 }
-                // Persist the ratchet snapshot after any mutation (AEAD-wrapped,
-                // audit finding #13).
+                // Persist the ratchet snapshot after any mutation (AEAD-wrapped
+                // INSIDE Rust — audit finding #5/#13: no raw session key bytes
+                // ever cross the FFI boundary into the JVM heap).
                 if (peer.isNotEmpty()) {
                     try {
-                        val snap = uniffi.core_crypto.ratchetExportSession(peer)
-                        if (snap != null) {
-                            PipeService.persistRatchetSnapshotWrapped(settings, snap)
+                        // ratchetExportSessionWrapped serializes + wraps in Rust;
+                        // we only need the peer identity (the wrap key lives in
+                        // settings, read by PipeService).
+                        val wrapped = uniffi.core_crypto.ratchetExportSessionWrapped(
+                            peer, settings.ratchetSnapshotKey.hexToByteArray()
+                        )
+                        if (wrapped != null) {
+                            PipeService.persistWrappedSnapshot(settings, wrapped.nonce, wrapped.ciphertext)
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Snapshot persist skipped: ${e.message}")
+                    }
                 }
             } finally {
                 // Nothing to clean up per-iteration.
@@ -167,187 +284,10 @@ object KyberPipePollEngine {
     }
 
     /**
-     * Build the poll request: an authenticated Synchronize packet (audit
-     * finding #4 — the only resync trigger) plus the phone's OUTBOUND RekeyAck
-     * (audit finding #1 — the missing phone→desktop ack channel).
+     * AUDIT FINDING #20: the poll WIRE PROTOCOL — request building
+     * (`buildRequestBody`), response parsing (`processResponse`), clipboard
+     * decrypt (`decryptClip`) and update emission — was extracted from this
+     * singleton into the dedicated [PollTransport] class. The engine now owns
+     * only the loop lifecycle, reconnect gating and snapshot persistence.
      */
-    private fun buildRequestBody(peer: String): String {
-        val body = JSONObject()
-        if (peer.isNotEmpty()) {
-            // Authenticated Synchronize producer: the phone's send counter as a
-            // ratchet-encrypted binary-TLV packet (audit finding #12).
-            try {
-                val syncTlv = uniffi.core_crypto.ratchetSynchronizePacketBinary(peer)
-                body.put("sync", JSONObject().put(
-                    "tlv_b64", Base64.encodeToString(syncTlv, Base64.NO_WRAP)
-                ))
-            } catch (_: Exception) {}
-            // Phone→desktop RekeyAck channel (audit finding #1): the desktop's
-            // outgoing proposal is acked here. Peek (non-consuming) so a lost
-            // request retains the ack for the next poll (audit finding #6).
-            try {
-                val ackTlv = uniffi.core_crypto.ratchetGenerateRekeyAckBinaryPeek(peer)
-                if (ackTlv != null) {
-                    body.put("rekey_ack_encrypted", JSONObject().put(
-                        "tlv_b64", Base64.encodeToString(ackTlv, Base64.NO_WRAP)
-                    ))
-                }
-            } catch (_: Exception) {}
-        }
-        return body.toString()
-    }
-
-    private fun processResponse(
-        context: Context,
-        settings: SettingsManager,
-        peer: String,
-        json: JSONObject,
-    ) {
-        // Two-phase pairing commit (audit finding #6): commit isPaired only when
-        // the desktop reports it.
-        var pairingConfirmed = false
-        if (settings.pendingPairingConfirmation) {
-            if (json.optBoolean("is_paired", false)) {
-                settings.isPaired = true
-                settings.pendingPairingConfirmation = false
-                pairingConfirmed = true
-                Log.i(TAG, "Desktop confirmed SAS — pairing committed")
-            } else if (json.optString("reason", "").contains("Not paired", ignoreCase = true) ||
-                respContainsNotPaired(json)
-            ) {
-                settings.pendingPairingConfirmation = false
-                Log.w(TAG, "Desktop rejected pairing — not confirmed")
-            }
-        }
-        if (!json.optBoolean("is_paired", true)) {
-            settings.isPaired = false
-            settings.pairedDeviceName = ""
-        }
-
-        val status = json.optString("connection_status", "ACTIVE")
-        val method = json.optString("connection_method", "LAN")
-        val color = json.optString("connection_color", "green")
-
-        var remoteClipboard: String? = null
-        val clip = json.optJSONObject("latest_clip_encrypted")
-        if (clip != null) {
-            remoteClipboard = decryptClip(context, settings, peer, json, clip)
-        }
-
-        var pendingMediaAction: Int? = null
-        if (json.has("pending_media_action") && !json.isNull("pending_media_action")) {
-            val idx = json.optInt("pending_media_action", -1)
-            if (idx != -1) {
-                pendingMediaAction = idx
-            }
-        }
-
-        // Desktop→phone RekeyAck / Synchronize consumers (audit findings #1/#4):
-        // both ride the ratchet and are processed rekey-aware in Rust.
-        val ack = json.optJSONObject("rekey_ack_encrypted")
-        if (ack != null && peer.isNotEmpty()) {
-            try {
-                val tlv = Base64.decode(ack.getString("tlv_b64"), Base64.NO_WRAP)
-                uniffi.core_crypto.ratchetProcessRekeyAckBinary(peer, tlv)
-            } catch (e: Exception) {
-                Log.e(TAG, "Desktop RekeyAck processing failed: ${e.message}")
-            }
-        }
-        // The desktop's authenticated Synchronize packet keeps our receiving
-        // chain aligned; processed even when the clip decrypted fine (audit #4).
-        val sync = json.optJSONObject("sync")
-        if (sync != null && peer.isNotEmpty()) {
-            try {
-                val tlv = Base64.decode(sync.getString("tlv_b64"), Base64.NO_WRAP)
-                uniffi.core_crypto.ratchetProcessSynchronize(peer, tlv)
-            } catch (e: Exception) {
-                Log.d(TAG, "Synchronize not applied: ${e.message}")
-            }
-        }
-
-        _updates.tryEmit(
-            PollUpdate(
-                connected = color.equals("green", ignoreCase = true),
-                status = status,
-                method = method,
-                color = color,
-                isPaired = settings.isPaired,
-                remoteClipboard = remoteClipboard,
-                pendingMediaAction = pendingMediaAction,
-                pairingConfirmed = pairingConfirmed,
-            )
-        )
-    }
-
-    private fun respContainsNotPaired(json: JSONObject): Boolean {
-        return json.optString("reason", "").isNotEmpty() || json.optString("status", "") == "error"
-    }
-
-    /**
-     * Decrypt the desktop's clipboard payload (binary TLV, rekey-aware in Rust).
-     * On a gap past max_skip, the desktop's authenticated Synchronize packet is
-     * processed first and the decrypt retried ONCE (audit finding #4).
-     */
-    private fun decryptClip(
-        context: Context,
-        settings: SettingsManager,
-        peer: String,
-        json: JSONObject,
-        clip: JSONObject,
-    ): String? {
-        val enc = clip.optJSONObject("encrypted_ratchet")
-        if (enc != null) {
-            if (peer.isEmpty()) return null
-            val tlv = try {
-                Base64.decode(enc.getString("tlv_b64"), Base64.NO_WRAP)
-            } catch (e: Exception) {
-                Log.d(TAG, "Clip TLV decode failed: ${e.message}")
-                return null
-            }
-            try {
-                return String(
-                    uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
-                    Charsets.UTF_8
-                )
-            } catch (e: Exception) {
-                // Ratchet decrypt failed — the desktop may be ahead of our
-                // receiving chain after a handoff. Its poll response carries an
-                // authenticated Synchronize packet: process it, then retry ONCE.
-                val sync = json.optJSONObject("sync")
-                if (sync != null) {
-                    try {
-                        val syncTlv = Base64.decode(sync.getString("tlv_b64"), Base64.NO_WRAP)
-                        uniffi.core_crypto.ratchetProcessSynchronize(peer, syncTlv)
-                        return String(
-                            uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
-                            Charsets.UTF_8
-                        )
-                    } catch (e2: Exception) {
-                        Log.w(TAG, "Synchronize recovery failed: ${e2.message}")
-                        return null
-                    }
-                }
-                Log.d(TAG, "Ratchet decrypt failed (no sync): ${e.message}")
-                return null
-            }
-        }
-        // Legacy session-key shape (unchanged).
-        return try {
-            val nonce = clip.getString("nonce_hex").hexToByteArray()
-            val ct = clip.getString("ciphertext_hex").hexToByteArray()
-            org.kyberpipe.client.utils.SessionKeyManager.decrypt(nonce, ct)
-        } catch (e: Exception) {
-            Log.d(TAG, "Legacy clip decrypt failed: ${e.message}")
-            null
-        }
-    }
-}
-
-/** Hex string → byte array. */
-internal fun String.hexToByteArray(): ByteArray {
-    val len = length
-    require(len % 2 == 0) { "Hex string must have even length" }
-    return ByteArray(len / 2) { i ->
-        ((Character.digit(this[i * 2], 16) shl 4) + Character.digit(this[i * 2 + 1], 16)).toByte()
-    }
 }

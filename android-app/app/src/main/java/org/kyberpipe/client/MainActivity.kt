@@ -14,7 +14,6 @@ import org.kyberpipe.client.crash.CrashLogger
 import org.kyberpipe.client.deeplink.DeepLinkHandler
 import org.kyberpipe.client.service.PipeService
 import org.kyberpipe.client.utils.PermissionHelper
-import org.kyberpipe.client.utils.SessionKeyManager
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.UriUtils
 
@@ -90,10 +89,40 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Restore the ratchet session (from the persisted snapshot) and the session
-     * key handle after a process restart.
+     * Restore the ratchet session (from the persisted snapshot) after a process
+     * restart. The session-key handle is process-scoped (Rust memory) and the
+     * legacy raw-key restore is gone (audit finding F7) — the ratchet snapshot
+     * alone is enough to resume.
+     *
+     * AUDIT FINDING #2 (HIGH): restore is a COLD-START-ONLY, single-flight step.
+     * It must never run when a live session already exists in the Rust registry
+     * — after a RE-PAIR the fresh session (gen 0, new master secret) lives in
+     * Rust while the persisted snapshot is from the OLD pairing; importing it
+     * would revert the session to pre-pair key material (silent state rollback
+     * presenting as "paired but nothing syncs"). The Rust import guard adds the
+     * pairing-epoch watermark as a second line of defense, but the lifecycle
+     * gate here is the primary one: on a cold start the registry is empty (the
+     * snapshot is the only state), so `ratchetPeerIds()` is empty and the
+     * restore proceeds; on a warm activity recreation after re-pairing the
+     * registry is non-empty and the restore is skipped.
      */
     private fun restorePersistedCryptoState() {
+        // Single-flight gate: never restore over a live session. On a process
+        // cold start the Rust registry is empty (nothing survives a kill), so
+        // this is the exact signal that distinguishes "cold start, restore the
+        // snapshot" from "warm recreation, keep the live session" (audit #2).
+        val livePeers = try {
+            uniffi.core_crypto.ratchetPeerIds()
+        } catch (e: Exception) {
+            emptyList()
+        }
+        if (livePeers.isNotEmpty()) {
+            android.util.Log.i(
+                "KyberpipeRestore",
+                "Ratchet restore skipped: ${livePeers.size} live session(s) in Rust registry (warm start / re-pair) — audit finding #2"
+            )
+            return
+        }
         val peer = settingsManager.peerRatchetIdentity
         if (peer.isNotEmpty()) {
             val snapshot = settingsManager.ratchetSnapshot
@@ -113,7 +142,7 @@ class MainActivity : ComponentActivity() {
                             val ct = stored.substring(sep + 1).hexToByteArraySafe()
                             val wrapKey = wrapKeyHex.hexToByteArraySafe()
                             if (nonce != null && ct != null && wrapKey != null) {
-                                val bytes = uniffi.core_crypto.decryptPayloadWithHandle(
+                                val bytes = uniffi.core_crypto.decryptWithRawKey32(
                                     wrapKey, nonce, ct
                                 )
                                 uniffi.core_crypto.ratchetImportSession(peer, bytes)
@@ -123,14 +152,6 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     android.util.Log.w("KyberpipeRestore", "Ratchet restore failed: ${e.message}")
                 }
-            }
-        }
-        val sessionKey = settingsManager.sessionKey
-        if (sessionKey.isNotEmpty()) {
-            try {
-                SessionKeyManager.initFromHex(sessionKey)
-            } catch (e: Exception) {
-                android.util.Log.w("KyberpipeRestore", "Session key restore failed: ${e.message}")
             }
         }
     }

@@ -223,11 +223,26 @@ fn quic_connect_with_mode(
 
 pub fn quic_send_and_recv_impl(stream_type: u8, body_json: String) -> Result<String, KyberError> {
     let conn = crate::quic_bridge::get_or_reconnect()?;
-    crate::block_on_sync_timeout(
+    // AUDIT F5: bound every send/recv with a hard timeout, and on expiry CLOSE
+    // the connection so the reconnect state machine re-establishes against the
+    // candidate address set instead of reusing a blackholed socket forever.
+    let peer = crate::quic_bridge::active_peer_key();
+    match crate::block_on_sync_timeout(
         crate::quic_bridge::quic_send_and_recv_impl(&conn, stream_type, &body_json),
-        std::time::Duration::from_secs(15),
-    )
-    .ok_or_else(|| KyberError::NetworkError("QUIC send/recv timed out".into()))?
+        std::time::Duration::from_secs(crate::network_api::QUIC_IO_TIMEOUT_SECS),
+    ) {
+        Some(Ok(s)) => Ok(s),
+        Some(Err(e)) => Err(e),
+        None => {
+            if let Some(key) = peer {
+                crate::quic_bridge::close_peer(&key);
+            }
+            Err(KyberError::NetworkError(format!(
+                "QUIC send/recv timed out after {}s — connection closed for reconnect",
+                crate::network_api::QUIC_IO_TIMEOUT_SECS
+            )))
+        }
+    }
 }
 
 #[cfg(test)]

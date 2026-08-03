@@ -72,6 +72,28 @@ pub struct AppSettings {
     /// explicitly enables discovery, and never carry the device name.
     #[serde(default)]
     pub beacon_discovery_enabled: bool,
+    /// One-way inbound clipboard policy (audit finding #13): whether a paired
+    /// phone may WRITE to the desktop's OS clipboard. Default ON (back-compat:
+    /// clipboard mirroring is the product's headline feature), but the gate is
+    /// now a real, user-toggleable policy instead of an unconditional trust of
+    /// the phone. When OFF, inbound clipboard payloads are decrypted and
+    /// deduplicated but the OS clipboard is NOT written (a notification event
+    /// is emitted instead).
+    #[serde(default = "default_true")]
+    pub inbound_clipboard_enabled: bool,
+    /// Opt-in Wi-Fi Direct group creation (audit finding #14). Default OFF: the
+    /// legacy code created an open P2P group on every desktop start. When the
+    /// user enables it, the group is created with WPA2/WPA3 on a RUNTIME-
+    /// detected interface — never a hardcoded per-machine adapter.
+    #[serde(default)]
+    pub p2p_group_enabled: bool,
+}
+
+/// Serde default for the inbound-clipboard policy: ON for backward
+/// compatibility (the product's headline feature must keep working out of the
+/// box); the user can disable it in settings to make sync one-way.
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -167,6 +189,19 @@ pub struct PairingState {
     /// IP of the peer that performed pairing. Fallback identity binding when a
     /// client certificate was not presented during pairing.
     pub paired_peer_ip: String,
+    /// Per-attempt generation counter (audit KYP-2026-02 #12). Incremented by
+    /// every `begin_pairing_attempt`; the SAS-window timeout task captures the
+    /// generation at spawn and only fires when it still matches, so
+    /// confirm/fail/begin all invalidate a stale timeout task.
+    pub attempt_generation: u64,
+    /// PER-PEER identity map (audit F12): client-certificate hash → ratchet
+    /// peer id (the peer's mlkem public key hex). The core supports N peers;
+    /// every inbound stream is authorized by the CONNECTION's TLS-observed
+    /// cert hash, and this map routes each peer's poll/clipboard/SMS/media
+    /// traffic to ITS OWN ratchet session instead of a single global pairing
+    /// id. Populated at SAS confirmation; entries survive until unpair/
+    /// self-destruct clears the pairing state.
+    pub peer_by_cert_hash: std::collections::HashMap<String, String>,
 }
 
 pub struct NetworkState {
@@ -189,20 +224,11 @@ impl Default for NetworkState {
     }
 }
 
+#[derive(Default)]
 pub struct SyncHistory {
     pub sensor: Vec<SensorPacket>,
     pub sms: Vec<SmsPacket>,
     pub notifications: Vec<NotificationRecord>,
-}
-
-impl Default for SyncHistory {
-    fn default() -> Self {
-        Self {
-            sensor: Vec::new(),
-            sms: Vec::new(),
-            notifications: Vec::new(),
-        }
-    }
 }
 
 #[derive(Default)]

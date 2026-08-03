@@ -27,7 +27,6 @@ interface PairingDeps {
   showPairingQr: Ref<boolean>;
   showManualIpDialog: Ref<boolean>;
   showSasVerification: Ref<boolean>;
-  sasWords: Ref<string[]>;
   sasCode: Ref<string>;
   isConnected: ComputedRef<boolean>;
   connectionStatus: Ref<string>;
@@ -56,7 +55,6 @@ export function usePairing(deps: PairingDeps) {
     showPairingQr,
     showManualIpDialog,
     showSasVerification,
-    sasWords,
     sasCode,
     saveSettings,
     checkConnectionState,
@@ -81,7 +79,16 @@ export function usePairing(deps: PairingDeps) {
   const fetchQrBindingFields = async (): Promise<Record<string, string>> => {
     let nonce = "";
     try {
-      nonce = (await invoke<string>("get_pairing_nonce")) || "";
+      // Audit F9 (regression): `get_pairing_nonce` is token-gated — the
+      // hardening (KYP-2026-02 #6) added a mandatory user-gesture token, but
+      // the renderer never minted one, so EVERY QR pairing attempt failed with
+      // "Pairing nonce mismatch". Mint a fresh token for this exact action
+      // first, then pass it through (mirrors the useClipboardHistory F6
+      // pattern).
+      const token = await invoke<string>("request_privilege_token", {
+        action: "get_pairing_nonce",
+      });
+      nonce = (await invoke<string>("get_pairing_nonce", { token })) || "";
     } catch (e) {
       console.warn("get_pairing_nonce failed:", e);
     }
@@ -95,6 +102,13 @@ export function usePairing(deps: PairingDeps) {
       throw new Error(
         "Pairing aborted: no QR-bound server certificate hash available — " +
           "cannot build a MITM-safe pairing QR. Restart the desktop app and retry."
+      );
+    }
+    // Audit F9: the QR MUST carry a nonce or the server rejects the pairing.
+    if (!nonce) {
+      throw new Error(
+        "Pairing aborted: no QR pairing nonce was issued by the backend — " +
+          "cannot build a valid pairing QR."
       );
     }
     return {
@@ -151,32 +165,6 @@ export function usePairing(deps: PairingDeps) {
       await checkConnectionState();
     } catch (e) {
       console.error("Failed to read pairing status:", e);
-    }
-  };
-
-  /// Poll the backend for a pending SAS and surface the modal. The SAS is
-  /// displayed on the PHONE; the user must TYPE it here (audit finding #7 —
-  /// the old flow rubber-stamped the desktop's own code).
-  const pollPairingStatus = async () => {
-    try {
-      const status = await invoke<any>("get_pairing_status");
-      if (!status) return;
-      if (status.is_paired) {
-        // If the backend completed pairing (or we just confirmed it), close
-        // the modal and let the dashboard reconcile via get_settings.
-        if (showSasVerification.value) {
-          showSasVerification.value = false;
-        }
-        return;
-      }
-      if (status.pending && status.sas_code) {
-        sasCode.value = status.sas_code;
-        sasWords.value = (status.sas_code.match(/.{1,2}/g) || []).slice(0, 4);
-        showSasVerification.value = true;
-      }
-    } catch (e) {
-      // Backend command may not exist yet in dev — ignore.
-      console.warn("get_pairing_status failed:", e);
     }
   };
 
@@ -239,21 +227,19 @@ export function usePairing(deps: PairingDeps) {
   };
 
   const handlePairExternally = async (method: string) => {
+    if (method === "wormhole") {
+      // Audit finding KYP-2026-02 (F6): generate_wormhole_code now returns a
+      // typed FeatureUnavailable error — the renderer no longer calls it and
+      // must not fake a QR. Surface the honest state instead of pretending
+      // success (ConnectivityManager also disables this pairing option).
+      alert(
+        "Magic Wormhole pairing is unavailable in this build (feature not compiled in). Use Tor Onion or a local pairing method instead."
+      );
+      return;
+    }
     remoteMethod.value = method;
     remoteActive.value = true;
-    if (method === "wormhole") {
-      try {
-        const code = await invoke<string>("generate_wormhole_code");
-        await buildPairingQr({
-          method: "wormhole",
-          code: code,
-          pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-          x25519_pub: keyPair.value?.x25519_pk_hex || "",
-        });
-      } catch (e) {
-        console.error("Wormhole code generation failed:", e);
-      }
-    } else if (method === "tor") {
+    if (method === "tor") {
       try {
         // Tier-2 destructive command — single-use user-gesture token
         // (audit finding #20).
@@ -408,7 +394,6 @@ export function usePairing(deps: PairingDeps) {
     submitManualPairing,
     confirmSas,
     rejectSas,
-    pollPairingStatus,
     triggerConnectionAttempt,
     handleManualRetry,
     checkFirewall,

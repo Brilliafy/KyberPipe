@@ -88,6 +88,12 @@ pub fn quic_send_and_recv(stream_type: u8, body_json: String) -> Result<String, 
 /// mesh addressing path: each peer connected via `quic_connect` is stored under
 /// its own registry entry, so multiple devices can be active simultaneously.
 /// The peer key is the pinned cert hash when provided, else "ip:port".
+///
+/// AUDIT F5: every send/recv is bounded by a hard timeout. On expiry the peer
+/// connection is CLOSED so the reconnect state machine re-establishes against
+/// the candidate address set (audit F3) — without this, a blackholed network
+/// (no ICMP, no TCP reset) would leave the poll/SMS threads blocked for minutes
+/// and every subsequent poll would reuse the same dead connection.
 #[uniffi::export]
 pub fn quic_send_and_recv_to(
     peer_key: String,
@@ -96,18 +102,49 @@ pub fn quic_send_and_recv_to(
 ) -> Result<String, KyberError> {
     ensure_panic_hook_installed();
     let conn = quic_bridge::get_or_reconnect_for(&peer_key)?;
-    crate::block_on_sync_timeout(
+    match crate::block_on_sync_timeout(
         quic_bridge::quic_send_and_recv_impl(&conn, stream_type, &body_json),
-        std::time::Duration::from_secs(15),
-    )
-    .ok_or_else(|| KyberError::NetworkError("QUIC send/recv timed out".into()))?
+        std::time::Duration::from_secs(QUIC_IO_TIMEOUT_SECS),
+    ) {
+        Some(Ok(s)) => Ok(s),
+        Some(Err(e)) => Err(e),
+        None => {
+            quic_bridge::close_peer(&peer_key);
+            Err(KyberError::NetworkError(format!(
+                "QUIC send/recv timed out after {QUIC_IO_TIMEOUT_SECS}s — connection closed for reconnect"
+            )))
+        }
+    }
 }
+
+/// Hard cap on a single QUIC send/recv round-trip (audit F5). Bounds how long
+/// the Android poll loop / SMS forwarder can block on a blackholed network
+/// before the connection is torn down and the reconnect machine re-establishes.
+pub(crate) const QUIC_IO_TIMEOUT_SECS: u64 = 10;
 
 /// List the peer keys of every registered QUIC connection.
 #[uniffi::export]
 pub fn quic_registered_peers() -> Vec<String> {
     ensure_panic_hook_installed();
     quic_bridge::peer_keys()
+}
+
+/// Register a LAST-KNOWN-GOOD candidate address for a peer (audit F3 —
+/// "Seamless Path Migration"). The reconnect path rotates through the
+/// candidate set when the primary address goes stale (DHCP renewal,
+/// Wi-Fi→cellular handoff, subnet change), so a desktop whose LAN IP changed is
+/// still reachable via an alternate address learned through beacon/mDNS
+/// discovery or a prior successful connect. The peer key is the pinned cert
+/// hash (or "ip:port" pre-pairing). Returns false when the peer is not
+/// registered or the address was already known.
+#[uniffi::export]
+pub fn quic_note_peer_candidate_address(peer_key: String, host: String, port: u16) -> bool {
+    ensure_panic_hook_installed();
+    let addr = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, port),
+        Err(_) => return false,
+    };
+    quic_bridge::note_peer_candidate_address(&peer_key, addr)
 }
 
 /// Close the connection to a specific peer (mesh teardown).
@@ -121,6 +158,17 @@ pub fn quic_disconnect_peer(peer_key: String) {
 pub fn quic_disconnect() {
     ensure_panic_hook_installed();
     quic_bridge::close_connection();
+}
+
+/// Touch the active QUIC connection (audit finding #25): pokes the bridge so
+/// a Doze-mode keepalive performs a REAL heartbeat instead of a fake sleep. If
+/// the connection is down (e.g. Doze dropped it), the reconnect machinery
+/// re-establishes it on the next send; the touch itself is non-blocking. Used
+/// by the Android foreground service's doze keepalive.
+#[uniffi::export]
+pub fn quic_bridge_touch() {
+    ensure_panic_hook_installed();
+    quic_bridge::touch_connection();
 }
 
 /// Capture the current server's certificate hash WITHOUT storing it (no silent

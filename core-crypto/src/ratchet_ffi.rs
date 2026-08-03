@@ -1,171 +1,19 @@
-use crate::crypto::{self, DoubleRatchetState};
+//! Ratchet FFI bridge (audit KYP-2026-02 #22): thin per-peer encrypt/decrypt
+//! shims over the session registry. The registry, the Synchronize protocol and
+//! the RekeyAck channel live in their own submodules.
+
+use crate::crypto;
 use crate::error::KyberError;
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use registry::with_ratchet_session;
 
-/// Ratchet session registry keyed by peer identity fingerprint.
-/// Each peer gets its own independent mutex (wrapped in Arc), preventing one
-/// session's cryptographic operations from blocking another session.
-/// The outer map lock is only held during lookup/clone — never during crypto ops.
-pub(crate) static RATCHET_SESSIONS: LazyLock<
-    Mutex<HashMap<String, Arc<Mutex<DoubleRatchetState>>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub mod registry;
+pub mod rekey_ack;
+pub mod sync;
 
-/// Initialize a Double Ratchet session for a given peer identity.
-/// Returns an error if a session already exists for this peer
-/// (caller must explicitly remove it first to prevent silent overwrite).
-///
-/// The ratchet's initial DH identity is a FRESH, never-exchanged keypair — the
-/// peer encapsulates rekey payloads to our pairing public keys, so decapsulating
-/// with this unrelated private key would permanently desync the session at the
-/// first rekey boundary (audit finding #1). Production callers MUST use
-/// [`ratchet_init_session_with_keypair_impl`] and pass their own pairing keypair.
-pub fn ratchet_init_session_impl(
-    peer_identity: &str,
-    master_shared_secret: &[u8],
-    is_initiator: bool,
-    peer_x25519_pk: Option<&[u8]>,
-    peer_mlkem_pk: Option<&[u8]>,
-) -> Result<(), KyberError> {
-    ratchet_init_session_with_keypair_impl(
-        peer_identity,
-        master_shared_secret,
-        is_initiator,
-        None,
-        peer_x25519_pk,
-        peer_mlkem_pk,
-    )
-}
+pub use registry::*;
+pub use rekey_ack::*;
+pub use sync::*;
 
-/// Initialize a Double Ratchet session using the caller's OWN pairing keypair as
-/// the ratchet's initial DH identity (audit finding #1).
-///
-/// `our_keypair` — when `Some` — carries the X25519/ML-KEM secret AND public
-/// halves whose PUBLIC halves were exchanged with the peer during the KEM
-/// pairing handshake. The peer encapsulates rekey payloads to those public keys,
-/// so we must decapsulate with these matching private keys. On Android the
-/// caller passes the pairing keypair the client already holds; on the desktop
-/// the private halves stay in Rust (the pairing handler's stored keypair).
-pub fn ratchet_init_session_with_keypair_impl(
-    peer_identity: &str,
-    master_shared_secret: &[u8],
-    is_initiator: bool,
-    our_keypair: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>, // (x25519_pk, x25519_sk, mlkem_pk, mlkem_sk)
-    peer_x25519_pk: Option<&[u8]>,
-    peer_mlkem_pk: Option<&[u8]>,
-) -> Result<(), KyberError> {
-    let x25519_arr = peer_x25519_pk.map(|pk| {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(pk);
-        arr
-    });
-    let our_pair = match our_keypair {
-        Some((xpk, xsk, mpk, msk)) => {
-            let mut x25519_pk = [0u8; 32];
-            let mut x25519_sk = [0u8; 32];
-            if xpk.len() != 32 || xsk.len() != 32 {
-                return Err(KyberError::InvalidKeyLength {
-                    expected: 32,
-                    got: xpk.len() as u64,
-                });
-            }
-            x25519_pk.copy_from_slice(&xpk);
-            x25519_sk.copy_from_slice(&xsk);
-            crate::crypto::HybridKeyPair {
-                x25519_pk,
-                x25519_sk,
-                mlkem_pk: mpk,
-                mlkem_sk: msk,
-            }
-        }
-        None => crate::crypto::generate_hybrid_keypair(),
-    };
-    let ratchet = DoubleRatchetState::new_with_keypair(
-        master_shared_secret,
-        is_initiator,
-        our_pair,
-        x25519_arr,
-        peer_mlkem_pk.map(|v| v.to_vec()),
-    )?;
-    let mut map = match RATCHET_SESSIONS.lock() {
-        Ok(m) => m,
-        Err(poisoned) => {
-            // Previous thread panicked while holding the map lock. Clear the
-            // corrupted sessions and continue with a fresh map.
-            let mut recovered = poisoned.into_inner();
-            recovered.clear();
-            recovered
-        }
-    };
-    if map.contains_key(peer_identity) {
-        return Err(KyberError::CryptoError(
-            "Session already exists for this peer. Remove it first.".into(),
-        ));
-    }
-    map.insert(peer_identity.to_string(), Arc::new(Mutex::new(ratchet)));
-    Ok(())
-}
-
-/// Remove a ratchet session for a given peer identity.
-pub fn ratchet_remove_session_impl(peer_identity: &str) -> bool {
-    let mut map = match RATCHET_SESSIONS.lock() {
-        Ok(m) => m,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    map.remove(peer_identity).is_some()
-}
-
-/// Remove ALL ratchet sessions from the registry.
-/// Used during self-destruct to ensure no cryptographic material persists.
-pub fn ratchet_clear_all_sessions_impl() {
-    let mut map = match RATCHET_SESSIONS.lock() {
-        Ok(m) => m,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    map.clear();
-}
-
-/// List all peer identities with an active ratchet session.
-pub fn ratchet_peer_ids_impl() -> Vec<String> {
-    let map = match RATCHET_SESSIONS.lock() {
-        Ok(m) => m,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    map.keys().cloned().collect()
-}
-
-fn with_ratchet_session<F, T>(peer_identity: &str, f: F) -> Result<T, KyberError>
-where
-    F: FnOnce(&mut DoubleRatchetState) -> Result<T, KyberError>,
-{
-    // Clone Arc while holding map lock, then drop map lock before crypto.
-    // This prevents the outer lock from serializing operations across peers.
-    let session_arc = {
-        let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(peer_identity)
-            .ok_or_else(|| {
-                KyberError::CryptoError(format!(
-                    "No ratchet session for peer '{}'. Call ratchet_init_session first.",
-                    peer_identity
-                ))
-            })?
-            .clone()
-    }; // Map lock dropped here — crypto ops run without holding it
-       // Detect poisoned mutex — if a previous thread panicked while holding the lock,
-       // the ratchet state may be corrupted. Remove the session and return an error
-       // rather than silently operating on potentially invalid key material.
-    let result = match session_arc.lock() {
-        Ok(mut session) => f(&mut session),
-        Err(_poisoned) => Err(KyberError::CryptoError(format!(
-            "Ratchet session for peer '{}' was corrupted (mutex poisoned). \
-                 Session is marked for re-initialization — do not use until re-paired.",
-            peer_identity
-        ))),
-    };
-    result
-}
-
-/// Encrypt a plaintext using the ratchet state for the specified peer.
 pub fn ratchet_encrypt_message_impl(
     peer_identity: &str,
     plaintext: &[u8],
@@ -173,7 +21,6 @@ pub fn ratchet_encrypt_message_impl(
     with_ratchet_session(peer_identity, |ratchet| ratchet.ratchet_encrypt(plaintext))
 }
 
-/// Decrypt a ciphertext using the ratchet state for the specified peer.
 pub fn ratchet_decrypt_message_impl(
     peer_identity: &str,
     nonce: &[u8],
@@ -187,8 +34,6 @@ pub fn ratchet_decrypt_message_impl(
     })
 }
 
-/// Decrypt a ciphertext that includes rekey payload using the ratchet state.
-/// Processes DH re-key payload embedded in the message.
 pub fn ratchet_decrypt_with_rekey_message_impl(
     peer_identity: &str,
     nonce: &[u8],
@@ -210,417 +55,6 @@ pub fn ratchet_decrypt_with_rekey_message_impl(
         )
     })
 }
-
-pub fn generate_rekey_ack_message_impl(
-    peer_identity: &str,
-    seq: u64,
-) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| ratchet.generate_rekey_ack(seq))
-}
-
-/// Take the pending RekeyAck carrier seq (if any) and immediately produce the
-/// encrypted RekeyAck message to send back to the peer. Combines
-/// `take_pending_rekey_ack_seq` + `generate_rekey_ack` in one session lock so
-/// the carrier is not lost between two separate calls. Returns None when no
-/// ACK is pending.
-pub fn ratchet_generate_rekey_ack_impl(
-    peer_identity: &str,
-) -> Result<Option<crypto::RatchetEncryptedMessage>, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| {
-        if let Some(seq) = ratchet.take_pending_rekey_ack_seq() {
-            Ok(Some(ratchet.generate_rekey_ack(seq)?))
-        } else {
-            Ok(None)
-        }
-    })
-}
-
-pub fn ratchet_process_rekey_ack_impl(peer_identity: &str, seq: u64) -> Result<bool, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| Ok(ratchet.process_rekey_ack(seq)))
-}
-
-/// Export the ratchet session for `peer_identity` as a serialized snapshot
-/// (JSON bytes). Returns None if no session exists. The caller MUST encrypt the
-/// returned bytes with a device/session key before persisting them.
-pub fn ratchet_export_session_impl(peer_identity: &str) -> Result<Option<Vec<u8>>, KyberError> {
-    let session_arc = {
-        let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(peer_identity) {
-            Some(s) => s.clone(),
-            None => return Ok(None),
-        }
-    };
-    let guard = session_arc
-        .lock()
-        .map_err(|_| KyberError::CryptoError("Ratchet session mutex poisoned".into()))?;
-    let snap = guard.to_snapshot();
-    let bytes =
-        serde_json::to_vec(&snap).map_err(|e| KyberError::SerializationError(e.to_string()))?;
-    Ok(Some(bytes))
-}
-
-/// Restore a ratchet session from a previously exported (and decrypted)
-/// snapshot. Replaces any existing session for the peer — UNLESS the live
-/// session is already AHEAD of the snapshot, in which case the import is a
-/// no-op (audit finding #5: activity recreation / service restarts can import
-/// a stale snapshot over a live, advanced session, rolling the chain back and
-/// desynchronizing the peer — the import must never regress a session).
-pub fn ratchet_import_session_impl(peer_identity: &str, data: &[u8]) -> Result<(), KyberError> {
-    let snap: crate::crypto::ratchet::RatchetSnapshot =
-        serde_json::from_slice(data).map_err(|e| KyberError::SerializationError(e.to_string()))?;
-
-    // High-water-mark guard: if a live session exists and is at least as
-    // advanced as the snapshot, refuse to regress it. Comparison is
-    // lexicographic over (ratchet_generation, recv_message_count) because a
-    // rekey commit resets the per-generation counters.
-    let live_ahead = {
-        let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(peer_identity).cloned() {
-            None => false,
-            Some(session_arc) => {
-                drop(map);
-                match session_arc.lock() {
-                    Ok(live) => {
-                        live.ratchet_generation > snap.ratchet_generation
-                            || (live.ratchet_generation == snap.ratchet_generation
-                                && live.recv_message_count >= snap.recv_message_count)
-                    }
-                    Err(_) => false, // corrupted live session — allow re-import
-                }
-            }
-        }
-    };
-    if live_ahead {
-        return Ok(());
-    }
-
-    let ratchet = DoubleRatchetState::from_snapshot(&snap)?;
-    let mut map = match RATCHET_SESSIONS.lock() {
-        Ok(m) => m,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    map.insert(peer_identity.to_string(), Arc::new(Mutex::new(ratchet)));
-    Ok(())
-}
-
-/// Minimum interval between accepted resyncs for the same peer. A compromised
-/// peer that somehow reaches the (now authenticated) resync path cannot spam
-/// polls to force repeated forward jumps (audit finding #4).
-const SYNC_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
-
-static LAST_SYNC_AT: std::sync::LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Resynchronize a ratchet session after the peer's authenticated Synchronize
-/// message: re-derive skip keys for the missed range and advance the receiving
-/// chain. Returns the number of messages skipped.
-///
-/// Audit finding #4: the resync is rate-limited per peer (15s window). The
-/// generation-blindness and unbounded-cumulative problems are handled inside
-/// `DoubleRatchetState::resync_receiving_chain` (pending-rekey refusal +
-/// persisted cumulative budget).
-pub fn ratchet_synchronize_session_impl(
-    peer_identity: &str,
-    target_seq: u64,
-) -> Result<u64, KyberError> {
-    // Rate-limit per peer BEFORE touching the session.
-    {
-        let mut last = LAST_SYNC_AT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(at) = last.get(peer_identity) {
-            if at.elapsed() < SYNC_RATE_WINDOW {
-                return Err(KyberError::CryptoError(format!(
-                    "Synchronize rate-limited for peer {peer_identity} — retry in {}s",
-                    SYNC_RATE_WINDOW.as_secs()
-                )));
-            }
-        }
-        last.insert(peer_identity.to_string(), std::time::Instant::now());
-    }
-    with_ratchet_session(peer_identity, |ratchet| {
-        ratchet.resync_receiving_chain(target_seq)
-    })
-}
-
-/// Build an encrypted `KyberMessage::Synchronize` packet carrying the current
-/// send counter. The peer processes it via
-/// [`ratchet_process_synchronize_impl`] — the ONLY path that honors a resync
-/// target (audit finding #4: the plaintext counter in the poll body is never
-/// acted on).
-pub fn ratchet_synchronize_packet_impl(
-    peer_identity: &str,
-) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| {
-        let msg = crate::packets::KyberMessage::Synchronize {
-            send_count: ratchet.send_message_count,
-        };
-        ratchet.ratchet_encrypt(msg.to_json()?.as_bytes())
-    })
-}
-
-/// Binary-TLV variant of [`ratchet_synchronize_packet_impl`] — returns the full
-/// TLV framing (including any rekey payload the message carried), so the peer
-/// can process it rekey-aware (audit finding #12).
-pub fn ratchet_synchronize_packet_binary_impl(peer_identity: &str) -> Result<Vec<u8>, KyberError> {
-    ratchet_synchronize_packet_impl(peer_identity)?.to_binary()
-}
-
-/// Process a peer's encrypted Synchronize packet carried as a BINARY TLV
-/// (audit finding #12): decrypts it rekey-aware with our receiving chain
-/// (authenticating the sender and adopting any DH rekey payload the packet
-/// carried at seq 100/200), verifies the packet type, and only then resyncs
-/// the receiving chain to the authenticated target. This is the ONLY resync
-/// path the wire protocol should use (audit finding #4).
-/// Process a peer's encrypted Synchronize packet carried as a BINARY TLV
-/// (audit finding #12): decrypts it rekey-aware with our receiving chain
-/// (authenticating the sender and adopting any DH rekey payload the packet
-/// carried at seq 100/200), verifies the packet type, and only then resyncs
-/// the receiving chain to the authenticated target.
-///
-/// AUDIT FINDING #4 FIX: the previous implementation decrypted the sync
-/// message first and then resynced to the payload's `send_count` — but the
-/// decrypt already advanced the chain past that position, so the target was
-/// always stale (dead code), and a real gap beyond max_skip could never be
-/// recovered. Now the chain is POSITIONED at the sync message's sequence
-/// number BEFORE decrypting when the gap exceeds max_skip (bounded by
-/// SYNC_MAX_GAP), so the sync message itself decrypts at its own position and
-/// the resync actually repairs handoff gaps up to 1000 messages. The advance
-/// is performed on a CLONE and only committed after AEAD verification, so an
-/// unauthenticated/injected sync can never move the chain.
-pub fn ratchet_process_synchronize_impl(
-    peer_identity: &str,
-    data: &[u8],
-) -> Result<u64, KyberError> {
-    let msg = crate::crypto::RatchetEncryptedMessage::from_binary(data)?;
-    if msg.nonce.len() != 12 {
-        return Err(KyberError::DecryptionFailed(
-            "Nonce must be 12 bytes".into(),
-        ));
-    }
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(&msg.nonce);
-    // The sync message's chain position (the sender's send-space seq) is
-    // encoded in the nonce — this is the authenticated resync target.
-    let sync_gen = u32::from_be_bytes([nonce_arr[0], nonce_arr[1], nonce_arr[2], nonce_arr[3]]);
-    let sync_seq = u64::from_be_bytes([
-        nonce_arr[4],
-        nonce_arr[5],
-        nonce_arr[6],
-        nonce_arr[7],
-        nonce_arr[8],
-        nonce_arr[9],
-        nonce_arr[10],
-        nonce_arr[11],
-    ]);
-
-    // Rate-limit per peer BEFORE touching the session (audit finding #4).
-    {
-        let mut last = LAST_SYNC_AT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(at) = last.get(peer_identity) {
-            if at.elapsed() < SYNC_RATE_WINDOW {
-                return Err(KyberError::CryptoError(format!(
-                    "Synchronize rate-limited for peer {peer_identity} — retry in {}s",
-                    SYNC_RATE_WINDOW.as_secs()
-                )));
-            }
-        }
-        last.insert(peer_identity.to_string(), std::time::Instant::now());
-    }
-
-    with_ratchet_session(peer_identity, |ratchet| {
-        // Shared rekey-aware decrypt for the live state or the trial clone.
-        let do_decrypt =
-            |r: &mut crate::crypto::DoubleRatchetState| -> Result<Vec<u8>, KyberError> {
-                if msg.rekey_x25519_pk.is_some()
-                    || msg.rekey_mlkem_pk.is_some()
-                    || msg.rekey_ciphertext.is_some()
-                {
-                    let rekey_x = msg
-                        .rekey_x25519_pk
-                        .as_deref()
-                        .map(|s| {
-                            <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
-                                expected: 32,
-                                got: s.len() as u64,
-                            })
-                        })
-                        .transpose()?;
-                    r.ratchet_decrypt_with_rekey(
-                        &nonce_arr,
-                        &msg.ciphertext,
-                        msg.rekey_ciphertext.as_deref(),
-                        rekey_x.as_ref(),
-                        msg.rekey_mlkem_pk.as_deref(),
-                    )
-                } else {
-                    r.ratchet_decrypt(&nonce_arr, &msg.ciphertext)
-                }
-            };
-        // Verify the decrypted payload is a Synchronize packet whose send_count
-        // matches the nonce position (a mismatched packet is a protocol error).
-        let verify = |plaintext: &[u8]| -> Result<(), KyberError> {
-            let packet =
-                crate::packets::KyberMessage::from_json(&String::from_utf8_lossy(plaintext))
-                    .map_err(|_| {
-                        KyberError::CryptoError(
-                            "Decrypted Synchronize payload is not a valid packet".into(),
-                        )
-                    })?;
-            let crate::packets::KyberMessage::Synchronize { send_count } = packet else {
-                return Err(KyberError::CryptoError(
-                    "Decrypted payload is not a Synchronize packet".into(),
-                ));
-            };
-            if send_count != sync_seq {
-                return Err(KyberError::CryptoError(format!(
-                    "Synchronize send_count {send_count} does not match nonce position {sync_seq}"
-                )));
-            }
-            Ok(())
-        };
-
-        let cur = ratchet.recv_message_count;
-        let gap = seq_gap(cur, sync_seq);
-        if sync_gen == ratchet.ratchet_generation && gap > ratchet.max_skip as u64 {
-            // Real handoff gap beyond max_skip: position the chain at the sync
-            // message's seq on a CLONE (bounded by SYNC_MAX_GAP + cumulative
-            // budget + pending-rekey refusal inside resync_receiving_chain),
-            // then decrypt. Only an AEAD-verified Synchronize commits the
-            // clone — the recovery path is gated entirely on authentication.
-            let mut trial = ratchet.clone();
-            let skipped = trial.resync_receiving_chain(sync_seq)?;
-            let plaintext = do_decrypt(&mut trial)?;
-            verify(&plaintext)?;
-            *ratchet = trial;
-            Ok(skipped)
-        } else {
-            // Within max_skip (or cross-generation): the normal decrypt path
-            // positions the chain; no additional resync is needed. A stale
-            // target (already aligned) is simply a no-op.
-            let plaintext = do_decrypt(ratchet)?;
-            verify(&plaintext)?;
-            Ok(0)
-        }
-    })
-}
-
-/// The receiver's current recv counter, used to build a Synchronize request
-/// when a gap exceeds max_skip.
-pub fn ratchet_recv_count_impl(peer_identity: &str) -> Result<u64, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| Ok(ratchet.recv_message_count))
-}
-
-/// The sender's current send counter.
-pub fn ratchet_send_count_impl(peer_identity: &str) -> Result<u64, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| Ok(ratchet.send_message_count))
-}
-
-/// `a.saturating_sub(b)` expressed as an explicit helper (the sync target must
-/// be ahead of the current position for a resync; equal/behind is a no-op).
-fn seq_gap(cur: u64, target: u64) -> u64 {
-    target.saturating_sub(cur)
-}
-
-/// Take the pending RekeyAck carrier seq (if any) and immediately produce the
-/// ENCRYPTED ACK as a binary TLV (audit finding #12). Combines
-/// `take_pending_rekey_ack_seq` + `generate_rekey_ack` + `to_binary` in one
-/// session lock so the carrier is not lost between calls. Returns None when no
-/// ACK is pending.
-pub fn ratchet_generate_rekey_ack_binary_impl(
-    peer_identity: &str,
-) -> Result<Option<Vec<u8>>, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| {
-        if let Some(seq) = ratchet.take_pending_rekey_ack_seq() {
-            let ack = ratchet.generate_rekey_ack(seq)?;
-            Ok(Some(ack.to_binary()?))
-        } else {
-            Ok(None)
-        }
-    })
-}
-
-/// NON-CONSUMING variant (audit finding #6): generate the encrypted ack TLV
-/// from the pending carrier WITHOUT clearing it, so a poll response that is
-/// lost on the wire can be retried on the next poll. Returns None when no ACK
-/// is pending.
-pub fn ratchet_generate_rekey_ack_binary_peek_impl(
-    peer_identity: &str,
-) -> Result<Option<Vec<u8>>, KyberError> {
-    with_ratchet_session(peer_identity, |ratchet| {
-        if let Some(seq) = ratchet.pending_rekey_ack_seq {
-            let ack = ratchet.generate_rekey_ack(seq)?;
-            Ok(Some(ack.to_binary()?))
-        } else {
-            Ok(None)
-        }
-    })
-}
-
-/// Clear the pending RekeyAck carrier. Called AFTER the poll response carrying
-/// the (peeked) ack has been successfully written to the wire, making ack
-/// consumption atomic with delivery (audit finding #6). Returns whether a
-/// pending ack existed.
-pub fn ratchet_consume_rekey_ack_impl(peer_identity: &str) -> bool {
-    with_ratchet_session(peer_identity, |ratchet| {
-        Ok(ratchet.pending_rekey_ack_seq.take().is_some())
-    })
-    .unwrap_or(false)
-}
-
-/// Decrypt a peer's RekeyAck carried as a BINARY TLV (audit finding #12) and
-/// process it — committing the peer's ack of OUR outgoing proposal. The ack is
-/// a normal ratchet_encrypt output, so it is decrypted REKEY-AWARE: when the
-/// sender's send chain is at a rekey boundary the ack itself carries a rekey
-/// payload and its AEAD tag is bound to the rekey AAD (audit finding #3).
-pub fn ratchet_process_rekey_ack_binary_impl(
-    peer_identity: &str,
-    data: &[u8],
-) -> Result<bool, KyberError> {
-    let msg = crate::crypto::RatchetEncryptedMessage::from_binary(data)?;
-    if msg.nonce.len() != 12 {
-        return Err(KyberError::DecryptionFailed(
-            "Nonce must be 12 bytes".into(),
-        ));
-    }
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(&msg.nonce);
-    let plaintext = with_ratchet_session(peer_identity, |ratchet| {
-        if msg.rekey_x25519_pk.is_some()
-            || msg.rekey_mlkem_pk.is_some()
-            || msg.rekey_ciphertext.is_some()
-        {
-            let rekey_x = msg
-                .rekey_x25519_pk
-                .as_deref()
-                .map(|s| {
-                    <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
-                        expected: 32,
-                        got: s.len() as u64,
-                    })
-                })
-                .transpose()?;
-            ratchet.ratchet_decrypt_with_rekey(
-                &nonce_arr,
-                &msg.ciphertext,
-                msg.rekey_ciphertext.as_deref(),
-                rekey_x.as_ref(),
-                msg.rekey_mlkem_pk.as_deref(),
-            )
-        } else {
-            ratchet.ratchet_decrypt(&nonce_arr, &msg.ciphertext)
-        }
-    })?;
-    let packet = crate::packets::KyberMessage::from_json(&String::from_utf8_lossy(&plaintext))
-        .map_err(|_| {
-            KyberError::CryptoError("Decrypted RekeyAck payload is not a valid packet".into())
-        })?;
-    let crate::packets::KyberMessage::RekeyAck { seq } = packet else {
-        return Err(KyberError::CryptoError(
-            "Decrypted payload is not a RekeyAck packet".into(),
-        ));
-    };
-    ratchet_process_rekey_ack_impl(peer_identity, seq)
-}
-
 #[cfg(test)]
 mod registry_tests {
     use super::*;
@@ -822,6 +256,193 @@ mod registry_tests {
         );
     }
 
+    /// Audit KYP-2026-02 #23: the registry lock ordering must be `map →
+    /// session` (never session → map). This test hammers concurrent
+    /// init/encrypt/import/remove against the SHARED process-global registry
+    /// to prove the documented order holds — the class of ABBA deadlock that
+    /// previously hung the session-key registry (cf. the session_handle ABBA
+    /// regression test).
+    #[test]
+    fn registry_lock_order_no_deadlock_under_concurrency() {
+        let pair = generate_hybrid_keypair();
+        let our_keypair = Some((
+            pair.x25519_pk.to_vec(),
+            pair.x25519_sk.to_vec(),
+            pair.mlkem_pk.clone(),
+            pair.mlkem_sk.clone(),
+        ));
+        let tag = format!("lock{}", std::process::id());
+
+        let our_keypair_a = our_keypair.clone();
+        let our_keypair_b = our_keypair.clone();
+        let tag_a = tag.clone();
+        let tag_b = tag.clone();
+        let t1 = std::thread::spawn(move || {
+            for i in 0..150u32 {
+                let id = format!("{tag_a}-a-{i}");
+                ratchet_remove_session_impl(&id);
+                ratchet_init_session_with_keypair_impl(
+                    &id,
+                    b"concurrent-secret-0123456789abcdef",
+                    true,
+                    our_keypair_a.clone(),
+                    None,
+                    None,
+                )
+                .expect("init a");
+                let _ = ratchet_encrypt_message_impl(&id, b"x");
+                let snap = ratchet_export_session_impl(&id)
+                    .expect("export")
+                    .expect("some");
+                let _ = ratchet_import_session_impl(&id, &snap);
+                assert!(ratchet_remove_session_impl(&id));
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for i in 0..150u32 {
+                let id = format!("{tag_b}-b-{i}");
+                ratchet_remove_session_impl(&id);
+                ratchet_init_session_with_keypair_impl(
+                    &id,
+                    b"concurrent-secret-0123456789abcdef",
+                    false,
+                    our_keypair_b.clone(),
+                    None,
+                    None,
+                )
+                .expect("init b");
+                let _ = ratchet_encrypt_message_impl(&id, b"y");
+                assert!(ratchet_remove_session_impl(&id));
+            }
+        });
+        t1.join().expect("thread 1 must finish without deadlock");
+        t2.join().expect("thread 2 must finish without deadlock");
+        // No leaked sessions remain from this test.
+        let peer_ids = ratchet_peer_ids_impl();
+        for id in peer_ids {
+            if id.contains(&tag) {
+                ratchet_remove_session_impl(&id);
+            }
+        }
+    }
+
+    /// Audit KYP-2026-02 #11: repeated peeks of the RekeyAck must be
+    /// IDEMPOTENT — the same TLV is re-served WITHOUT advancing the send chain.
+    /// Previously each peek re-encrypted a fresh ack at a new seq, so N lost
+    /// poll responses burned N chain positions (chain burn / skip-cache
+    /// pressure / max_skip exhaustion).
+    #[test]
+    fn rekey_ack_peek_is_idempotent_and_does_not_burn_chain() {
+        let (alice, bob) = alice_bob_registry("peek");
+        // Drive alice to the rekey boundary; bob stays aligned rekey-aware.
+        for _ in 0..100 {
+            let msg = ratchet_encrypt_message_impl(&alice, b"x").expect("encrypt");
+            let _ = with_ratchet_session(&bob, |r| {
+                let rekey_x = msg
+                    .rekey_x25519_pk
+                    .as_deref()
+                    .map(|s| {
+                        <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                            expected: 32,
+                            got: s.len() as u64,
+                        })
+                    })
+                    .transpose()?;
+                if msg.rekey_ciphertext.is_some() {
+                    r.ratchet_decrypt_with_rekey(
+                        &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce"),
+                        &msg.ciphertext,
+                        msg.rekey_ciphertext.as_deref(),
+                        rekey_x.as_ref(),
+                        msg.rekey_mlkem_pk.as_deref(),
+                    )
+                } else {
+                    r.ratchet_decrypt(
+                        &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce"),
+                        &msg.ciphertext,
+                    )
+                }
+            })
+            .expect("bob decrypt");
+        }
+        // Alice's seq-100 carrier carries the proposal; bob adopts it.
+        let carrier = ratchet_encrypt_message_impl(&alice, b"carrier").expect("carrier");
+        let _ = with_ratchet_session(&bob, |r| {
+            let rekey_x = carrier
+                .rekey_x25519_pk
+                .as_deref()
+                .map(|s| {
+                    <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                        expected: 32,
+                        got: s.len() as u64,
+                    })
+                })
+                .transpose()?;
+            r.ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(carrier.nonce.as_slice()).expect("nonce"),
+                &carrier.ciphertext,
+                carrier.rekey_ciphertext.as_deref(),
+                rekey_x.as_ref(),
+                carrier.rekey_mlkem_pk.as_deref(),
+            )
+        })
+        .expect("bob adopts proposal");
+        assert!(
+            with_ratchet_session(&bob, |r| Ok(r.pending_rekey_ack_seq.is_some())).expect("ack?"),
+            "bob must have a pending ack"
+        );
+
+        // The FIRST peek generates + caches the ack (one legitimate chain
+        // advance: the ack is a real ratchet message). Every SUBSEQUENT peek
+        // must re-serve the cached TLV without advancing the chain.
+        let send_before = ratchet_send_count_impl(&bob).expect("send count");
+        let ack1 = ratchet_generate_rekey_ack_binary_peek_impl(&bob)
+            .expect("peek1")
+            .expect("ack pending");
+        let send_after_first = ratchet_send_count_impl(&bob).expect("send count");
+        assert_eq!(
+            send_after_first,
+            send_before + 1,
+            "the first peek generates exactly one ack message"
+        );
+        let ack2 = ratchet_generate_rekey_ack_binary_peek_impl(&bob)
+            .expect("peek2")
+            .expect("ack pending");
+        assert_eq!(ack1, ack2, "peek must be idempotent — identical TLV");
+        let send_after_second = ratchet_send_count_impl(&bob).expect("send count");
+        assert_eq!(
+            send_after_second, send_after_first,
+            "a second peek must NOT advance the send chain"
+        );
+        // 100 further peeks (a long stretch of lost poll responses) must still
+        // burn nothing.
+        for _ in 0..100 {
+            let tlv = ratchet_generate_rekey_ack_binary_peek_impl(&bob)
+                .expect("peek")
+                .expect("ack pending");
+            assert_eq!(tlv, ack1);
+        }
+        assert_eq!(
+            ratchet_send_count_impl(&bob).expect("send count"),
+            send_after_second,
+            "repeated peeks must never advance the send chain"
+        );
+
+        // The peer still commits on the (cached) ack, and after consume the
+        // cache is cleared (a later peek returns None).
+        assert!(
+            ratchet_process_rekey_ack_binary_impl(&alice, &ack1).expect("process ack"),
+            "alice commits on the cached ack"
+        );
+        assert!(ratchet_consume_rekey_ack_impl(&bob));
+        assert!(
+            ratchet_generate_rekey_ack_binary_peek_impl(&bob)
+                .expect("peek after consume")
+                .is_none(),
+            "after consume the peek must return None"
+        );
+    }
+
     /// Audit finding #5: importing a STALE snapshot must not regress a live
     /// session that has advanced past it.
     #[test]
@@ -840,9 +461,157 @@ mod registry_tests {
         // Re-importing the older snapshot must be a NO-OP (live is ahead).
         ratchet_import_session_impl(&alice, &snap).expect("import");
         assert_eq!(
-            with_ratchet_session(&alice, |r| Ok(r.send_message_count)).expect("count"),
+            with_ratchet_session(&alice, |r| Ok(r.send.message_count)).expect("count"),
             11,
             "stale import must not regress the live send count"
+        );
+    }
+
+    /// AUDIT FINDING #2 (HIGH, pairing-epoch watermark): a snapshot from a
+    /// DIFFERENT pairing epoch must never be imported over a live session.
+    /// The failure scenario: pair → polls advance the session to gen>0; user
+    /// re-pairs (ratchetRemoveSession + fresh init, gen 0, NEW master secret);
+    /// a MainActivity recreation then re-imports the OLD pre-re-pair snapshot
+    /// (gen>0, OLD key material). The legacy high-water guard evaluates
+    /// live.gen(0) > snap.gen(G) → false, so the import would proceed and
+    /// REVERT the fresh session — a silent state rollback that presents as
+    /// "paired but nothing syncs". The epoch watermark refuses it.
+    #[test]
+    fn cross_epoch_snapshot_import_is_refused() {
+        let (alice, bob) = alice_bob_registry("epoch");
+        // Advance alice's live session past a rekey boundary by running a full
+        // round-trip against bob (alice encrypts, bob decrypts rekey-aware,
+        // bob ACKs, alice commits) — mirroring the production ACK channel.
+        for _ in 0..100 {
+            let msg = ratchet_encrypt_message_impl(&alice, b"old-pairing").expect("encrypt");
+            let _ = with_ratchet_session(&bob, |r| {
+                let rekey_x = msg
+                    .rekey_x25519_pk
+                    .as_deref()
+                    .map(|s| {
+                        <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                            expected: 32,
+                            got: s.len() as u64,
+                        })
+                    })
+                    .transpose()?;
+                if msg.rekey_ciphertext.is_some() {
+                    r.ratchet_decrypt_with_rekey(
+                        &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce"),
+                        &msg.ciphertext,
+                        msg.rekey_ciphertext.as_deref(),
+                        rekey_x.as_ref(),
+                        msg.rekey_mlkem_pk.as_deref(),
+                    )
+                } else {
+                    r.ratchet_decrypt(
+                        &<[u8; 12]>::try_from(msg.nonce.as_slice()).expect("nonce"),
+                        &msg.ciphertext,
+                    )
+                }
+            })
+            .expect("bob decrypt");
+        }
+        // The seq-100 carrier staged alice's proposal on bob; bob ACKs it and
+        // alice commits → gen 1. (This mirrors the wire RekeyAck round-trip.)
+        let carrier = ratchet_encrypt_message_impl(&alice, b"carrier").expect("carrier");
+        let _ = with_ratchet_session(&bob, |r| {
+            let rekey_x = carrier
+                .rekey_x25519_pk
+                .as_deref()
+                .map(|s| {
+                    <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                        expected: 32,
+                        got: s.len() as u64,
+                    })
+                })
+                .transpose()?;
+            r.ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(carrier.nonce.as_slice()).expect("nonce"),
+                &carrier.ciphertext,
+                carrier.rekey_ciphertext.as_deref(),
+                rekey_x.as_ref(),
+                carrier.rekey_mlkem_pk.as_deref(),
+            )
+        })
+        .expect("bob adopts proposal");
+        let ack_seq = with_ratchet_session(&bob, |r| Ok(r.pending_rekey_ack_seq)).expect("ack");
+        if let Some(seq) = ack_seq {
+            assert!(
+                ratchet_process_rekey_ack_impl(&alice, seq).expect("process ack"),
+                "alice must commit her outgoing rekey on bob's ack"
+            );
+        }
+        assert!(
+            with_ratchet_session(&alice, |r| Ok(r.ratchet_generation)).expect("gen") > 0,
+            "precondition: the old-pairing session advanced past a rekey boundary"
+        );
+        let old_snap = ratchet_export_session_impl(&alice)
+            .expect("export")
+            .expect("session exists");
+
+        // Simulate a RE-PAIR: remove the old session and init a FRESH one (gen
+        // 0, new master secret), then bump its pairing epoch — exactly what the
+        // Android flow does after `ratchetRemoveSession` + fresh init.
+        ratchet_remove_session_impl(&alice);
+        let pair = generate_hybrid_keypair();
+        ratchet_init_session_with_keypair_impl(
+            &alice,
+            b"fresh-repair-master-secret-0123456789abcdef",
+            true,
+            Some((
+                pair.x25519_pk.to_vec(),
+                pair.x25519_sk.to_vec(),
+                pair.mlkem_pk.clone(),
+                pair.mlkem_sk.clone(),
+            )),
+            None,
+            None,
+        )
+        .expect("fresh re-pair init");
+        ratchet_bump_pairing_epoch_impl(&alice)
+            .expect("bump: live session exists");
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.pairing_epoch)).expect("epoch"),
+            1,
+            "the re-paired session must carry epoch 1"
+        );
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.ratchet_generation)).expect("gen"),
+            0,
+            "the re-paired session must be fresh (gen 0)"
+        );
+
+        // The OLD snapshot (epoch 0, gen>0) is STRICTLY AHEAD of the fresh live
+        // session (epoch 1, gen 0) — the legacy high-water guard would import
+        // it. The epoch watermark must refuse it.
+        ratchet_import_session_impl(&alice, &old_snap).expect("import call");
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.pairing_epoch)).expect("epoch"),
+            1,
+            "cross-epoch snapshot must NOT overwrite the re-paired session"
+        );
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.ratchet_generation)).expect("gen"),
+            0,
+            "the re-paired session must remain fresh after the refused import"
+        );
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.root_key)).expect("root"),
+            {
+                let shared = b"fresh-repair-master-secret-0123456789abcdef";
+                let p = generate_hybrid_keypair();
+                let probe = crate::crypto::DoubleRatchetState::new_with_keypair(
+                    shared,
+                    true,
+                    p,
+                    None,
+                    None,
+                )
+                .expect("probe init");
+                probe.root_key
+            },
+            "the re-paired session's root key must NOT revert to the old pairing's key material"
         );
     }
 }

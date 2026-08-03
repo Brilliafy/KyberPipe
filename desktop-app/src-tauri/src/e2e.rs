@@ -36,6 +36,20 @@ fn pairing_poll_clipboard_roundtrip() {
     // pairing request that does not echo the nonce it issued.
     state.issue_fresh_pairing_nonce();
     let pairing_nonce = state.get_pending_pairing_nonce();
+    // AUDIT F9: the QR payload the renderer builds must ALWAYS carry a 32-hex
+    // pairing nonce and a 64-hex server cert hash — assert both shapes here so
+    // a token-gate regression (or a dropped field) is caught at the wire level.
+    assert_eq!(
+        pairing_nonce.len(),
+        32,
+        "pairing nonce must be 32 hex chars (16 random bytes), got {pairing_nonce:?}"
+    );
+    let server_cert_hash = core_crypto::quic_server_cert_hash().unwrap_or_default();
+    assert_eq!(
+        server_cert_hash.len(),
+        64,
+        "server cert hash must be 64 hex chars (SHA-256), got {server_cert_hash:?}"
+    );
     let server_pair = core_crypto::generate_pq_keypair().expect("server keypair");
     state.set_keypair(Some(server_pair.clone()));
 
@@ -89,6 +103,43 @@ fn pairing_poll_clipboard_roundtrip() {
         server_pair.mlkem_pk.clone(),
     )
     .expect("client KEM");
+
+    // AUDIT FINDING #1 (CRITICAL, regression): the bootstrap pairing
+    // connection MUST present the client identity certificate. The defect was
+    // that the Android app connected cert-less at pairing time, so the desktop
+    // recorded an EMPTY TLS-observed peer cert hash, the pin/map/mTLS-rebind
+    // block in perform_sas_confirmation was skipped, and every post-pairing
+    // stream was rejected against an empty pinned set ("paired but nothing
+    // syncs"). Drive the exact defective path here: a cert-less connection
+    // submitting a valid KEM handshake must be REJECTED loudly (before the
+    // rate limiter, so it does not consume the legitimate peer's budget), not
+    // silently admitted to a SAS-pending state that can never sync.
+    {
+        let cert_less_conn = block_on_io_pub(QuicAppManager::connect(server_addr, None, None))
+            .expect("cert-less QUIC connect");
+        let cert_less_body = serde_json::json!({
+            "name": "E2E Cert-Less Phone",
+            "ciphertext_hex": hex_encode(&kem.ciphertext),
+            "client_pk_hex": hex_encode(&client_pair.mlkem_pk),
+            "client_x25519_pk_hex": hex_encode(&client_pair.x25519_pk),
+            "pairing_nonce_hex": pairing_nonce,
+        })
+        .to_string()
+        .into_bytes();
+        let cert_less_resp = send_recv(&cert_less_conn, STREAM_PAIRING, &cert_less_body);
+        let cert_less_json: serde_json::Value =
+            serde_json::from_slice(&cert_less_resp).expect("cert-less pairing response");
+        assert_eq!(
+            cert_less_json["reason"].as_str(),
+            Some("Client certificate required for pairing"),
+            "cert-less pairing must be rejected loudly, got: {cert_less_json}"
+        );
+        assert!(
+            !state.settings.lock().is_paired,
+            "cert-less pairing must never reach the paired state"
+        );
+        drop(cert_less_conn);
+    }
 
     // 2) Connect over QUIC, PRESENTING the client identity certificate.
     let conn = block_on_io_pub(QuicAppManager::connect(server_addr, None, client_certs()))
@@ -152,16 +203,20 @@ fn pairing_poll_clipboard_roundtrip() {
     // keys, so decapsulation must use the matching private keys. Passing a fresh
     // unexchanged keypair (the legacy `ratchet_init_session` behaviour) would
     // permanently desync the session at the first rekey boundary.
-    core_crypto::ratchet_init_session_with_keypair(
-        hex_encode(&server_pair.mlkem_pk),
-        kem.shared_secret.clone(),
+    // The raw-secrets UniFFI export is cfg(test)-gated (audit KYP-2026-02 #25);
+    // this e2e calls the Rust-internal impl directly with the same semantics.
+    core_crypto::ratchet_ffi::ratchet_init_session_with_keypair_impl(
+        &hex_encode(&server_pair.mlkem_pk),
+        &kem.shared_secret,
         false, // client is the responder
-        client_pair.x25519_pk.clone(),
-        client_pair.x25519_sk.clone(),
-        client_pair.mlkem_pk.clone(),
-        client_pair.mlkem_sk.clone(),
-        server_pair.x25519_pk.clone(),
-        server_pair.mlkem_pk.clone(),
+        Some((
+            client_pair.x25519_pk.clone(),
+            client_pair.x25519_sk.clone(),
+            client_pair.mlkem_pk.clone(),
+            client_pair.mlkem_sk.clone(),
+        )),
+        Some(&server_pair.x25519_pk),
+        Some(&server_pair.mlkem_pk),
     )
     .expect("client ratchet init");
 
@@ -251,8 +306,14 @@ fn pairing_poll_clipboard_roundtrip() {
         );
 
         // Poll for the server's RekeyAck + Synchronize (in server send order:
-        // rekey_ack first, then sync).
-        let poll = send_recv(&conn, STREAM_POLL, b"");
+        // rekey_ack first, then sync). AUDIT FINDING #16: the Synchronize
+        // carrier is now CONDITIONAL — the client must request it via
+        // `need_sync` (mirroring the Android loop's heartbeat/decrypt-gap
+        // logic) for the desktop to attach its carrier. The e2e requests a
+        // sync on every poll so the wire-level alignment path is still fully
+        // exercised.
+        let poll_body = serde_json::json!({ "need_sync": true }).to_string();
+        let poll = send_recv(&conn, STREAM_POLL, poll_body.as_bytes());
         let poll_json: serde_json::Value = serde_json::from_slice(&poll).expect("poll response");
         if let Some(ack) = poll_json.get("rekey_ack_encrypted") {
             let tlv_b64 = ack["tlv_b64"].as_str().expect("ack tlv_b64");
@@ -300,7 +361,14 @@ fn pairing_poll_clipboard_roundtrip() {
     let _ = core_crypto::quic_app::release_server_endpoint_for_tests();
     // Join with a generous bound — the dispatch loop breaks on the oneshot and
     // the per-connection tasks abort when the thread's runtime drops.
-    let _ = dispatch.join_timeout(std::time::Duration::from_secs(20));
+    // HARD join (audit follow-up): the previous `join_timeout(20s)` silently
+    // gave up if the dispatch thread ran long, letting its non-daemon runtime
+    // workers keep the test binary open forever (the CI hang). The dispatch is
+    // designed to exit on `stop` — the accept loop breaks on the oneshot and
+    // dropping the runtime aborts the per-connection tasks — so a blocking
+    // join is correct and makes any linger a visible teardown failure instead
+    // of an invisible post-assertions hang.
+    let _ = dispatch.join();
     // Stop the shared IO runtime (bounded blocking) so its worker threads do
     // not keep the test process alive after the assertions complete.
     core_crypto::shutdown_io_runtime();
@@ -309,31 +377,7 @@ fn pairing_poll_clipboard_roundtrip() {
     // — both keep non-daemon threads alive and would otherwise hang the
     // process after the tests pass.
     core_crypto::shutdown_ffi_runtime();
-    crate::state::services::shutdown_persist_for_tests();
-}
-
-/// Block on a join handle with a timeout (std has no timed join).
-trait JoinTimeout {
-    fn join_timeout(
-        self,
-        _d: std::time::Duration,
-    ) -> Result<(), Box<dyn std::any::Any + Send + 'static>>;
-}
-impl JoinTimeout for std::thread::JoinHandle<()> {
-    fn join_timeout(
-        self,
-        d: std::time::Duration,
-    ) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
-        for _ in 0..(d.as_millis() / 100).max(1) {
-            if self.is_finished() {
-                return self.join();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        // Timed out — detach rather than hang the process.
-        let _ = self;
-        Ok(())
-    }
+    crate::state::shutdown_persist_for_tests();
 }
 
 /// Send one frame and read the matching response on a connected QUIC stream.

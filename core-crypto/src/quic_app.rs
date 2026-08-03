@@ -21,7 +21,7 @@ pub const STREAM_REKEY_ACK: u8 = 0x06;
 pub const STREAM_SMS: u8 = 0x07;
 
 /// Maximum message body size (1 MB) — clipboard/media payloads
-pub const MAX_MESSAGE_SIZE: usize = 1 * 1024 * 1024;
+pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Binary frame: [stream_type: 1B][body_len: 4B][body: body_len]
 #[derive(Debug)]
@@ -64,53 +64,6 @@ impl QuicFrame {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Audit finding #8: a frame whose declared body length exceeds
-    /// MAX_MESSAGE_SIZE must be rejected from the header alone — the server
-    /// never buffers an oversized body from an unauthenticated peer.
-    #[test]
-    fn frame_body_size_cap_enforced() {
-        // Encode a frame with an oversized body length.
-        let mut buf = vec![0u8; 5];
-        buf[0] = 0x04; // STREAM_POLL
-        buf[1..5].copy_from_slice(&(MAX_MESSAGE_SIZE as u32 + 1).to_be_bytes());
-        assert!(QuicFrame::decode(&buf).is_err());
-        // A valid small frame decodes.
-        let frame = QuicFrame {
-            stream_type: 0x04,
-            body: b"hello".to_vec(),
-        };
-        let encoded = frame.encode();
-        let decoded = QuicFrame::decode(&encoded).expect("valid frame decodes");
-        assert_eq!(decoded.stream_type, 0x04);
-        assert_eq!(decoded.body, b"hello");
-    }
-
-    /// Audit finding #8: the binary TLV round-trip of a ratchet message (the
-    /// wire format used for clipboard / rekey-ack / sync payloads) must reject
-    /// truncated input.
-    #[test]
-    fn ratchet_tlv_rejects_truncation() {
-        let msg = crate::crypto::RatchetEncryptedMessage {
-            nonce: vec![1u8; 12],
-            ciphertext: vec![2u8; 16],
-            rekey_x25519_pk: None,
-            rekey_mlkem_pk: None,
-            rekey_ciphertext: None,
-        };
-        let bin = msg.to_binary().unwrap();
-        for cut in 0..bin.len() {
-            assert!(
-                crate::crypto::RatchetEncryptedMessage::from_binary(&bin[..cut]).is_err(),
-                "truncated TLV at {cut} must be rejected"
-            );
-        }
-    }
-}
-
 /// High-level QUIC application connection manager
 pub struct QuicAppManager;
 
@@ -118,6 +71,46 @@ pub struct QuicAppManager;
 /// Set after SAS pairing confirms the client's identity; read by bind_server
 /// to configure server-side cert pinning on subsequent QUIC connections.
 static PINNED_CLIENT_CERT: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+
+/// AUDIT FINDING #4 (multi-device): the set of client-cert hashes the TLS
+/// layer will admit. Seeded by `set_pinned_client_cert` (the first paired
+/// device) and EXTENDED by `register_allowed_client_cert` for every additional
+/// device whose SAS pairing completes — mirroring the per-peer cert→ratchet-id
+/// map the STREAM layer already maintains. The server verifier enforces this
+/// same set, so a second paired device's certificate passes the TLS handshake
+/// exactly when the stream layer would route it. `rebind_server` rebuilds the
+/// verifier from the full set.
+static ALLOWED_CLIENT_CERTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn allowed_client_certs() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    ALLOWED_CLIENT_CERTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Register an ADDITIONAL authorized client-cert hash (audit finding #4).
+/// Called by the desktop whenever a second/third device's SAS pairing
+/// completes (in `register_peer_cert_mapping`), so the TLS allowlist and the
+/// stream-layer peer map can never diverge. Idempotent; rejects empty/malformed
+/// hashes. An empty first-pairing pin is validated by `set_pinned_client_cert`;
+/// this extends (never clears) the set.
+pub fn register_allowed_client_cert(hash: String) {
+    if hash.is_empty() || hash.len() != 64 || hex::decode(&hash).is_err() {
+        warn!(
+            "[mTLS] Rejecting invalid client cert hash (len={}): not adding to allowlist",
+            hash.len()
+        );
+        return;
+    }
+    allowed_client_certs().insert(hash);
+}
+
+/// Current authorized client-cert hashes (audit finding #4) — the TLS server
+/// verifier set. Empty before any pairing completes.
+pub fn allowed_client_cert_hashes() -> Vec<String> {
+    allowed_client_certs().iter().cloned().collect()
+}
 /// Process-global QUIC server endpoint. Swappable for mTLS rebind after pairing.
 /// The accept loop reads from this; when rebind swaps the endpoint, the old
 /// accept() returns an error and the loop restarts with the new endpoint.
@@ -199,7 +192,10 @@ pub fn set_pinned_client_cert(hash: String) {
     *PINNED_CLIENT_CERT
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap() = Some(hash);
+        .unwrap() = Some(hash.clone());
+    // AUDIT FINDING #4: seed the TLS allowlist with the first paired device so
+    // bind_server's verifier admits it.
+    register_allowed_client_cert(hash);
 }
 
 fn cert_dir() -> PathBuf {
@@ -220,43 +216,117 @@ fn load_or_generate_cert() -> Result<
     let cert_path = cert_dir().join("server_cert.der");
     let key_path = cert_dir().join("server_key.der");
 
-    if cert_path.exists() && key_path.exists() {
+    // AUDIT F18: the server's TLS private key must NOT sit recoverable in
+    // plaintext on disk (even 0600 — any same-user reader could impersonate
+    // the desktop after a data-dir exfiltration). The key is stored in the OS
+    // keyring (the same keyring crate pattern used for the pairing keypair);
+    // only the certificate stays on disk. A legacy `server_key.der` file is
+    // MIGRATED into the keyring and then deleted.
+    if cert_path.exists() {
         let cert_der = std::fs::read(&cert_path)
             .map_err(|e| KyberError::NetworkError(format!("Failed to read cert: {e}")))?;
-        let key_der = std::fs::read(&key_path)
-            .map_err(|e| KyberError::NetworkError(format!("Failed to read key: {e}")))?;
-
         let cert = rustls::pki_types::CertificateDer::from(cert_der);
-        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into());
-        return Ok((vec![cert], key));
+
+        // 1) Keyring first — the preferred store.
+        if let Ok(key_der) = keyring_server_key() {
+            return Ok((
+                vec![cert],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+            ));
+        }
+        // 2) Legacy plaintext key file — migrate it into the keyring and
+        //    remove it from disk. The key file is deleted ONLY after the
+        //    keyring store succeeds; if the keyring is unavailable, the
+        //    plaintext file is KEPT (with a warning) so the server can still
+        //    start — never destroy the only copy of the key.
+        if key_path.exists() {
+            if let Ok(key_der) = std::fs::read(&key_path) {
+                match keyring_store_server_key(&key_der) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&key_path);
+                        return Ok((
+                            vec![cert],
+                            rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[TLS] Keyring unavailable ({e}); keeping legacy plaintext server key on disk"
+                        );
+                        return Ok((
+                            vec![cert],
+                            rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+                        ));
+                    }
+                }
+            }
+        }
+        // 3) Keyring unavailable AND no key file (e.g. a headless box with no
+        //    secret-service backend and a migrated-away key file). Generate a
+        //    fresh key; prefer the keyring, but if THAT also fails, use the
+        //    key in memory for this process (the identity rotates on the next
+        //    start — acceptable for a broken-keyring environment, and strictly
+        //    better than refusing to serve).
+        let (certs, key) = network::generate_self_signed_cert()?;
+        if let rustls::pki_types::PrivateKeyDer::Pkcs8(doc) = &key {
+            if keyring_store_server_key(doc.secret_pkcs8_der()).is_err() {
+                warn!(
+                    "[TLS] Keyring store failed on first run; server identity is process-local only"
+                );
+            }
+        }
+        let _ = std::fs::write(&cert_path, cert.as_ref());
+        return Ok((certs, key));
     }
 
-    // Generate new cert and persist
+    // Generate new cert; persist the cert on disk and the key in the keyring.
     let (certs, key) = network::generate_self_signed_cert()?;
     if let Some(cert) = certs.first() {
         let _ = std::fs::write(&cert_path, cert.as_ref());
     }
     if let rustls::pki_types::PrivateKeyDer::Pkcs8(doc) = &key {
-        let _ = std::fs::write(&key_path, doc.secret_pkcs8_der().as_ref());
+        keyring_store_server_key(doc.secret_pkcs8_der())?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
     }
     Ok((certs, key))
+}
+
+/// Keyring service/entry names for the server TLS identity key (audit F18).
+const TLS_KEYRING_SERVICE: &str = "kyberpipe";
+const TLS_KEYRING_ENTRY: &str = "server_tls_key";
+
+fn keyring_server_key() -> Result<Vec<u8>, KyberError> {
+    let entry = keyring::Entry::new(TLS_KEYRING_SERVICE, TLS_KEYRING_ENTRY)
+        .map_err(|e| KyberError::NetworkError(format!("Keyring access failed: {e}")))?;
+    let stored = entry
+        .get_password()
+        .map_err(|e| KyberError::NetworkError(format!("Keyring read failed: {e}")))?;
+    hex::decode(&stored)
+        .map_err(|e| KyberError::NetworkError(format!("Stored TLS key is not hex: {e}")))
+}
+
+fn keyring_store_server_key(key_der: &[u8]) -> Result<(), KyberError> {
+    let entry = keyring::Entry::new(TLS_KEYRING_SERVICE, TLS_KEYRING_ENTRY)
+        .map_err(|e| KyberError::NetworkError(format!("Keyring access failed: {e}")))?;
+    entry
+        .set_password(&hex::encode(key_der))
+        .map_err(|e| KyberError::NetworkError(format!("Keyring write failed: {e}")))
 }
 
 impl QuicAppManager {
     pub async fn bind_server(port: u16) -> Result<Endpoint, KyberError> {
         // Try to load persisted cert; generate new one only on first run
         let (certs, key) = load_or_generate_cert()?;
-        let pinned = PINNED_CLIENT_CERT
-            .get()
-            .and_then(|m| m.lock().ok())
-            .and_then(|h| h.clone());
-        let server_config = network::configure_quic_server(certs, key, true, pinned)?;
+        // AUDIT FINDING #4: the verifier is backed by the FULL authorized
+        // client-cert set (multi-device), not a single pin. `set_pinned_client_cert`
+        // seeds it with the first paired device; `register_allowed_client_cert`
+        // extends it for every additional device whose SAS pairing completes.
+        let allowed = allowed_client_cert_hashes();
+        let server_config = network::configure_quic_server(certs, key, true, allowed)?;
         let socket_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         let endpoint = Endpoint::server(server_config, socket_addr)
             .map_err(|e| KyberError::NetworkError(format!("QUIC server bind failed: {e}")))?;
@@ -273,13 +343,12 @@ impl QuicAppManager {
     /// old endpoint's `accept()` returns None, which triggers the dispatch loop
     /// to re-acquire the new endpoint and continue.
     pub async fn rebind_server(port: u16) -> Result<(), KyberError> {
-        let pinned = PINNED_CLIENT_CERT
-            .get()
-            .and_then(|m| m.lock().ok())
-            .and_then(|h| h.clone());
-        if pinned.is_none() {
+        // AUDIT FINDING #4: rebinding requires at least ONE authorized client
+        // cert. An empty allowlist means no pairing ever completed — rebinding
+        // with an empty verifier would REJECT every client (required=true).
+        if allowed_client_cert_hashes().is_empty() {
             return Err(KyberError::NetworkError(
-                "No pinned client cert set — cannot rebind with mTLS".into(),
+                "No authorized client certs registered — cannot rebind with mTLS".into(),
             ));
         }
         // Preserve the currently-bound port so a rebind never moves the
@@ -313,8 +382,8 @@ impl QuicAppManager {
                 .with_protocol_versions(&[&rustls::version::TLS13])
                 .map_err(|e| KyberError::NetworkError(e.to_string()))?
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(network::PinnedCertVerifier::new(
-                    pinned_cert_hash.clone(),
+                .with_custom_certificate_verifier(Arc::new(network::PinnedCertVerifier::single(
+                    pinned_cert_hash.clone().unwrap_or_default(),
                     pinned_cert_hash.is_some(),
                 )))
                 .with_client_auth_cert(certs, key)
@@ -418,5 +487,52 @@ impl QuicAppManager {
             }
         }
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding #8: a frame whose declared body length exceeds
+    /// MAX_MESSAGE_SIZE must be rejected from the header alone — the server
+    /// never buffers an oversized body from an unauthenticated peer.
+    #[test]
+    fn frame_body_size_cap_enforced() {
+        // Encode a frame with an oversized body length.
+        let mut buf = vec![0u8; 5];
+        buf[0] = 0x04; // STREAM_POLL
+        buf[1..5].copy_from_slice(&(MAX_MESSAGE_SIZE as u32 + 1).to_be_bytes());
+        assert!(QuicFrame::decode(&buf).is_err());
+        // A valid small frame decodes.
+        let frame = QuicFrame {
+            stream_type: 0x04,
+            body: b"hello".to_vec(),
+        };
+        let encoded = frame.encode();
+        let decoded = QuicFrame::decode(&encoded).expect("valid frame decodes");
+        assert_eq!(decoded.stream_type, 0x04);
+        assert_eq!(decoded.body, b"hello");
+    }
+
+    /// Audit finding #8: the binary TLV round-trip of a ratchet message (the
+    /// wire format used for clipboard / rekey-ack / sync payloads) must reject
+    /// truncated input.
+    #[test]
+    fn ratchet_tlv_rejects_truncation() {
+        let msg = crate::crypto::RatchetEncryptedMessage {
+            nonce: vec![1u8; 12],
+            ciphertext: vec![2u8; 16],
+            rekey_x25519_pk: None,
+            rekey_mlkem_pk: None,
+            rekey_ciphertext: None,
+        };
+        let bin = msg.to_binary().unwrap();
+        for cut in 0..bin.len() {
+            assert!(
+                crate::crypto::RatchetEncryptedMessage::from_binary(&bin[..cut]).is_err(),
+                "truncated TLV at {cut} must be rejected"
+            );
+        }
     }
 }

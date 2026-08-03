@@ -205,9 +205,17 @@ const handleDeleteConnection = async () => {
   const loadPairingConfig = async () => {
     if (!keyPair.value) return;
     try {
+      // Audit F9 (regression): `get_pairing_config` is token-gated (KYP-2026-02
+      // #6 hardening) but the renderer never passed a token, so every call
+      // errored and the error was swallowed. Mint a fresh token for this exact
+      // action and pass it through.
+      const token = await invoke<string>("request_privilege_token", {
+        action: "get_pairing_config",
+      });
       const config = await invoke<any>("get_pairing_config", {
         hostPkHex: keyPair.value.mlkem_pk_hex,
         wireguardPkHex: keyPair.value.x25519_pk_hex,
+        token,
       });
       pairingConfigJson.value = JSON.stringify(config);
     } catch (e) {

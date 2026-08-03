@@ -1,62 +1,31 @@
 use crate::state::AppState;
-use std::sync::atomic::Ordering;
+use sha2::Digest;
 use std::sync::Arc;
 
-use super::DESKTOP_SESSION_KEY_HANDLE;
-use super::IS_SESSION_KEY_AUTHENTICATED;
-
-/// Decrypt a payload from the JSON+hex wire format. THIS is the single wire
-/// format both platforms use (audit finding #15): the previous `KP\x01` binary
-/// frame parser was unreachable in production (Android only ever sent
-/// JSON+hex), so it has been removed — one encoder/decoder, no drift surface.
-fn decrypt_json_payload(
-    body: &[u8],
-    peer_id: &str,
-    sk_handle: u64,
-    sk_auth: bool,
-) -> Option<String> {
-    let body_str = String::from_utf8_lossy(body);
-    let json = serde_json::from_str::<serde_json::Value>(&body_str).ok()?;
-
-    // Try ratchet decryption first. Audit finding #12: the ratchet payload is a
-    // single base64-wrapped BINARY TLV (`tlv_b64`) — one serialization contract
-    // instead of five independent hex fields.
-    if !peer_id.is_empty() {
-        if let Some(enc) = json.get("encrypted_ratchet") {
-            let tlv_b64 = enc.get("tlv_b64").and_then(|v| v.as_str())?;
-            let bin =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()?;
-            match core_crypto::ratchet_decrypt_message_binary(peer_id.to_string(), bin) {
-                Ok(pt) => return String::from_utf8(pt).ok(),
-                Err(e) => {
-                    tracing::warn!("[Clipboard] Ratchet binary decrypt failed for {peer_id}: {e}")
-                }
-            }
-        }
-    }
-
-    // Fallback to session key decryption
-    if sk_auth && sk_handle != 0 {
-        if let Some(enc) = json.get("encrypted") {
-            let nonce_hex = enc.get("nonce_hex").and_then(|v| v.as_str())?;
-            let ct_hex = enc.get("ciphertext_hex").and_then(|v| v.as_str())?;
-            if let (Ok(nonce), Ok(ct)) = (hex::decode(nonce_hex), hex::decode(ct_hex)) {
-                if let Ok(pt) = core_crypto::session_key_decrypt(sk_handle, nonce, ct) {
-                    return String::from_utf8(pt).ok();
-                }
-            }
-        }
-    }
-    None
+/// Truncated SHA-256 hash of a clipboard payload, used for LOGGING ONLY
+/// (audit finding #13). The legacy log wrote the first 30 chars of the
+/// plaintext — a password copied on the phone would persist in the desktop's
+/// in-app log pane. The hash preserves enough to correlate a transfer in the
+/// log ("clipboard changed") without persisting the content.
+pub(crate) fn clipboard_log_fingerprint(text: &str) -> String {
+    let digest = sha2::Sha256::digest(text.as_bytes());
+    format!("{}{}", hex::encode(&digest[..8]), "…")
 }
 
-pub(crate) async fn handle_clipboard(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
-    let peer_id = s.get_pairing_initiator_pk();
-    let sk_handle = DESKTOP_SESSION_KEY_HANDLE.load(Ordering::Acquire);
-    let sk_auth = IS_SESSION_KEY_AUTHENTICATED.load(Ordering::Acquire);
-
-    // Single wire format: JSON+hex (audit finding #15).
-    let text = decrypt_json_payload(&body, &peer_id, sk_handle, sk_auth);
+/// The ratchet-TLV decrypt used by EVERY inbound handler (clipboard, SMS,
+/// media, rekey-ack). Audit KYP-2026-02 #17: the ratchet TLV
+/// (`encrypted_ratchet.tlv_b64`) is the ONLY accepted wire format — the legacy
+/// session-key hex fallback (`encrypted.nonce_hex` / `encrypted.ciphertext_hex`)
+/// is deleted, and a body that carries only those hex fields is a protocol
+/// violation that decrypts to None. The single shared implementation lives in
+/// `handlers::decrypt_json_payload` so the contract can never drift per stream
+/// (audit F8).
+pub(crate) async fn handle_clipboard(body: Vec<u8>, peer_id: String, s: Arc<AppState>) -> Vec<u8> {
+    // Single wire format: ratchet TLV (audit finding #15 / KYP-2026-02 #17).
+    // `peer_id` is resolved per-CONNECTION from the TLS-observed client cert
+    // hash (audit F12) so a second paired device decrypts against its OWN
+    // session, never the first device's.
+    let text = crate::handlers::decrypt_json_payload(&body, &peer_id);
 
     // A non-empty body that cannot be decrypted is a protocol failure, not a
     // no-op — surface it so clients (and integration tests) can distinguish a
@@ -71,20 +40,54 @@ pub(crate) async fn handle_clipboard(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8>
     };
 
     if !decrypted.is_empty() && s.check_and_record_clipboard(&decrypted) {
-        // Audit finding #9: the OS clipboard write (arboard / wl-copy / xclip
-        // subprocesses with multi-second waits) must NEVER execute on the
-        // accept-loop worker — it would stall every concurrent QUIC stream.
-        // Delegate to the tokio blocking pool, which is sized independently of
-        // the 2-worker IO accept-loop runtime.
-        let text = decrypted.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = crate::portal::sync_clipboard_text(&text);
-        })
-        .await;
-        s.add_log(format!(
-            "[Clipboard] Received via QUIC: \"{}\"",
-            decrypted.chars().take(30).collect::<String>()
-        ));
+        // AUDIT FINDING #13: inbound clipboard writes are now gated by an
+        // explicit one-way policy (`inbound_clipboard_enabled`, default ON).
+        // The phone is still authenticated (the payload is ratchet-AEAD
+        // verified), but a compromised/repackaged phone app must not be able
+        // to push phishing URLs / shell-ish text into the desktop clipboard
+        // without a policy the user controls. When the policy is OFF, the
+        // payload is decrypted and deduplicated but the OS clipboard is NOT
+        // written — an app event lets the UI surface "phone sent clipboard
+        // content (blocked)" instead.
+        let inbound_enabled = { s.settings.lock().inbound_clipboard_enabled };
+        // Hermetic test mode: record but do not write to the OS clipboard.
+        #[cfg(test)]
+        let hermetic = crate::handlers::FORCE_EMPTY_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire);
+        #[cfg(not(test))]
+        let hermetic = false;
+        if hermetic {
+            // The e2e runs fully hermetic: no OS clipboard write path.
+            s.add_log(format!(
+                "[Clipboard] (test) Received via QUIC: \"{}\" — OS write suppressed",
+                clipboard_log_fingerprint(&decrypted)
+            ));
+        } else if !inbound_enabled {
+            // Policy gate: one-way sync (phone reads desktop; desktop does NOT
+            // adopt phone content).
+            s.add_log(format!(
+                "[Clipboard] Inbound clipboard blocked by policy — phone sent {} (audit finding #13)",
+                clipboard_log_fingerprint(&decrypted)
+            ));
+            crate::handlers::emit_app_event(
+                "clipboard::inbound-blocked",
+                serde_json::json!({"fingerprint": clipboard_log_fingerprint(&decrypted)}),
+            );
+        } else {
+            // Audit finding #9: the OS clipboard write (arboard / wl-copy / xclip
+            // subprocesses with multi-second waits) must NEVER execute on the
+            // accept-loop worker — it would stall every concurrent QUIC stream.
+            // Delegate to the tokio blocking pool, which is sized independently of
+            // the 2-worker IO accept-loop runtime.
+            let text = decrypted.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = crate::portal::sync_clipboard_text(&text);
+            })
+            .await;
+            s.add_log(format!(
+                "[Clipboard] Received via QUIC: \"{}\"",
+                clipboard_log_fingerprint(&decrypted)
+            ));
+        }
     }
     r#"{"status":"synced"}"#.to_string().into_bytes()
 }

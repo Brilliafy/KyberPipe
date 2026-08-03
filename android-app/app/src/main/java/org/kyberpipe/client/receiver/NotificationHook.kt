@@ -15,7 +15,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import java.util.ArrayList
-import org.kyberpipe.client.utils.SessionKeyManager
 
 data class NotificationEvent(
     val title: String,
@@ -267,24 +266,20 @@ class NotificationHook : NotificationListenerService() {
 
                 val jsonStr = jsonMedia.toString()
                 val hostIp = settings.pairedHostIp
-                val sessionKey = settings.sessionKey
-                if (hostIp.isNotEmpty()) {
-                    val payload = if (sessionKey.isNotEmpty()) {
-                        // Encrypt the payload. On failure, abort transmission — never fall back to plaintext.
-                        val encrypted = SessionKeyManager.encrypt(jsonStr)
-                        if (encrypted != null) {
-                            org.json.JSONObject().put("encrypted", org.json.JSONObject()
-                                .put("nonce_hex", encrypted.nonce.joinToString("") { "%02x".format(it) })
-                                .put("ciphertext_hex", encrypted.ciphertext.joinToString("") { "%02x".format(it) })
-                            ).toString()
-                        } else {
-                            Log.e("KyberpipeMedia", "Encryption failed — aborting transmission")
-                            return@launch
-                        }
-                    } else {
-                        Log.e("KyberpipeMedia", "No session key — aborting transmission")
+                val peer = settings.peerRatchetIdentity
+                if (hostIp.isNotEmpty() && peer.isNotEmpty()) {
+                    // Audit finding F7: the legacy session-key wire path is gone —
+                    // encrypt with the ratchet (binary TLV). On failure, abort
+                    // transmission — never fall back to plaintext.
+                    val tlv = try {
+                        uniffi.core_crypto.ratchetEncryptMessageBinary(peer, jsonStr.toByteArray())
+                    } catch (e: Exception) {
+                        Log.e("KyberpipeMedia", "Ratchet encrypt failed — aborting transmission: ${e.message}")
                         return@launch
                     }
+                    val payload = org.json.JSONObject().put("encrypted_ratchet", org.json.JSONObject()
+                        .put("tlv_b64", android.util.Base64.encodeToString(tlv, android.util.Base64.NO_WRAP))
+                    ).toString()
                     Log.d("KyberpipeMedia", "Forwarding media payload for $pkg")
                     quicSendMedia(serviceScope, hostIp, payload)
                 }

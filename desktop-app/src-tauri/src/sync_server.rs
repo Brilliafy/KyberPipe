@@ -13,13 +13,12 @@
 //!   unauthenticated poll/unpair hole.
 
 use crate::handlers::{
-    handle_clipboard, handle_media, handle_pairing, handle_poll, handle_rekey_ack, handle_sms,
-    handle_unpair,
+    handle_clipboard, handle_media, handle_pairing, handle_poll, handle_sms, handle_unpair,
 };
 use crate::state::AppState;
 use core_crypto::quic_app::{
-    BoxFuture, QuicFrame, STREAM_CLIPBOARD, STREAM_MEDIA, STREAM_PAIRING, STREAM_POLL,
-    STREAM_REKEY_ACK, STREAM_SMS, STREAM_UNPAIR,
+    BoxFuture, QuicFrame, STREAM_CLIPBOARD, STREAM_MEDIA, STREAM_PAIRING, STREAM_POLL, STREAM_SMS,
+    STREAM_UNPAIR,
 };
 use sha2::Digest;
 use std::net::IpAddr;
@@ -59,14 +58,14 @@ fn authorize_stream(
             if !is_paired {
                 return Err("Not paired");
             }
-            // Every non-pairing stream REQUIRES a client certificate matching
-            // the one pinned during pairing. The IP fallback is removed: it
-            // broke on Wi-Fi→cellular handoff and was trivially spoofable.
-            let paired_cert = state.get_paired_client_cert_hash();
-            if paired_cert.is_empty() {
-                return Err("No paired client certificate recorded — re-pair");
-            }
-            if peer_cert_hash.is_empty() || peer_cert_hash != paired_cert {
+            // Every non-pairing stream REQUIRES a client certificate matching a
+            // KNOWN paired peer. AUDIT F12 (admission): the check is against the
+            // per-peer map (any device that completed SAS pairing is admitted),
+            // not only the single global cert — otherwise a second paired device
+            // would be rejected before its streams ever reached the per-peer
+            // routing. The IP fallback is removed: it broke on Wi-Fi→cellular
+            // handoff and was trivially spoofable.
+            if peer_cert_hash.is_empty() || !state.is_authorized_peer_cert(peer_cert_hash) {
                 return Err("Peer certificate not authorized");
             }
             Ok(())
@@ -74,43 +73,12 @@ fn authorize_stream(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_state() -> Arc<AppState> {
-        Arc::new(AppState::default())
-    }
-
-    /// Audit finding #8: the stream authorization matrix must be enforced —
-    /// pairing streams only while unpaired, everything else only when paired
-    /// AND the peer's TLS-observed cert hash matches the pinned one.
-    #[test]
-    fn authorize_stream_matrix() {
-        let state = test_state();
-        // Pre-pairing: pairing streams allowed, everything else rejected.
-        assert!(authorize_stream(&state, "", "", STREAM_PAIRING).is_ok());
-        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
-        assert!(authorize_stream(&state, "", "", STREAM_CLIPBOARD).is_err());
-        assert!(authorize_stream(&state, "", "", STREAM_UNPAIR).is_err());
-
-        // Paired: non-pairing streams require the pinned cert hash.
-        {
-            let mut settings = state.settings.lock();
-            settings.is_paired = true;
-        }
-        state.set_paired_client_cert_hash("deadbeef".to_string());
-        assert!(authorize_stream(&state, "deadbeef", "", STREAM_POLL).is_ok());
-        assert!(authorize_stream(&state, "deadbeef", "", STREAM_CLIPBOARD).is_ok());
-        assert!(authorize_stream(&state, "wronghash", "", STREAM_POLL).is_err());
-        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
-        // Pairing streams are refused once paired.
-        assert!(authorize_stream(&state, "deadbeef", "", STREAM_PAIRING).is_err());
-    }
-}
-
 pub fn start_local_sync_server(state: Arc<AppState>) {
-    core_crypto::p2p_group::try_start_p2p_group();
+    // AUDIT FINDING #14: Wi-Fi Direct group creation is OPT-IN and only runs
+    // when the user explicitly enables it (mirroring the beacon opt-in). The
+    // legacy unconditional call created an open P2P AP on every desktop start.
+    let p2p_enabled = { state.settings.lock().p2p_group_enabled };
+    core_crypto::p2p_group::try_start_p2p_group(p2p_enabled);
 
     std::thread::spawn(move || {
         // Use the dedicated IO_RUNTIME from core-crypto for the accept loop.
@@ -196,27 +164,27 @@ pub async fn run_server_dispatch(
     };
 
     let s = state.clone();
-    let on_clipboard = move |body: Vec<u8>| -> BoxFuture<Vec<u8>> {
+    let on_clipboard = move |body: Vec<u8>, peer_id: String| -> BoxFuture<Vec<u8>> {
         let s = s.clone();
-        Box::pin(handle_clipboard(body, s))
+        Box::pin(handle_clipboard(body, peer_id, s))
     };
 
     let s = state.clone();
-    let on_media = move |body: Vec<u8>| -> BoxFuture<Vec<u8>> {
+    let on_media = move |body: Vec<u8>, peer_id: String| -> BoxFuture<Vec<u8>> {
         let s = s.clone();
-        Box::pin(handle_media(body, s))
+        Box::pin(handle_media(body, peer_id, s))
     };
 
     let s = state.clone();
-    let on_sms = move |body: Vec<u8>| -> BoxFuture<Vec<u8>> {
+    let on_sms = move |body: Vec<u8>, peer_id: String| -> BoxFuture<Vec<u8>> {
         let s = s.clone();
-        Box::pin(handle_sms(body, s))
+        Box::pin(handle_sms(body, peer_id, s))
     };
 
     let s = state.clone();
-    let on_poll = move |body: Vec<u8>| -> BoxFuture<Vec<u8>> {
+    let on_poll = move |body: Vec<u8>, peer_id: String| -> BoxFuture<Vec<u8>> {
         let s = s.clone();
-        Box::pin(handle_poll(body, s))
+        Box::pin(handle_poll(body, peer_id, s))
     };
 
     let s = state.clone();
@@ -225,18 +193,11 @@ pub async fn run_server_dispatch(
         Box::pin(async move { handle_unpair(s, peer_cert_hash, peer_ip.to_string()).await })
     };
 
-    let s = state.clone();
-    let on_rekey_ack = move |body: Vec<u8>| -> BoxFuture<Vec<u8>> {
-        let s = s.clone();
-        Box::pin(handle_rekey_ack(body, s))
-    };
-
     let pairing_cb = std::sync::Arc::new(on_pairing);
     let clipboard_cb = std::sync::Arc::new(on_clipboard);
     let media_cb = std::sync::Arc::new(on_media);
     let poll_cb = std::sync::Arc::new(on_poll);
     let unpair_cb = std::sync::Arc::new(on_unpair);
-    let rekey_ack_cb = std::sync::Arc::new(on_rekey_ack);
     let sms_cb = std::sync::Arc::new(on_sms);
 
     // ── Resource budgets (audit finding #8) ──────────────────────────────────
@@ -266,7 +227,6 @@ pub async fn run_server_dispatch(
                 let media_cb = media_cb.clone();
                 let poll_cb = poll_cb.clone();
                 let unpair_cb = unpair_cb.clone();
-                let rekey_ack_cb = rekey_ack_cb.clone();
                 let sms_cb = sms_cb.clone();
                 // Refuse connections beyond the budget immediately: the
                 // connecting peer sees a dropped handshake instead of being
@@ -300,7 +260,6 @@ pub async fn run_server_dispatch(
                                 let media_cb = media_cb.clone();
                                 let poll_cb = poll_cb.clone();
                                 let unpair_cb = unpair_cb.clone();
-                                let rekey_ack_cb = rekey_ack_cb.clone();
                                 let sms_cb = sms_cb.clone();
                                 let peer_cert_hash = peer_cert_hash.clone();
                                 let per_conn = per_conn_streams.clone();
@@ -357,7 +316,11 @@ pub async fn run_server_dispatch(
                                         return;
                                     }
                                     // Authorized: now read the (bounded) body and
-                                    // dispatch to the handler.
+                                    // dispatch to the handler. AUDIT F12: the
+                                    // ratchet peer id is resolved PER CONNECTION
+                                    // from the TLS-observed client cert hash so
+                                    // multi-device traffic routes to each peer's
+                                    // own session.
                                     let body = match core_crypto::quic_app::QuicAppManager::recv_frame_body(&mut recv, _body_len).await {
                                         Ok(b) => b,
                                         Err(e) => {
@@ -365,6 +328,7 @@ pub async fn run_server_dispatch(
                                             return;
                                         }
                                     };
+                                    let peer_id = state.resolve_peer_for_cert_hash(&peer_cert_hash);
                                     let response = match stream_type {
                                         STREAM_PAIRING => QuicFrame {
                                             stream_type: STREAM_PAIRING,
@@ -373,15 +337,15 @@ pub async fn run_server_dispatch(
                                         },
                                         STREAM_CLIPBOARD => QuicFrame {
                                             stream_type: STREAM_CLIPBOARD,
-                                            body: clipboard_cb(body).await,
+                                            body: clipboard_cb(body, peer_id.clone()).await,
                                         },
                                         STREAM_MEDIA => QuicFrame {
                                             stream_type: STREAM_MEDIA,
-                                            body: media_cb(body).await,
+                                            body: media_cb(body, peer_id.clone()).await,
                                         },
                                         STREAM_POLL => QuicFrame {
                                             stream_type: STREAM_POLL,
-                                            body: poll_cb(body).await,
+                                            body: poll_cb(body, peer_id.clone()).await,
                                         },
                                         STREAM_UNPAIR => {
                                             unpair_cb(peer_cert_hash.clone(), peer_ip).await;
@@ -390,13 +354,9 @@ pub async fn run_server_dispatch(
                                                 body: vec![],
                                             }
                                         }
-                                        STREAM_REKEY_ACK => QuicFrame {
-                                            stream_type: STREAM_REKEY_ACK,
-                                            body: rekey_ack_cb(body).await,
-                                        },
                                         STREAM_SMS => QuicFrame {
                                             stream_type: STREAM_SMS,
-                                            body: sms_cb(body).await,
+                                            body: sms_cb(body, peer_id.clone()).await,
                                         },
                                         _ => QuicFrame {
                                             stream_type,
@@ -414,11 +374,8 @@ pub async fn run_server_dispatch(
                                         &mut send, &response,
                                     )
                                     .await;
-                                    if poll_stream && sent.is_ok() {
-                                        let peer = state.get_pairing_initiator_pk();
-                                        if !peer.is_empty() {
-                                            let _ = core_crypto::ratchet_consume_rekey_ack(peer);
-                                        }
+                                    if poll_stream && sent.is_ok() && !peer_id.is_empty() {
+                                        let _ = core_crypto::ratchet_consume_rekey_ack(peer_id);
                                     }
                                 });
                             }
@@ -444,5 +401,53 @@ pub async fn run_server_dispatch(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState::default())
+    }
+
+    /// Audit finding #8: the stream authorization matrix must be enforced —
+    /// pairing streams only while unpaired, everything else only when paired
+    /// AND the peer's TLS-observed cert hash matches the pinned one.
+    #[test]
+    fn authorize_stream_matrix() {
+        let state = test_state();
+        // Pre-pairing: pairing streams allowed, everything else rejected.
+        assert!(authorize_stream(&state, "", "", STREAM_PAIRING).is_ok());
+        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_CLIPBOARD).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_UNPAIR).is_err());
+
+        // Paired: non-pairing streams require the pinned cert hash.
+        {
+            let mut settings = state.settings.lock();
+            settings.is_paired = true;
+        }
+        state.set_paired_client_cert_hash("deadbeef".to_string());
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_POLL).is_ok());
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_CLIPBOARD).is_ok());
+        assert!(authorize_stream(&state, "wronghash", "", STREAM_POLL).is_err());
+        assert!(authorize_stream(&state, "", "", STREAM_POLL).is_err());
+        // AUDIT F12: a SECOND paired device (registered in the per-peer
+        // cert→ratchet-id map at its SAS confirmation) must be ADMITTED — the
+        // gate is per-peer admission, not a single global cert.
+        state.register_peer_cert_mapping("second-peer-ratchet-id", "second-device-cert");
+        assert!(
+            authorize_stream(&state, "second-device-cert", "", STREAM_POLL).is_ok(),
+            "a second paired device must be admitted"
+        );
+        assert!(authorize_stream(&state, "second-device-cert", "", STREAM_CLIPBOARD).is_ok());
+        assert!(
+            authorize_stream(&state, "not-paired-cert", "", STREAM_POLL).is_err(),
+            "an unknown cert must still be rejected"
+        );
+        // Pairing streams are refused once paired.
+        assert!(authorize_stream(&state, "deadbeef", "", STREAM_PAIRING).is_err());
     }
 }

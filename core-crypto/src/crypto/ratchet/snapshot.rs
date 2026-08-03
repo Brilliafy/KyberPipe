@@ -4,7 +4,9 @@
 //! their own module). The caller is responsible for encrypting the serialized
 //! bytes (e.g. wrapped by the device/session key) before writing them to disk.
 
-use super::state::{DoubleRatchetState, RekeyCarrier};
+use super::state::{
+    Chain, DoubleRatchetState, IncomingProposal, OutgoingProposal, RekeyCarrier, ReplayWindow,
+};
 use crate::crypto::{HybridKeyPair, RATCHET_REKEY_INTERVAL};
 use crate::error::KyberError;
 use std::collections::{HashMap, VecDeque};
@@ -24,6 +26,13 @@ pub struct RatchetSnapshot {
     pub peer_x25519_pk: Option<[u8; 32]>,
     pub peer_mlkem_pk: Option<Vec<u8>>,
     pub ratchet_generation: u32,
+    /// Pairing epoch watermark (audit finding #2): the import guard refuses to
+    /// overlay a snapshot whose epoch differs from the live session's, so a
+    /// stale pre-re-pair snapshot can never clobber a freshly re-paired
+    /// session. Serde-defaults to 0 for snapshots written before this field
+    /// existed.
+    #[serde(default)]
+    pub pairing_epoch: u64,
     pub pending_root_key: Option<[u8; 32]>,
     pub pending_sending_chain_key: Option<[u8; 32]>,
     pub pending_receiving_chain_key: Option<[u8; 32]>,
@@ -31,6 +40,10 @@ pub struct RatchetSnapshot {
     pub pending_peer_mlkem_pk: Option<Vec<u8>>,
     pub pending_generation_bump: bool,
     pub pending_rekey_carrier_seq: Option<u64>,
+    /// Generation of the message that carried the incoming rekey proposal
+    /// (audit F1) — guards the single proposal slot against stale crossed or
+    /// re-sent carriers after a restart, matching the in-memory guard.
+    pub pending_carrier_gen: Option<u32>,
     pub outgoing_root_key: Option<[u8; 32]>,
     pub outgoing_sending_chain_key: Option<[u8; 32]>,
     pub outgoing_receiving_chain_key: Option<[u8; 32]>,
@@ -63,6 +76,15 @@ pub struct RatchetSnapshot {
     /// Pending rekey confirmations (carrier seqs only — timestamps reset on
     /// restore; payloads are reconstructed from `outgoing_rekey_payload`).
     pub rekey_pending_confirm_queue: Vec<u64>,
+    /// Wall-clock unix attach time of each pending rekey confirmation, parallel
+    /// to `rekey_pending_confirm_queue` (audit finding #8). PERSISTED so a
+    /// restored-but-unacked outgoing proposal is still bounded by the retry
+    /// TTL instead of resetting to "fresh" on restart — otherwise a stale
+    /// proposal resurrects on every process death and re-blocks recovery for
+    /// another TTL window. Serde-defaults to empty for snapshots written before
+    /// this field existed.
+    #[serde(default)]
+    pub rekey_pending_confirm_queue_attached_at_unix: Vec<u64>,
     pub pending_rekey_ack_seq: Option<u64>,
     /// Cumulative forward advancement budget consumed by resyncs (audit #4).
     #[serde(default)]
@@ -77,6 +99,12 @@ pub struct RatchetSnapshot {
     /// re-sent instead of TTL-committed.
     #[serde(default)]
     pub outgoing_rekey_payload: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    /// Wall-clock unix time the INCOMING proposal was first derived (audit
+    /// KYP-2026-02 #3). Persisted so the proposal's bounded lifetime survives
+    /// restarts — a stale proposal must not deadlock the Synchronize recovery
+    /// path after a process restart.
+    #[serde(default)]
+    pub pending_proposal_attached_at_unix: Option<u64>,
 }
 
 impl DoubleRatchetState {
@@ -85,10 +113,10 @@ impl DoubleRatchetState {
         let prev = self.previous_keypairs.iter().collect::<Vec<_>>();
         RatchetSnapshot {
             root_key: self.root_key,
-            sending_chain_key: self.sending_chain_key,
-            receiving_chain_key: self.receiving_chain_key,
-            send_message_count: self.send_message_count,
-            recv_message_count: self.recv_message_count,
+            sending_chain_key: self.send.key,
+            receiving_chain_key: self.recv.key,
+            send_message_count: self.send.message_count,
+            recv_message_count: self.recv.message_count,
             our_x25519_pk: self.our_hybrid_pair.x25519_pk,
             our_x25519_sk: self.our_hybrid_pair.x25519_sk,
             our_mlkem_pk: self.our_hybrid_pair.mlkem_pk.clone(),
@@ -96,24 +124,36 @@ impl DoubleRatchetState {
             peer_x25519_pk: self.peer_x25519_pk,
             peer_mlkem_pk: self.peer_mlkem_pk.clone(),
             ratchet_generation: self.ratchet_generation,
-            pending_root_key: self.pending_root_key,
-            pending_sending_chain_key: self.pending_sending_chain_key,
-            pending_receiving_chain_key: self.pending_receiving_chain_key,
-            pending_peer_x25519_pk: self.pending_peer_x25519_pk,
-            pending_peer_mlkem_pk: self.pending_peer_mlkem_pk.clone(),
-            pending_generation_bump: self.pending_generation_bump,
-            pending_rekey_carrier_seq: self.pending_rekey_carrier_seq,
-            outgoing_root_key: self.outgoing_root_key,
-            outgoing_sending_chain_key: self.outgoing_sending_chain_key,
-            outgoing_receiving_chain_key: self.outgoing_receiving_chain_key,
-            outgoing_x25519_pk: self.outgoing_hybrid_pair.as_ref().map(|p| p.x25519_pk),
-            outgoing_x25519_sk: self.outgoing_hybrid_pair.as_ref().map(|p| p.x25519_sk),
+            pairing_epoch: self.pairing_epoch,
+            pending_root_key: self.incoming_proposal.root_key,
+            pending_sending_chain_key: self.incoming_proposal.sending_chain_key,
+            pending_receiving_chain_key: self.incoming_proposal.receiving_chain_key,
+            pending_peer_x25519_pk: self.incoming_proposal.peer_x25519_pk,
+            pending_peer_mlkem_pk: self.incoming_proposal.peer_mlkem_pk.clone(),
+            pending_generation_bump: self.incoming_proposal.generation_bump,
+            pending_rekey_carrier_seq: self.incoming_proposal.carrier_seq,
+            pending_carrier_gen: self.incoming_proposal.carrier_gen,
+            outgoing_root_key: self.outgoing_proposal.root_key,
+            outgoing_sending_chain_key: self.outgoing_proposal.sending_chain_key,
+            outgoing_receiving_chain_key: self.outgoing_proposal.receiving_chain_key,
+            outgoing_x25519_pk: self
+                .outgoing_proposal
+                .hybrid_pair
+                .as_ref()
+                .map(|p| p.x25519_pk),
+            outgoing_x25519_sk: self
+                .outgoing_proposal
+                .hybrid_pair
+                .as_ref()
+                .map(|p| p.x25519_sk),
             outgoing_mlkem_pk: self
-                .outgoing_hybrid_pair
+                .outgoing_proposal
+                .hybrid_pair
                 .as_ref()
                 .map(|p| p.mlkem_pk.clone()),
             outgoing_mlkem_sk: self
-                .outgoing_hybrid_pair
+                .outgoing_proposal
+                .hybrid_pair
                 .as_ref()
                 .map(|p| p.mlkem_sk.clone()),
             max_skip: self.max_skip,
@@ -127,20 +167,26 @@ impl DoubleRatchetState {
                 .iter()
                 .flat_map(|m| m.iter().map(|(k, v)| (*k, **v)))
                 .collect(),
-            seen_sequence_numbers: self.seen_sequence_numbers.iter().copied().collect(),
+            seen_sequence_numbers: self.replay_window.seen.iter().copied().collect(),
             previous_recv_chain_key: self.previous_recv_chain_key,
             previous_recv_anchor: self.previous_recv_anchor,
             previous_recv_gen: self.previous_recv_gen,
-            previous_recv_highest_delivered: self.previous_recv_highest_delivered,
+            previous_recv_highest_delivered: self.replay_window.prev_gen_highest_delivered,
             rekey_pending_confirm_queue: self
                 .rekey_pending_confirm_queue
                 .iter()
                 .map(|c| c.carrier_seq)
                 .collect(),
+            rekey_pending_confirm_queue_attached_at_unix: self
+                .rekey_pending_confirm_queue
+                .iter()
+                .map(|c| c.attached_at_unix)
+                .collect(),
             pending_rekey_ack_seq: self.pending_rekey_ack_seq,
             is_initiator: self.is_initiator,
-            outgoing_rekey_payload: self.outgoing_rekey_payload.clone(),
+            outgoing_rekey_payload: self.outgoing_proposal.rekey_payload.clone(),
             resync_forward_total: self.resync_forward_total,
+            pending_proposal_attached_at_unix: self.incoming_proposal.attached_at_unix,
         }
     }
 
@@ -183,12 +229,31 @@ impl DoubleRatchetState {
             }
         }
         let now = std::time::Instant::now();
+        let now_unix = crate::crypto::ratchet::state::now_unix_secs();
+        let queue_len = snap.rekey_pending_confirm_queue.len();
+        // Restore each pending confirmation with its PERSISTED wall-clock attach
+        // time (audit finding #8) so a stale proposal does not resurrect as
+        // "fresh" on restart. When the parallel unix array is absent (a
+        // snapshot written by an older build) fall back to the current wall
+        // clock — the legacy behavior.
+        let mut confirm_attach_unix: Vec<u64> = snap
+            .rekey_pending_confirm_queue_attached_at_unix
+            .clone();
+        if confirm_attach_unix.len() < queue_len {
+            confirm_attach_unix.resize(queue_len, now_unix);
+        }
         let mut rekey_pending_confirm_queue: VecDeque<RekeyCarrier> = snap
             .rekey_pending_confirm_queue
             .iter()
-            .map(|s| RekeyCarrier {
+            .enumerate()
+            .map(|(idx, s)| RekeyCarrier {
                 carrier_seq: *s,
                 attached_at: now,
+                attached_at_mono: now,
+                attached_at_unix: confirm_attach_unix
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(now_unix),
                 rekey_x25519_pk: vec![],
                 rekey_mlkem_pk: vec![],
                 rekey_ciphertext: vec![],
@@ -207,40 +272,58 @@ impl DoubleRatchetState {
         let _ = &mut rekey_pending_confirm_queue;
         Ok(Self {
             root_key: snap.root_key,
-            sending_chain_key: snap.sending_chain_key,
-            receiving_chain_key: snap.receiving_chain_key,
-            send_message_count: snap.send_message_count,
-            recv_message_count: snap.recv_message_count,
+            send: Chain {
+                key: snap.sending_chain_key,
+                message_count: snap.send_message_count,
+            },
+            recv: Chain {
+                key: snap.receiving_chain_key,
+                message_count: snap.recv_message_count,
+            },
             our_hybrid_pair,
             peer_x25519_pk: snap.peer_x25519_pk,
             peer_mlkem_pk: snap.peer_mlkem_pk.clone(),
             rekey_interval: RATCHET_REKEY_INTERVAL,
             ratchet_generation: snap.ratchet_generation,
+            pairing_epoch: snap.pairing_epoch,
             previous_recv_chain_key: snap.previous_recv_chain_key,
             previous_recv_anchor: snap.previous_recv_anchor,
             previous_recv_gen: snap.previous_recv_gen,
-            previous_recv_highest_delivered: snap.previous_recv_highest_delivered,
-            pending_root_key: snap.pending_root_key,
-            pending_sending_chain_key: snap.pending_sending_chain_key,
-            pending_receiving_chain_key: snap.pending_receiving_chain_key,
-            pending_peer_x25519_pk: snap.pending_peer_x25519_pk,
-            pending_peer_mlkem_pk: snap.pending_peer_mlkem_pk.clone(),
-            pending_generation_bump: snap.pending_generation_bump,
-            pending_rekey_carrier_seq: snap.pending_rekey_carrier_seq,
-            outgoing_root_key: snap.outgoing_root_key,
-            outgoing_sending_chain_key: snap.outgoing_sending_chain_key,
-            outgoing_receiving_chain_key: snap.outgoing_receiving_chain_key,
-            outgoing_hybrid_pair,
+            replay_window: ReplayWindow {
+                seen: snap.seen_sequence_numbers.iter().copied().collect(),
+                prev_gen_highest_delivered: snap.previous_recv_highest_delivered,
+            },
+            incoming_proposal: IncomingProposal {
+                root_key: snap.pending_root_key,
+                sending_chain_key: snap.pending_sending_chain_key,
+                receiving_chain_key: snap.pending_receiving_chain_key,
+                peer_x25519_pk: snap.pending_peer_x25519_pk,
+                peer_mlkem_pk: snap.pending_peer_mlkem_pk.clone(),
+                generation_bump: snap.pending_generation_bump,
+                carrier_seq: snap.pending_rekey_carrier_seq,
+                carrier_gen: snap.pending_carrier_gen,
+                attached_at_unix: snap.pending_proposal_attached_at_unix,
+                // Monotonic time cannot survive a restart — the persisted
+                // wall-clock bound stands alone (audit finding #10).
+                attached_at_mono: None,
+            },
+            outgoing_proposal: OutgoingProposal {
+                root_key: snap.outgoing_root_key,
+                sending_chain_key: snap.outgoing_sending_chain_key,
+                receiving_chain_key: snap.outgoing_receiving_chain_key,
+                hybrid_pair: outgoing_hybrid_pair,
+                rekey_payload: snap.outgoing_rekey_payload.clone(),
+            },
             skip_message_keys,
             max_skip: snap.max_skip,
             previous_keypairs,
             max_key_history: snap.max_key_history,
             rekey_pending_confirm_queue,
-            seen_sequence_numbers: snap.seen_sequence_numbers.iter().copied().collect(),
             pending_rekey_ack_seq: snap.pending_rekey_ack_seq,
             is_initiator: snap.is_initiator,
-            outgoing_rekey_payload: snap.outgoing_rekey_payload.clone(),
             resync_forward_total: snap.resync_forward_total,
+            // Transient (not persisted): the idempotent-peek cache starts empty.
+            peeked_ack_cache: None,
         })
     }
 }

@@ -1,5 +1,4 @@
 pub mod automation;
-mod bip39_words;
 pub mod clipboard;
 pub mod crypto;
 pub mod info;

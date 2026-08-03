@@ -59,14 +59,32 @@ impl DoubleRatchetState {
     /// Refuses to run while an outgoing proposal is still pending so two
     /// overlapping proposals cannot overwrite each other (single-slot
     /// serialization).
+    ///
+    /// AUDIT FINDING #26: this entry previously (a) EAGERLY mutated
+    /// `peer_x25519_pk`/`peer_mlkem_pk` at staging time — writing keys the peer
+    /// never acked into the active state, which would persist a wrong key if
+    /// the proposal was never committed — and (b) staged an outgoing proposal
+    /// WITHOUT pushing a carrier into `rekey_pending_confirm_queue`, so
+    /// `should_rekey` stayed blocked by `proposal_pending` and the payload was
+    /// never sent (a permanent rekey deadlock for any caller of this API). Both
+    /// are fixed: peer-key adoption is deferred to commit (matching
+    /// `ratchet_encrypt`'s staging), and the staging pushes a carrier so the
+    /// payload is transmitted on the next message exactly like the normal
+    /// boundary path.
     pub fn dh_ratchet_rekey(
         &mut self,
         peer_x25519_pk: [u8; 32],
         peer_mlkem_pk: &[u8],
     ) -> Result<HybridKemResult, KyberError> {
-        if self.outgoing_root_key.is_some() {
+        if self.outgoing_proposal.is_pending() {
             return Err(KyberError::CryptoError(
                 "Outgoing rekey already pending — wait for the peer ACK before proposing again"
+                    .into(),
+            ));
+        }
+        if self.incoming_proposal.is_pending() {
+            return Err(KyberError::CryptoError(
+                "An incoming rekey proposal is pending — resolve it before staging our own (single-slot serialization)"
                     .into(),
             ));
         }
@@ -88,13 +106,35 @@ impl DoubleRatchetState {
 
         // Store as an OUTGOING proposal — we are the initiator of this rekey,
         // so our send chain is new_send and our recv chain is new_recv.
-        self.outgoing_root_key = Some(new_root);
-        self.outgoing_sending_chain_key = Some(new_send);
-        self.outgoing_receiving_chain_key = Some(new_recv);
-        self.peer_x25519_pk = Some(peer_x25519_pk);
-        self.peer_mlkem_pk = Some(peer_mlkem_pk.to_vec());
         let new_pair = generate_hybrid_keypair();
-        let _ = self.outgoing_hybrid_pair.replace(new_pair);
+        self.outgoing_proposal.root_key = Some(new_root);
+        self.outgoing_proposal.sending_chain_key = Some(new_send);
+        self.outgoing_proposal.receiving_chain_key = Some(new_recv);
+        self.outgoing_proposal.hybrid_pair = Some(new_pair);
+        self.outgoing_proposal.rekey_payload = Some((
+            peer_x25519_pk.to_vec(),
+            peer_mlkem_pk.to_vec(),
+            kem_res.ciphertext_bytes.clone(),
+        ));
+        // AUDIT FINDING #26: push a carrier so `ratchet_encrypt`'s retry/eviction
+        // path RE-SENDS the payload on the next message. The legacy code staged
+        // the proposal without a carrier, so the payload was never transmitted
+        // and `should_rekey` remained blocked by `proposal_pending` forever.
+        // Carrier seq 0 is provisional; encrypt.rs overwrites it with the live
+        // send position when it re-attaches the payload.
+        self.rekey_pending_confirm_queue.push_back(super::state::RekeyCarrier {
+            carrier_seq: 0,
+            attached_at: std::time::Instant::now(),
+            attached_at_mono: std::time::Instant::now(),
+            attached_at_unix: super::state::now_unix_secs(),
+            rekey_x25519_pk: peer_x25519_pk.to_vec(),
+            rekey_mlkem_pk: peer_mlkem_pk.to_vec(),
+            rekey_ciphertext: kem_res.ciphertext_bytes.clone(),
+        });
+        // AUDIT FINDING #26: peer-key adoption is DEFERRED to commit — do NOT
+        // write `self.peer_*` here. The old code eagerly mutated the active
+        // peer keys at staging time, so a proposal that was never acked left a
+        // wrong (never-validated) peer key persisted in the session.
 
         Ok(kem_res)
     }
