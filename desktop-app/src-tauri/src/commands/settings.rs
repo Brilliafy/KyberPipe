@@ -23,6 +23,8 @@ pub fn save_settings(
     pathway_order: Option<Vec<String>>,
     wireguard_active: Option<bool>,
     beacon_discovery_enabled: Option<bool>,
+    inbound_clipboard_enabled: Option<bool>,
+    p2p_group_enabled: Option<bool>,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
     // NOTE: `is_paired` is intentionally NOT accepted here. Pairing state is
@@ -77,6 +79,20 @@ pub fn save_settings(
             state.add_log(format!(
                 "[Beacon] LAN discovery beacons {}",
                 if v { "enabled (opt-in)" } else { "disabled" }
+            ));
+        }
+        if let Some(v) = inbound_clipboard_enabled {
+            s.inbound_clipboard_enabled = v;
+            state.add_log(format!(
+                "[Clipboard] Inbound (phone→desktop) clipboard writes {}",
+                if v { "enabled" } else { "blocked (one-way sync only)" }
+            ));
+        }
+        if let Some(v) = p2p_group_enabled {
+            s.p2p_group_enabled = v;
+            state.add_log(format!(
+                "[P2P] Wi-Fi Direct group creation {}",
+                if v { "enabled (WPA2/SAE, opt-in)" } else { "disabled" }
             ));
         }
     }

@@ -8,6 +8,7 @@ pub mod telemetry;
 
 pub mod crypto_api;
 pub mod ffi;
+pub mod kem_handle;
 pub mod network_api;
 pub mod p2p_group;
 pub mod pairing_api;
@@ -22,170 +23,17 @@ pub use crypto_api::*;
 pub use network_api::*;
 pub use pairing_api::*;
 
+pub mod destruct;
+pub mod records;
+pub mod runtime;
+
+pub use destruct::*;
+pub use records::*;
+pub use runtime::*;
+
 use error::KyberError;
-use std::future::Future;
-use zeroize::Zeroize;
 
 uniffi::setup_scaffolding!();
-
-/// Ensure panics in native Rust code never unwind across FFI boundaries (JNI/C ABI)
-/// which causes Undefined Behavior.
-static PANIC_HOOK_INIT: std::sync::Once = std::sync::Once::new();
-
-/// Zeroize the process-global pairing keypair registry (audit finding #13).
-/// Invoked from the panic hook as a last-resort defense: if a panic cannot be
-/// contained (e.g. a double panic that aborts), the raw private halves held in
-/// the process-global registry are wiped before the process dies. Safe under
-/// poison — a panicked thread that held the lock leaves a poisoned mutex,
-/// which we recover via into_inner and take (zeroizing first).
-fn zeroize_process_key_registry() {
-    if let Some(cell) = PAIRING_KEYPAIR.get() {
-        match cell.lock() {
-            Ok(mut guard) => {
-                if let Some(pair) = guard.as_mut() {
-                    pair.zeroize();
-                }
-                guard.take();
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                if let Some(pair) = guard.as_mut() {
-                    pair.zeroize();
-                }
-                guard.take();
-            }
-        }
-    }
-}
-
-pub fn ensure_panic_hook_installed() {
-    PANIC_HOOK_INIT.call_once(|| {
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            eprintln!("[CRITICAL ERROR] Panic occurred in core-crypto native layer: {info}");
-            // Last-resort key wipe before the process can abort (double panic)
-            // or before unwinding continues.
-            zeroize_process_key_registry();
-            prev_hook(info);
-            // Do NOT abort. UniFFI's generated scaffolding wraps every exported
-            // function in `panic::catch_unwind` and converts a panic into a
-            // CALL_PANIC status, so a panic inside an FFI call is contained and
-            // returned to the caller as a structured error — it never unwinds
-            // across the C ABI. Aborting here would kill the whole app (and its
-            // in-memory key material) for panics that are fully recoverable
-            // (audit finding #13). The release profile is `panic = "unwind"` so
-            // catch_unwind actually functions — the abort-contradiction is fixed
-            // (audit finding #13).
-        }));
-    });
-}
-
-/// IO runtime for long-lived tasks (QUIC accept loop, beacon listeners).
-/// Dedicated thread pool prevents FFI calls from starving the accept loop.
-/// Stored as `Mutex<Option<Runtime>>` so `shutdown_io_runtime()` (test
-/// teardown) can take ownership and stop the worker threads — a plain
-/// `LazyLock<Runtime>` can never be shut down and would keep a test process
-/// alive forever.
-static IO_RUNTIME: std::sync::LazyLock<std::sync::Mutex<Option<tokio::runtime::Runtime>>> =
-    std::sync::LazyLock::new(|| {
-        std::sync::Mutex::new(Some(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("kyberpipe-io")
-                .worker_threads(2)
-                .build()
-                .expect("Failed to create IO runtime"),
-        ))
-    });
-
-/// FFI runtime for short-lived blocking calls from UniFFI (encrypt, decrypt, key ops).
-/// Separate from IO_RUNTIME to prevent worker-thread exhaustion under concurrent FFI load.
-/// Stored as `Mutex<Option<Runtime>>` so `shutdown_ffi_runtime()` (test teardown) can take
-/// ownership and stop the worker threads — a plain `LazyLock<Runtime>` can never be shut
-/// down and would keep a test process alive forever.
-static FFI_RUNTIME: std::sync::LazyLock<std::sync::Mutex<Option<tokio::runtime::Runtime>>> =
-    std::sync::LazyLock::new(|| {
-        std::sync::Mutex::new(Some(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("kyberpipe-ffi")
-                .worker_threads(2)
-                .max_blocking_threads(64)
-                .build()
-                .expect("Failed to create FFI runtime"),
-        ))
-    });
-
-/// Block on a future using the FFI runtime. Used for short-lived UniFFI bridge calls.
-pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
-    let guard = FFI_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .expect("FFI runtime was shut down (shutdown_ffi_runtime)")
-        .block_on(fut)
-}
-
-/// Block on a future with timeout using the FFI runtime.
-/// Returns `None` if the timeout expires. Use from FFI boundaries (e.g.,
-/// Android JNI) where blocking indefinitely would exhaust the platform thread pool.
-pub fn block_on_sync_timeout<F: Future>(fut: F, timeout: std::time::Duration) -> Option<F::Output> {
-    let guard = FFI_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .expect("FFI runtime was shut down (shutdown_ffi_runtime)")
-        .block_on(tokio::time::timeout(timeout, fut))
-        .ok()
-}
-
-/// Shut down the FFI runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide
-/// LazyLock; calling this in production would break every UniFFI bridge call.
-/// The e2e test calls it so the worker threads do not keep the test process
-/// alive. Bounded blocking shutdown (drain up to 5s, then hard-stop).
-pub fn shutdown_ffi_runtime() {
-    if let Ok(mut guard) = FFI_RUNTIME.lock() {
-        if let Some(rt) = guard.take() {
-            rt.shutdown_timeout(std::time::Duration::from_secs(5));
-        }
-    }
-}
-
-/// Block on a future using the IO runtime. Used for long-lived tasks (accept loop).
-pub fn block_on_io<F: Future>(fut: F) -> F::Output {
-    let guard = IO_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .expect("IO runtime was shut down (shutdown_io_runtime)")
-        .block_on(fut)
-}
-
-/// Shut down the IO runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide
-/// LazyLock; calling this in production would break the accept loop. The e2e
-/// test calls it after the dispatch loop stops so the test process can exit
-/// (the worker threads would otherwise keep the process alive forever). Uses a
-/// BOUNDED BLOCKING shutdown (audit finding #4 follow-up): `shutdown_background`
-/// could leave worker threads running past the test and keep the harness pipe
-/// open; `shutdown_timeout` drains for up to 5s then hard-stops the workers.
-pub fn shutdown_io_runtime() {
-    if let Ok(mut guard) = IO_RUNTIME.lock() {
-        if let Some(rt) = guard.take() {
-            rt.shutdown_timeout(std::time::Duration::from_secs(5));
-        }
-    }
-}
-
-/// Generation counter — incremented on self-destruct. In-flight operations
-/// with a stale generation are rejected.
-static DESTRUCT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Check if the current generation is still valid (no self-destruct occurred).
-pub fn check_generation() -> bool {
-    DESTRUCT_GENERATION.load(std::sync::atomic::Ordering::Acquire) == 0
-}
-
-/// Increment the generation counter (called during self-destruct).
-pub fn increment_destruct_generation() {
-    DESTRUCT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
-}
 
 /// Post-quantum hybrid keypair crossing the UniFFI boundary. Audit finding
 /// #16: the private halves must not persist in freed heap after unpairing or
@@ -194,162 +42,10 @@ pub fn increment_destruct_generation() {
 /// explicitly: every disposal path (desktop `CryptoState::set_keypair(None)`,
 /// `clear_all_pairing`, self-destruct, the process-global registry) calls
 /// `zeroize()` on the pair before dropping it.
-#[derive(Clone, serde::Serialize, uniffi::Record, zeroize::Zeroize)]
-pub struct PqKeyPair {
-    pub x25519_pk: Vec<u8>,
-    pub x25519_sk: Vec<u8>,
-    pub mlkem_pk: Vec<u8>,
-    pub mlkem_sk: Vec<u8>,
-}
-
-#[derive(uniffi::Record, zeroize::Zeroize)]
-pub struct PqKeyPairRaw {
-    pub x25519_pk: Vec<u8>,
-    pub x25519_sk: Vec<u8>,
-    pub mlkem_pk: Vec<u8>,
-    pub mlkem_sk: Vec<u8>,
-}
-
-/// PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
-/// halves of the keypair NEVER leave the Rust process — the renderer receives
-/// only the public keys needed to build pairing QR payloads, and the pairing
-/// handler reads the private halves from Rust state.
-#[derive(uniffi::Record, serde::Serialize, Clone)]
-pub struct PqPairingPublic {
-    pub x25519_pk_hex: String,
-    pub mlkem_pk_hex: String,
-}
-
-impl From<&PqKeyPair> for PqPairingPublic {
-    fn from(pair: &PqKeyPair) -> Self {
-        Self {
-            x25519_pk_hex: hex::encode(&pair.x25519_pk),
-            mlkem_pk_hex: hex::encode(&pair.mlkem_pk),
-        }
-    }
-}
-
-#[derive(uniffi::Record)]
-pub struct PqKemResponse {
-    pub ciphertext: Vec<u8>,
-    pub shared_secret: Vec<u8>,
-}
-
-/// A generated per-install client identity certificate (audit finding #8).
-/// `cert_der`/`key_der` are DER-encoded; `sha256_hex` is the cert fingerprint
-/// the server pins during pairing.
-#[derive(uniffi::Record)]
-pub struct ClientIdentityCert {
-    pub cert_der: Vec<u8>,
-    pub key_der: Vec<u8>,
-    pub sha256_hex: String,
-}
-
-#[derive(uniffi::Record)]
-pub struct EncryptedPayload {
-    pub nonce: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
-
-#[derive(uniffi::Record)]
-pub struct PathChallengeResult {
-    pub challenge_token: String,
-    pub expected_response: String,
-}
-
-#[derive(uniffi::Record, serde::Serialize, serde::Deserialize, Clone)]
-pub struct ConnectionInfo {
-    pub active_tier: u32,
-    pub active_path_description: String,
-    pub latency_ms: f64,
-    pub public_endpoint: String,
-}
-
-#[derive(uniffi::Record, serde::Serialize, serde::Deserialize, Clone)]
-pub struct PairingConfig {
-    pub host_identity_pk_hex: String,
-    pub local_ip: String,
-    pub wifi_direct_mac: String,
-    pub p2p_ip: String,
-    pub wireguard_pk_hex: String,
-    pub stun_endpoint: String,
-    pub pairing_nonce_hex: String,
-}
-
-// ── Double Ratchet FFI ──
-// Double Ratchet FFI — peer-keyed session registry
 /// Process-global pairing keypair registry. `generate_pq_pairing_public` stores
 /// the FULL keypair (including private halves) here so a pairing handler can
 /// decapsulate the peer's KEM ciphertext. Previously the private half was built
 /// into a temporary and dropped — a latent API trap (audit finding #14).
-static PAIRING_KEYPAIR: std::sync::OnceLock<std::sync::Mutex<Option<PqKeyPair>>> =
-    std::sync::OnceLock::new();
-
-/// Retrieve the keypair stored by `generate_pq_pairing_public` (if any).
-pub fn get_pq_pairing_keypair() -> Option<PqKeyPair> {
-    PAIRING_KEYPAIR
-        .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|g| g.clone())
-}
-
-/// PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
-/// halves of the keypair NEVER leave the Rust process — the renderer receives
-/// only the public keys needed to build pairing QR payloads, and the pairing
-/// handler reads the private halves from the process-global registry populated
-/// here (NOT a dropped temporary — audit finding #14).
-#[uniffi::export]
-pub fn generate_pq_pairing_public() -> Result<PqPairingPublic, KyberError> {
-    ensure_panic_hook_installed();
-    let pair = crate::crypto::generate_hybrid_keypair();
-    let keypair = PqKeyPair {
-        x25519_pk: pair.x25519_pk.to_vec(),
-        x25519_sk: pair.x25519_sk.to_vec(),
-        mlkem_pk: pair.mlkem_pk.clone(),
-        mlkem_sk: pair.mlkem_sk.clone(),
-    };
-    // Persist the FULL keypair so a future pairing handler can decapsulate.
-    let cell = PAIRING_KEYPAIR.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(mut guard) = cell.lock() {
-        // Zeroize any previously-registered pair before replacing it (audit
-        // finding #16: old private halves must not linger in the registry).
-        if let Some(prev) = guard.as_mut() {
-            prev.zeroize();
-        }
-        *guard = Some(keypair.clone());
-    }
-    Ok(PqPairingPublic::from(&keypair))
-}
-
-#[uniffi::export]
-pub fn ratchet_init_session(
-    peer_identity: String,
-    master_shared_secret: Vec<u8>,
-    is_initiator: bool,
-    peer_x25519_pk: Vec<u8>,
-    peer_mlkem_pk: Vec<u8>,
-) -> Result<String, KyberError> {
-    ensure_panic_hook_installed();
-    let x25519 = if peer_x25519_pk.is_empty() {
-        None
-    } else {
-        Some(peer_x25519_pk.as_slice())
-    };
-    let mlkem = if peer_mlkem_pk.is_empty() {
-        None
-    } else {
-        Some(peer_mlkem_pk.as_slice())
-    };
-    ratchet_ffi::ratchet_init_session_impl(
-        &peer_identity,
-        &master_shared_secret,
-        is_initiator,
-        x25519,
-        mlkem,
-    )?;
-    Ok("Session initialized".to_string())
-}
-
 /// Initialize a Double Ratchet session using the caller's OWN pairing keypair
 /// as the ratchet's initial DH identity. This is the correct production entry
 /// point (audit finding #1): the peer encapsulates rekey payloads to our
@@ -358,6 +54,15 @@ pub fn ratchet_init_session(
 ///
 /// `our_x25519_pk`, `our_x25519_sk`, `our_mlkem_pk`, `our_mlkem_sk` are the
 /// caller's own hybrid keypair (the public halves exchanged during pairing).
+///
+/// AUDIT KYP-2026-02 #25: this raw-secrets FFI variant is gated behind
+/// `#[cfg(test)]` — it accepts secret key bytes as plain `Vec<u8>` arguments,
+/// a surface future callers could misuse. Production callers use
+/// `ratchet_init_session_with_keypair_handle` (opaque handle) on Android and
+/// the Rust-internal `ratchet_ffi::ratchet_init_session_with_keypair_impl` on
+/// the desktop (same-process crate call, never an FFI marshalling boundary).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn ratchet_init_session_with_keypair(
     peer_identity: String,
@@ -401,6 +106,16 @@ pub fn ratchet_remove_session(peer_identity: String) -> bool {
 pub fn ratchet_clear_all_sessions() {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_clear_all_sessions_impl();
+}
+/// Bump the pairing epoch of the live session for a peer (audit finding #2).
+/// Called by the Android app immediately after a RE-PAIR so a stale
+/// pre-re-pair snapshot on disk can be recognized as cross-epoch and refused
+/// by `ratchet_import_session`. Returns the new epoch, or None when no live
+/// session exists.
+#[uniffi::export]
+pub fn ratchet_bump_pairing_epoch(peer_identity: String) -> Option<u64> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_bump_pairing_epoch_impl(&peer_identity)
 }
 #[uniffi::export]
 pub fn ratchet_peer_ids() -> Vec<String> {
@@ -593,23 +308,33 @@ pub fn ratchet_export_session(peer_identity: String) -> Result<Option<Vec<u8>>, 
     ratchet_ffi::ratchet_export_session_impl(&peer_identity)
 }
 
+/// Export a ratchet session and AEAD-wrap the serialized snapshot INSIDE Rust
+/// (audit finding #5). Returns an `EncryptedPayload` — the raw serialized
+/// state NEVER crosses the UniFFI boundary as plaintext, so no complete
+/// session key material ever sits on the JVM heap. `wrap_key` is the caller's
+/// at-rest wrap key (32 bytes, caller-owned by design). The Android app uses
+/// this for its per-poll snapshot persistence instead of the raw export + JVM
+/// Base64 + re-entry dance.
+#[uniffi::export]
+pub fn ratchet_export_session_wrapped(
+    peer_identity: String,
+    wrap_key: Vec<u8>,
+) -> Result<Option<EncryptedPayload>, KyberError> {
+    ensure_panic_hook_installed();
+    Ok(ratchet_ffi::ratchet_export_session_wrapped_impl(&peer_identity, &wrap_key)?.map(
+        |(nonce, ciphertext)| EncryptedPayload {
+            nonce,
+            ciphertext,
+        },
+    ))
+}
+
 /// Restore a ratchet session from a previously exported (and decrypted)
 /// snapshot. Replaces any existing session for the peer.
 #[uniffi::export]
 pub fn ratchet_import_session(peer_identity: String, data: Vec<u8>) -> Result<(), KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_import_session_impl(&peer_identity, &data)
-}
-
-/// Resynchronize a ratchet session after the peer's authenticated Synchronize
-/// message. Returns the number of messages skipped.
-#[uniffi::export]
-pub fn ratchet_synchronize_session(
-    peer_identity: String,
-    target_seq: u64,
-) -> Result<u64, KyberError> {
-    ensure_panic_hook_installed();
-    ratchet_ffi::ratchet_synchronize_session_impl(&peer_identity, target_seq)
 }
 
 /// Build an encrypted `Synchronize` packet carrying our current send counter.

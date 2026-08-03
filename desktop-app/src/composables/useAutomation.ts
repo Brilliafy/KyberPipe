@@ -13,7 +13,6 @@ export function useAutomation(refreshLogs: () => Promise<void>) {
 
   const handleRunScript = async (
     code: string,
-    isSandboxed: boolean,
     feedSourceCommand: string,
     onCompletionCode?: string
   ) => {
@@ -25,7 +24,6 @@ export function useAutomation(refreshLogs: () => Promise<void>) {
       });
       const res = await invoke<ScriptResult>("execute_boa_script", {
         scriptCode: code,
-        isSandboxed: isSandboxed,
         lux: Number(currentLux.value),
         feedSourceCommand: feedSourceCommand,
         token,
@@ -39,7 +37,6 @@ export function useAutomation(refreshLogs: () => Promise<void>) {
         });
         await invoke("execute_boa_script", {
           scriptCode: onCompletionCode,
-          isSandboxed: false,
           lux: Number(currentLux.value),
           feedSourceCommand: "",
           token: token2,

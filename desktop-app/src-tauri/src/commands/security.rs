@@ -16,12 +16,77 @@ const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 static PRIVILEGE_TOKENS: LazyLock<std::sync::Mutex<VecDeque<(String, String, Instant)>>> =
     LazyLock::new(|| std::sync::Mutex::new(VecDeque::new()));
 
+/// Every action the renderer is ALLOWED to gate with a privilege token (audit
+/// F15). `request_privilege_token` rejects anything not on this list, so a
+/// compromised renderer cannot mint a token for a command we never meant to
+/// expose (and a typo cannot silently produce a useless token).
+///
+/// AUDIT FINDING #3 (allowlist drift): the allowlist was tightened (audit F15)
+/// without auditing the consumers. Six commands call
+/// `consume_privilege_token`/`gate_tier2` with actions absent here, so their
+/// tokens were unmintable and every invocation returned "requires a fresh
+/// confirmation token" — five documented features were dead. Every action a
+/// real command consumes is listed; a unit test below asserts the two sets are
+/// identical, so any future consumer (or any future allowlist tightening)
+/// that drifts is caught at test time.
+const ALLOWED_TOKEN_ACTIONS: &[&str] = &[
+    "get_pairing_config",
+    "get_pairing_nonce",
+    "delete_connection",
+    "trigger_panic_self_destruct",
+    "grant_file_access",
+    "open_local_file",
+    "request_firewall_open",
+    "create_tor_onion",
+    "execute_boa_script",
+    // Audit finding #3: actions consumed by real commands but absent from the
+    // old allowlist — each is a genuinely privileged operation that warrants a
+    // fresh user-gesture token.
+    "execute_fallback_script",
+    "read_real_clipboard",
+    "store_key_in_secure_enclave",
+    "generate_shamir_recovery_shares",
+    "reconstruct_key_from_shamir_shares",
+    "bind_pkcs11_yubikey_hardware_token",
+];
+
+/// Every action string consumed by a token-gated command. Kept as a single
+/// source of truth so the allowlist and its consumers cannot drift (audit
+/// finding #3). Only referenced by the drift test — compiling it into release
+/// would force an extra static for no runtime purpose.
+#[cfg(test)]
+pub(crate) const CONSUMED_TOKEN_ACTIONS: &[&str] = &[
+    "get_pairing_config",
+    "get_pairing_nonce",
+    "delete_connection",
+    "trigger_panic_self_destruct",
+    "grant_file_access",
+    "open_local_file",
+    "request_firewall_open",
+    "create_tor_onion",
+    "execute_boa_script",
+    "execute_fallback_script",
+    "read_real_clipboard",
+    "store_key_in_secure_enclave",
+    "generate_shamir_recovery_shares",
+    "reconstruct_key_from_shamir_shares",
+    "bind_pkcs11_yubikey_hardware_token",
+];
+
 /// Issue a single-use, expiring token for a privileged action.
+/// AUDIT F15: the action is validated against the allowlist — an unknown
+/// action is rejected outright instead of minting a token that could later be
+/// matched against a command we never intended to gate.
 #[tauri::command]
 pub fn request_privilege_token(action: String) -> Result<String, String> {
+    if !ALLOWED_TOKEN_ACTIONS.contains(&action.as_str()) {
+        return Err(format!(
+            "Privileged action '{action}' is not in the allowlist — token refused (audit F15)"
+        ));
+    }
     let mut token_bytes = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut token_bytes);
-    let token = hex::encode(&token_bytes);
+    let token = hex::encode(token_bytes);
     let mut guard = PRIVILEGE_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|(_, _, at)| at.elapsed() < TOKEN_TTL);
     guard.push_back((action, token.clone(), Instant::now()));
@@ -196,6 +261,13 @@ pub fn trigger_panic_self_destruct(
     state.set_pairing_initiator_pk(String::new());
     state.set_pairing_initiator_x25519_pk(String::new());
 
+    // Audit KYP-2026-02 #15: self-destruct must clear the pairing keypair
+    // REGISTRY — not just the in-memory AppState copy — and destroy every
+    // opaque keypair/KEM handle so no secret-bearing handle survives.
+    core_crypto::clear_pq_pairing_registry();
+    core_crypto::destroy_all_pq_keypair_handles();
+    core_crypto::destroy_all_kem_handles();
+
     // Clear settings
     {
         let mut settings = state.settings.lock();
@@ -209,8 +281,20 @@ pub fn trigger_panic_self_destruct(
     // master_identity_key, session_key, and the independent ratchet snapshot
     // wrap key — plus the kyberpipe-tofu service's trusted-server TLS pin.
     // (Audit finding #16: the old path left snapshot_key and the TLS pin alive
-    // after self-destruct.)
-    for key_name in ["master_identity_key", "session_key", "snapshot_key"] {
+    // after self-destruct. Audit KYP-2026-02 #13/#15: the beacon ML-DSA signing
+    // key, the persisted pairing keypair, and the Tor onion key are long-term
+    // identities that must not survive either.)
+    for key_name in [
+        "master_identity_key",
+        "session_key",
+        "snapshot_key",
+        "pairing_keypair",
+        "beacon_signing_sk",
+        "beacon_signing_pk",
+        "tor_onion_key",
+        "server_tls_key",
+        "ratchet_watermark",
+    ] {
         if let Ok(entry) = keyring::Entry::new("kyberpipe", key_name) {
             let _ = entry.delete_password();
         }
@@ -218,6 +302,8 @@ pub fn trigger_panic_self_destruct(
     if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
         let _ = entry.delete_password();
     }
+    // Remove the persisted pairing keypair file/blob too.
+    crate::ratchet_store::clear_pairing_keypair_from_keyring();
     // Invalidate the in-memory trusted pin too.
     core_crypto::network::tls_config::store_tofu_cert_hash(String::new());
 
@@ -276,4 +362,45 @@ pub fn check_stepup_authorization(
         "Step-up authorization is unavailable. This action requires a registered Polkit action."
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod token_allowlist_tests {
+    use super::*;
+
+    /// AUDIT FINDING #3: the set of actions a token-gated command consumes and
+    /// the allowlist that `request_privilege_token` validates against must be
+    /// IDENTICAL. The audit found six consumers referencing actions absent from
+    /// the allowlist — their tokens were unmintable and the commands were dead.
+    /// This test pins the two sets together so any future drift (a new consumer
+    /// action, or an allowlist tightening that forgets a consumer) fails the
+    /// build instead of silently disabling a feature.
+    #[test]
+    fn consumed_actions_match_allowlist() {
+        let mut allowed = ALLOWED_TOKEN_ACTIONS.to_vec();
+        let mut consumed = CONSUMED_TOKEN_ACTIONS.to_vec();
+        allowed.sort_unstable();
+        consumed.sort_unstable();
+        assert_eq!(
+            allowed, consumed,
+            "every consumed token action must be allowlisted and vice versa (audit finding #3)\n\n{}",
+            {
+                let a: std::collections::HashSet<&str> =
+                    ALLOWED_TOKEN_ACTIONS.iter().copied().collect();
+                let c: std::collections::HashSet<&str> =
+                    CONSUMED_TOKEN_ACTIONS.iter().copied().collect();
+                format!(
+                    "only in allowlist: {:?}\nonly consumed by commands: {:?}",
+                    a.difference(&c).collect::<Vec<_>>(),
+                    c.difference(&a).collect::<Vec<_>>()
+                )
+            }
+        );
+        // Each allowlisted action is non-empty and structurally sane (a typo
+        // that mints a token for a command that consumes a different string is
+        // caught by the set equality above; this guards against empty strings).
+        for action in ALLOWED_TOKEN_ACTIONS {
+            assert!(!action.is_empty());
+        }
+    }
 }

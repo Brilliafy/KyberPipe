@@ -8,15 +8,28 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="32" />
+    <!-- No ACCESS_FINE/COARSE_LOCATION: nothing in the codebase uses location
+         (WifiDirectManager never references it; NEARBY_WIFI_DEVICES with
+         neverForLocation covers Wi-Fi Direct) — audit finding F16. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Reboot recovery (audit finding #25): without a BOOT_COMPLETED path the
+         service never restarted after a reboot until the app was opened, so a
+         device that rebooted silently stopped syncing. The receiver only
+         schedules the keepalive alarm — it does not start the foreground
+         service directly (Android 12+ restricts FGS start from BOOT_COMPLETED).
+         On boot, the alarm fires and PipeService's onStartCommand resumes the
+         sync engine within the FGS rules. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- RECEIVE_SMS: intercepting inbound SMS for user-approved forwarding
+         (default OFF, audit finding #14). SEND_SMS: used ONLY for the
+         user-initiated outbound-reply flow (SmsApprovalReceiver approval
+         notification), never for autonomous sending — audit finding F16. -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -51,8 +64,11 @@
                 <data android:scheme="kyberpipe" android:host="pair" />
             </intent-filter>
 
-            <!-- App Link Intent Filter for clickable HTTPS links (e.g. Signal, WhatsApp, SMS) -->
-            <intent-filter android:autoVerify="true" android:label="KyberPipe Pair Link HTTPS">
+            <!-- App Link Intent Filter for clickable HTTPS links (e.g. Signal, WhatsApp, SMS).
+                 autoVerify deliberately REMOVED (audit finding F16): auto-verified
+                 HTTPS app links would make the pairing URL a web-triggerable vector;
+                 the kyberpipe://pair scheme filter above remains the pairing entry. -->
+            <intent-filter android:label="KyberPipe Pair Link HTTPS">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
@@ -95,9 +111,12 @@
 
         <receiver
             android:name=".receiver.SmsReceiver"
-            android:exported="true"
+            android:exported="false"
             android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter android:priority="1000">
+            <!-- exported=false (system SMS broadcasts still reach it) and a modest
+                 priority (audit finding F16) — no more abusing priority 1000 to
+                 win the SMS race ahead of other receivers. -->
+            <intent-filter android:priority="100">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
@@ -105,6 +124,18 @@
         <receiver
             android:name=".receiver.SmsApprovalReceiver"
             android:exported="false" />
+
+        <!-- Reboot recovery (audit finding #25): schedules the sync keepalive
+             alarm after a reboot so PipeService's onStartCommand resumes the
+             sync engine without requiring the user to open the app. -->
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

@@ -2,19 +2,17 @@ package org.kyberpipe.client
 
 import android.content.Context
 import android.util.Log
-import android.widget.Toast
 import org.json.JSONObject
-import uniffi.core_crypto.generateSasCode
-import uniffi.core_crypto.encapsulatePqSecret
-import uniffi.core_crypto.deriveSessionKey
-import uniffi.core_crypto.generatePqKeypair
 import org.kyberpipe.client.utils.SettingsManager
 
 data class PairingResult(
     val success: Boolean,
     val hostPkHex: String,
     val kemCiphertext: String,
-    val sessionKey: List<UByte>,
+    /// Opaque Rust-side session-key handle (ULong). Raw key bytes never leave Rust.
+    val sessionKeyHandle: ULong,
+    /// Opaque Rust-side KEM shared-secret handle (ULong), destroyed on unpair.
+    val kemHandleId: ULong,
     val sasCode: String,
     val hostIp: String,
     val p2pIp: String,
@@ -87,8 +85,26 @@ object PairingManager {
     }
 
     /// Perform the KEM handshake against the host's public keys.
-    /// Returns a PairingResult if successful, null on failure.
-    fun performKemHandshake(json: JSONObject, keyPair: uniffi.core_crypto.PqKeyPair?, context: android.content.Context? = null): PairingResult? {
+    ///
+    /// Everything secret stays in Rust opaque handles (audit finding F7): the
+    /// hybrid keypair is referenced by [keyPairHandle], the KEM shared secret by
+    /// the returned [PairingResult.kemHandleId], and the derived session key by
+    /// [PairingResult.sessionKeyHandle]. Raw x25519Sk/mlkemSk/sharedSecret bytes
+    /// never cross the FFI boundary.
+    ///
+    /// Returns a PairingResult if successful, null on failure. A missing keypair
+    /// handle is a hard failure — there is NO legacy keypair-less ratchet init
+    /// anymore (the regenerated FFI removed ratchetInitSession), so pairing fails
+    /// loudly instead of silently using a fresh ephemeral keypair.
+    fun performKemHandshake(
+        json: JSONObject,
+        keyPairHandle: ULong?,
+        context: android.content.Context? = null,
+    ): PairingResult? {
+        if (keyPairHandle == null) {
+            Log.e(TAG, "Pairing aborted: no hybrid keypair handle — a generated keypair is required for the KEM handshake")
+            return null
+        }
         val hostPkHex = json.optString("pqc_pub", json.optString("host_identity_pk_hex", ""))
         val wireguardPkHex = json.optString("x25519_pub", json.optString("wireguard_pk_hex", ""))
         if (hostPkHex.isEmpty() || wireguardPkHex.isEmpty()) return null
@@ -108,51 +124,51 @@ object PairingManager {
             connectP2p(json, hostPkHex)
         }
 
-        val kemResponse = encapsulatePqSecret(hexDecode(wireguardPkHex), hexDecode(hostPkHex))
-        val myPkHex = keyPair?.mlkemPk?.joinToString("") { "%02x".format(it) } ?: ""
-        val computedSas = generateSasCode(hexDecode(hostPkHex), hexDecode(myPkHex), kemResponse.sharedSecret)
-        // Canonical domain-separation salt — SAME bytes as the desktop, taken
-        // from the UniFFI export (audit finding #2). Never re-encode hex-as-ASCII.
-        val sessionKeyHex = deriveSessionKey(
-            kemResponse.sharedSecret,
-            uniffi.core_crypto.sessionDerivationSalt()
+        // KEM encapsulate on the keypair handle — the shared secret stays in Rust
+        // and is referenced by kemHandleId. Only the (public) ciphertext and the
+        // peer's public halves cross the boundary.
+        val kemResponse = uniffi.core_crypto.encapsulatePqSecretHandle(
+            hexDecode(wireguardPkHex),
+            hexDecode(hostPkHex)
         )
-        val sessionKey = sessionKeyHex
+        val clientPublic = uniffi.core_crypto.getPqKeypairPublic(keyPairHandle)
+        val clientMlkemPkBytes = hexDecode(clientPublic.mlkemPkHex)
+        val computedSas = uniffi.core_crypto.generateSasCodeWithKemHandle(
+            hexDecode(hostPkHex),
+            clientMlkemPkBytes,
+            kemResponse.handle
+        )
 
-        // Initialize ratchet session for peer with hybrid public keys.
-        // Remove any stale session first (re-pair scenario), then init fresh.
+        // Initialize ratchet session for peer with hybrid public keys, using the
+        // KEM handle (NO raw secrets — audit finding F7). Remove any stale
+        // session first (re-pair scenario), then init fresh.
         try {
             val peerIdentity = hostPkHex // Use host PK as peer identity
             uniffi.core_crypto.ratchetRemoveSession(peerIdentity)
-            if (keyPair != null) {
-                // Rekey keypair mismatch (audit finding #1): init the ratchet with
-                // OUR OWN pairing keypair so the DH/KEM chains and the desktop's
-                // rekey proposals share the same secret state. Peer keys are the
-                // desktop's wireguard x25519 pk and host mlkem pk, as before.
-                uniffi.core_crypto.ratchetInitSessionWithKeypair(
-                    peerIdentity,
-                    kemResponse.sharedSecret,
-                    false, // Android is not the initiator
-                    keyPair.x25519Pk,
-                    keyPair.x25519Sk,
-                    keyPair.mlkemPk,
-                    keyPair.mlkemSk,
-                    hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
-                    hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
-                )
-            } else {
-                // Fallback to the legacy keypair-less init (no local keypair).
-                uniffi.core_crypto.ratchetInitSession(
-                    peerIdentity,
-                    kemResponse.sharedSecret,
-                    false, // Android is not the initiator
-                    hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
-                    hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
-                )
-            }
+            // The Android side is never the ratchet initiator.
+            uniffi.core_crypto.ratchetInitSessionFromKemHandle(
+                peerIdentity,
+                false,
+                keyPairHandle,
+                kemResponse.handle,
+                hexDecode(wireguardPkHex), // peer x25519 pk — enables immediate DH ratchet
+                hexDecode(hostPkHex)       // peer mlkem pk — enables immediate KEM ratchet
+            )
+            // AUDIT FINDING #2 (HIGH): after a re-pair the fresh session starts at
+            // epoch 0 but the OLD pairing's snapshot on disk is also epoch 0 (legacy
+            // format) — bump the epoch so the import guard can recognize any stale
+            // pre-re-pair snapshot as cross-epoch and refuse it. Without this, a
+            // MainActivity recreation after a re-pair would import the old snapshot
+            // (old master secret/keypair) over the fresh session — silent state
+            // rollback that presents as "paired but nothing syncs".
+            uniffi.core_crypto.ratchetBumpPairingEpoch(peerIdentity)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init ratchet session: ${e.message}")
         }
+
+        // Derive the opaque session-key handle from the KEM handle. The derived
+        // key bytes stay in Rust zeroizing memory; only the handle is returned.
+        val sessionKeyHandle = uniffi.core_crypto.deriveSessionKeyHandle(kemResponse.handle)
 
         // Store peer identity for clipboard/notification handlers
         if (context != null) {
@@ -176,12 +192,48 @@ object PairingManager {
             success = true,
             hostPkHex = hostPkHex,
             kemCiphertext = kemResponse.ciphertext.joinToString("") { "%02x".format(it) },
-            sessionKey = sessionKey.toList().map { it.toUByte() },
+            sessionKeyHandle = sessionKeyHandle,
+            kemHandleId = kemResponse.handle,
             sasCode = computedSas,
             hostIp = hostIp,
             p2pIp = p2pIp,
             deviceName = deviceName
         )
+    }
+
+    /// Destroy every Rust-side pairing handle still referenced by this install
+    /// (keypair, KEM shared secret, session key) and clear the stored handles.
+    /// Called on unpair/self-destruct so the zeroizing memory is released and
+    /// a stale handle can never be reused (audit finding F7).
+    fun destroyPairingHandles(context: Context) {
+        val settings = SettingsManager(context)
+        val keypairHandle = settings.keypairHandle
+        if (keypairHandle != 0L) {
+            try {
+                uniffi.core_crypto.destroyPqKeypairHandle(keypairHandle.toULong())
+            } catch (e: Exception) {
+                Log.e(TAG, "Keypair handle destroy failed: ${e.message}")
+            }
+            settings.keypairHandle = 0L
+        }
+        val kemHandleId = settings.kemHandleId
+        if (kemHandleId != 0L) {
+            try {
+                uniffi.core_crypto.destroyKemHandle(kemHandleId.toULong())
+            } catch (e: Exception) {
+                Log.e(TAG, "KEM handle destroy failed: ${e.message}")
+            }
+            settings.kemHandleId = 0L
+        }
+        val sessionKeyHandle = settings.sessionKeyHandle
+        if (sessionKeyHandle != 0L) {
+            try {
+                uniffi.core_crypto.sessionKeyDestroy(sessionKeyHandle.toULong())
+            } catch (e: Exception) {
+                Log.e(TAG, "Session key handle destroy failed: ${e.message}")
+            }
+            settings.sessionKeyHandle = 0L
+        }
     }
 
     /// Send the pairing ciphertext to the host over QUIC.
@@ -200,21 +252,44 @@ object PairingManager {
                 Log.e(TAG, "Pairing aborted: the QR carried no server certificate pin — refusing unverified bootstrap (MITM protection)")
                 return null
             }
+            // AUDIT FINDING #1 (CRITICAL): the bootstrap connection MUST present
+            // the per-install client identity certificate. The desktop pins the
+            // TLS-OBSERVED client cert at pairing time; a cert-less bootstrap
+            // leaves the pin empty, skips the mTLS rebind, and rejects every
+            // post-pairing stream ("paired but nothing syncs"). Generate the
+            // identity BEFORE connecting and present it on the SAME connection
+            // that carries the KEM — single connect path, no cert-less pairing
+            // variant.
+            val identity = ensureClientIdentityCert(context ?: return null)
+            if (identity.isEmpty()) {
+                Log.e(TAG, "Pairing aborted: failed to generate the client identity certificate")
+                return null
+            }
+            val settings2 = SettingsManager(context!!)
+            if (settings2.clientIdentityCert.isEmpty() || settings2.clientIdentityKey.isEmpty()) {
+                Log.e(TAG, "Pairing aborted: client identity certificate not persisted")
+                return null
+            }
+            val certDer = android.util.Base64.decode(settings2.clientIdentityCert, android.util.Base64.NO_WRAP)
+            val keyDer = android.util.Base64.decode(settings2.clientIdentityKey, android.util.Base64.NO_WRAP)
             // Establish the QUIC bridge to the desktop before sending any stream.
+            // Presents the client identity cert (audit finding #1) AND pins the
+            // QR-bound server cert (audit finding #15).
             try {
-                uniffi.core_crypto.quicConnectPairingBootstrap(
+                uniffi.core_crypto.quicConnectWithClientCert(
                     hostIp,
                     9876.toUShort(),
-                    pin
+                    pin,
+                    certDer,
+                    keyDer
                 )
             } catch (connectErr: Exception) {
                 Log.e(TAG, "QUIC connect failed: ${connectErr.message}")
                 return null
             }
-            var certHash = ""
+            var certHash = identity
             var nonceHex = ""
             if (settings != null) {
-                certHash = settings.clientIdentityCertHash
                 nonceHex = settings.pendingPairingNonce
             }
             val json = JSONObject().apply {
@@ -240,13 +315,10 @@ object PairingManager {
         val password = json.optString("p2p_password", "")
         val goIp = json.optString("p2p_ip", "")
         if (ssid.isNotEmpty() && password.isNotEmpty()) {
-            try {
-                // Connect to P2P Wi-Fi via native bridge
-                // uniffi.core_crypto.connectP2pWifi(ssid, password, goIp)
-                // Note: connectP2pWifi doesn't exist yet, placeholder
-            } catch (e: Exception) {
-                Log.e(TAG, "P2P connection failed: ${e.message}")
-            }
+            // P2P Wi-Fi pairing is NOT implemented in this build — the stub that
+            // previously pretended to connect (a silent no-op behind a try/catch)
+            // is removed so the caller cannot rely on it (audit KYP-2026-02 #25).
+            Log.w(TAG, "connectP2p: P2P Wi-Fi pairing is unavailable in this build")
         }
     }
 }

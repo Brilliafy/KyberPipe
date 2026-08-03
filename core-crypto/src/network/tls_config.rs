@@ -9,51 +9,85 @@ use tracing::warn;
 /// QUIC Certificate Pinning Verifier with enforced mTLS.
 /// Requires a pinned certificate hash - rejects all connections without one.
 /// Validates the full certificate chain including intermediate and root CAs.
+///
+/// AUDIT FINDING #4 (single-pin vs multi-device): the verifier now accepts a
+/// SET of authorized client-cert hashes, not a single `Option<String>`. The
+/// stream layer (`authorize_stream`) already admitted a per-peer cert map so a
+/// SECOND paired device could route its streams; the TLS layer beneath it
+/// pinned exactly ONE hash, so a second device's certificate failed the TLS
+/// handshake before authorization ever ran — multi-device mesh was fiction.
+/// The TLS verifier and the stream authorization now enforce the SAME set.
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
-    pub pinned_sha256_hex: Option<String>,
+    /// Authorized client-cert hashes (hex SHA-256). Empty set + `required` =
+    /// reject every client (post-pairing with no authorized peers); any hash
+    /// in the set is admitted at TLS — matching `authorize_stream`'s per-peer
+    /// map. For the CLIENT-side role (verifying a server), the set holds the
+    /// single pinned server hash.
+    pub pinned_sha256_hex: Vec<String>,
     pub required: bool,
 }
 
 impl PinnedCertVerifier {
-    pub fn new(pinned_sha256_hex: Option<String>, required: bool) -> Self {
+    pub fn new(pinned_sha256_hex: Vec<String>, required: bool) -> Self {
         Self {
             pinned_sha256_hex,
             required,
         }
     }
 
+    /// Single-hash verifier for the CLIENT role (verifying a server). An empty
+    /// hash yields an EMPTY set (accept-any when `required=false`) — the legacy
+    /// `None` behaviour — never a set containing one empty string, which would
+    /// reject every certificate (a non-empty set is always enforced).
+    pub fn single(hash: String, required: bool) -> Self {
+        let set = if hash.is_empty() {
+            Vec::new()
+        } else {
+            vec![hash]
+        };
+        Self {
+            pinned_sha256_hex: set,
+            required,
+        }
+    }
+
     fn verify_cert(&self, end_entity: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         let cert_hash = hex::encode(sha2::Sha256::digest(end_entity.as_ref()));
-        match self.pinned_sha256_hex {
-            Some(ref pinned) => {
-                // Constant-time comparison
+        if self.pinned_sha256_hex.is_empty() {
+            if self.required {
+                warn!("No pinned certificate hash configured - rejecting connection");
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ));
+            } else {
+                warn!("Certificate pinning not configured - allowing with warning");
+                return Ok(());
+            }
+        }
+        // Membership test against the allowlist — constant-time per entry so
+        // hash timing does not reveal which authorized peer matched.
+        let match_found = self
+            .pinned_sha256_hex
+            .iter()
+            .any(|pinned| {
                 let pinned_bytes = pinned.as_bytes();
-                let cert_bytes = cert_hash.as_bytes();
-                if pinned_bytes.len() != cert_bytes.len()
-                    || bool::from(pinned_bytes.ct_ne(cert_bytes))
-                {
-                    warn!(
-                        "Peer certificate hash mismatch! Expected: {}, Received: {}",
-                        pinned, cert_hash
-                    );
-                    return Err(rustls::Error::InvalidCertificate(
-                        rustls::CertificateError::ApplicationVerificationFailure,
-                    ));
-                }
-                Ok(())
-            }
-            None => {
-                if self.required {
-                    warn!("No pinned certificate hash configured - rejecting connection");
-                    Err(rustls::Error::InvalidCertificate(
-                        rustls::CertificateError::ApplicationVerificationFailure,
-                    ))
-                } else {
-                    warn!("Certificate pinning not configured - allowing with warning");
-                    Ok(())
-                }
-            }
+                pinned_bytes.len() == cert_hash.len()
+                    && bool::from(
+                        pinned_bytes
+                            .ct_eq(cert_hash.as_bytes()),
+                    )
+            });
+        if match_found {
+            Ok(())
+        } else {
+            warn!(
+                "Peer certificate hash not authorized: expected one of {:?}, received {}",
+                self.pinned_sha256_hex, cert_hash
+            );
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
         }
     }
 }
@@ -225,26 +259,6 @@ pub fn capture_server_cert_hash_no_store(conn: &quinn::Connection) -> Option<Str
     Some(hex::encode(sha2::Sha256::digest(cert.as_ref())))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Audit finding #16: self-destruct must clear the trusted-server TLS pin.
-    /// `store_tofu_cert_hash("")` must clear the in-memory pin (the keyring
-    /// entry deletion depends on an OS backend and is exercised on systems
-    /// where one is available).
-    #[test]
-    fn store_empty_hash_clears_pin() {
-        store_tofu_cert_hash("a".repeat(64));
-        assert!(get_tofu_cert_hash().is_some());
-        store_tofu_cert_hash(String::new());
-        assert!(
-            get_tofu_cert_hash().is_none(),
-            "an empty stored hash must clear the trusted pin"
-        );
-    }
-}
-
 /// Generate a per-install client identity certificate (self-signed) used by
 /// the Android companion for post-pairing mTLS authorization. Returns the DER
 /// certificate and the DER PKCS#8 private key so the caller can persist them
@@ -260,7 +274,7 @@ pub fn generate_client_identity_cert() -> Result<(Vec<u8>, Vec<u8>), KyberError>
 /// Build QUIC server listener bound to 0.0.0.0:4433 supporting cross-subnet (Ethernet <-> Wi-Fi) routing
 pub fn bind_cross_subnet_listener(port: u16) -> Result<quinn::Endpoint, KyberError> {
     let (certs, key) = generate_self_signed_cert()?;
-    let server_config = configure_quic_server(certs, key, true, None)?;
+    let server_config = configure_quic_server(certs, key, true, vec![])?;
     let socket_addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
 
     let endpoint = quinn::Endpoint::server(server_config, socket_addr).map_err(|e| {
@@ -295,17 +309,18 @@ pub fn configure_quic_server(
     certs: Vec<CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
     require_client_auth: bool,
-    pinned_client_cert_hash: Option<String>,
+    pinned_client_cert_hashes: Vec<String>,
 ) -> Result<quinn::ServerConfig, KyberError> {
     let mut server_crypto = if require_client_auth {
-        // Client must present a self-signed cert. When no pinned hash is configured
+        // Client must present a self-signed cert. When no hash is configured
         // (P2P bootstrap), accept the presented cert without a pin check.
-        // The pairing protocol provides post-quantum authentication out-of-band via SAS,
-        // so TLS-level pinning is optional during initial key exchange.
-        // Enforce cert pinning when a hash is provided (post-pairing).
-        // During initial pairing (None), accept any cert — SAS provides OOB auth.
-        let required = pinned_client_cert_hash.is_some();
-        let client_verifier = Arc::new(PinnedCertVerifier::new(pinned_client_cert_hash, required));
+        // The pairing protocol provides post-quantum authentication out-of-band
+        // via SAS, so TLS-level pinning is optional during initial key exchange.
+        // Enforce cert pinning against the ALLOWLIST when any hash is provided
+        // (post-pairing). During initial pairing (empty), accept any cert — SAS
+        // provides OOB auth.
+        let required = !pinned_client_cert_hashes.is_empty();
+        let client_verifier = Arc::new(PinnedCertVerifier::new(pinned_client_cert_hashes, required));
         rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(certs, key)
@@ -336,7 +351,12 @@ pub fn configure_quic_client(
     pinned_cert_hash: Option<String>,
 ) -> Result<quinn::ClientConfig, KyberError> {
     let required = pinned_cert_hash.is_some();
-    let verifier = Arc::new(PinnedCertVerifier::new(pinned_cert_hash, required));
+    // Client-side role: the verifier holds the single pinned SERVER hash (the
+    // set form keeps one verifier type; a client only ever pins one server).
+    let verifier = Arc::new(PinnedCertVerifier::new(
+        pinned_cert_hash.clone().into_iter().collect(),
+        required,
+    ));
     let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -353,4 +373,66 @@ pub fn configure_quic_client(
             .map_err(|e| KyberError::NetworkError(e.to_string()))?,
     ));
     Ok(client_config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding #16: self-destruct must clear the trusted-server TLS pin.
+    /// `store_tofu_cert_hash("")` must clear the in-memory pin (the keyring
+    /// entry deletion depends on an OS backend and is exercised on systems
+    /// where one is available).
+    #[test]
+    fn store_empty_hash_clears_pin() {
+        store_tofu_cert_hash("a".repeat(64));
+        assert!(get_tofu_cert_hash().is_some());
+        store_tofu_cert_hash(String::new());
+        assert!(
+            get_tofu_cert_hash().is_none(),
+            "an empty stored hash must clear the trusted pin"
+        );
+    }
+
+    /// AUDIT FINDING #4 (multi-device): the TLS verifier must admit ANY
+    /// certificate whose hash is in the authorized set — the same set the
+    /// stream layer's per-peer cert map enforces. The legacy single-pin
+    /// verifier rejected a second device's certificate at the TLS handshake,
+    /// so "multi-device mesh" could never work. This test pins the allowlist
+    /// semantics at the verifier level.
+    #[test]
+    fn multi_device_verifier_admits_any_authorized_cert() {
+        // Two distinct device certificates (like two phones that paired).
+        let cert_a = generate_client_identity_cert().expect("device A cert");
+        let cert_b = generate_client_identity_cert().expect("device B cert");
+        let hash_a = hex::encode(sha2::Sha256::digest(&cert_a.0));
+        let hash_b = hex::encode(sha2::Sha256::digest(&cert_b.0));
+        assert_ne!(hash_a, hash_b, "distinct devices must have distinct certs");
+
+        // A verifier backed by BOTH hashes (the multi-device allowlist).
+        let verifier =
+            PinnedCertVerifier::new(vec![hash_a.clone(), hash_b.clone()], true);
+        let der_a = CertificateDer::from(cert_a.0);
+        let der_b = CertificateDer::from(cert_b.0);
+        let der_c = CertificateDer::from(generate_client_identity_cert().expect("device C").0);
+        assert!(
+            verifier.verify_cert(&der_a).is_ok(),
+            "device A (first paired) must pass the TLS allowlist"
+        );
+        assert!(
+            verifier.verify_cert(&der_b).is_ok(),
+            "device B (second paired) must pass the TLS allowlist — the legacy single pin rejected it"
+        );
+        assert!(
+            verifier.verify_cert(&der_c).is_err(),
+            "an unpaired device's certificate must still be rejected"
+        );
+
+        // The legacy single-pin verifier (only A authorized) must reject B.
+        let single = PinnedCertVerifier::single(hash_a, true);
+        assert!(
+            single.verify_cert(&der_b).is_err(),
+            "the single-pin verifier cannot admit a second device (the defect audit finding #4 fixes)"
+        );
+    }
 }

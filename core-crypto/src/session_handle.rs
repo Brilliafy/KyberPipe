@@ -4,12 +4,6 @@ use std::sync::{LazyLock, Mutex};
 
 pub(crate) struct SessionKey {
     key: [u8; 32],
-    #[allow(dead_code)] // Retained for audit clarity; nonces are now random.
-    seq: std::sync::atomic::AtomicU64,
-    #[allow(dead_code)] // Retained for audit clarity; nonces are now random.
-    sid: u32,
-    #[allow(dead_code)] // Reserved for future time-based LRU eviction
-    last_used: std::time::Instant,
 }
 
 impl Drop for SessionKey {
@@ -36,6 +30,15 @@ struct SessionRegistry {
     fingerprints: HashMap<u64, [u8; 16]>,
     /// LRU eviction order — least recently used at the front.
     lru: VecDeque<u64>,
+    /// Handles that must NEVER be evicted by the LRU cap (audit finding #23).
+    /// A long-idle but still-referenced key (e.g. the persisted master session
+    /// key used only at restore time) must not silently vanish when 256 churny
+    /// transient handles are created; evicting it turns a later decrypt into
+    /// "Invalid handle" and silently destroys undecryptable material. Pinned
+    /// handles are skipped by the eviction sweep. The cap still bounds the
+    /// total set; if every handle is pinned, creation fails with a clear error
+    /// instead of evicting a pinned key.
+    pinned: std::collections::HashSet<u64>,
 }
 
 impl SessionRegistry {
@@ -44,13 +47,19 @@ impl SessionRegistry {
             keys: HashMap::new(),
             fingerprints: HashMap::new(),
             lru: VecDeque::new(),
+            pinned: std::collections::HashSet::new(),
         }
     }
 
     fn evict_lru(&mut self) {
-        if let Some(oldest) = self.lru.pop_front() {
-            self.keys.remove(&oldest);
-            self.fingerprints.remove(&oldest);
+        // Skip pinned handles — only churny TRANSIENT handles are evictable
+        // (audit finding #23).
+        while let Some(oldest) = self.lru.pop_front() {
+            if !self.pinned.contains(&oldest) {
+                self.keys.remove(&oldest);
+                self.fingerprints.remove(&oldest);
+                return;
+            }
         }
     }
 
@@ -87,27 +96,27 @@ pub fn session_key_create(key_bytes: Vec<u8>) -> Result<u64, KyberError> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&key_bytes);
 
-    // Derive deterministic session ID (sid) from key bytes via HKDF
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-session-sid-salt"), &arr);
-    let mut sid_bytes = [0u8; 4];
-    let _ = hk.expand(b"session-sid-v1", &mut sid_bytes);
-    let sid = u32::from_be_bytes(sid_bytes);
-
-    let mut key = std::sync::Arc::new(SessionKey {
-        key: arr,
-        seq: std::sync::atomic::AtomicU64::new(0),
-        sid,
-        last_used: std::time::Instant::now(),
-    });
+    let mut key = std::sync::Arc::new(SessionKey { key: arr });
     let fp = key_fingerprint(&key.key);
 
     let mut reg = SESSION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Enforce cap first: evict the least-recently-used handle so its key bytes
-    // become reusable (a replaced handle is genuinely destroyed).
+    // Enforce cap first: evict the least-recently-used EVICTABLE handle so its
+    // key bytes become reusable (a replaced handle is genuinely destroyed).
+    // Pinned handles are never evicted (audit finding #23). If every handle is
+    // pinned and the registry is full, fail loudly instead of silently
+    // destroying a pinned key the caller still references.
     if reg.keys.len() >= MAX_SESSION_KEYS {
+        let evictable = reg
+            .lru
+            .iter()
+            .any(|h| !reg.pinned.contains(h));
+        if !evictable {
+            return Err(KyberError::CryptoError(
+                "Session key registry full and every handle is pinned — destroy an unused handle first (audit finding #23)"
+                    .into(),
+            ));
+        }
         reg.evict_lru();
     }
     // Reject duplicate key material among LIVE handles: two concurrent handles
@@ -147,10 +156,32 @@ pub fn session_key_destroy(handle: u64) {
     let mut reg = SESSION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.keys.remove(&handle);
     reg.fingerprints.remove(&handle);
+    reg.pinned.remove(&handle);
     if let Some(pos) = reg.lru.iter().position(|&h| h == handle) {
         reg.lru.remove(pos);
     }
     // Arc drop triggers SessionKey drop, which triggers zeroization
+}
+
+/// Pin a session key handle so the LRU cap can never evict it (audit finding
+/// #23). Pinned handles are still destroyed explicitly via `session_key_destroy`
+/// (unpair / self-destruct). Returns true when the handle is live and was
+/// pinned (or was already pinned); false for an unknown handle.
+pub fn session_key_pin(handle: u64) -> bool {
+    let mut reg = SESSION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if reg.keys.contains_key(&handle) {
+        reg.pinned.insert(handle);
+        true
+    } else {
+        false
+    }
+}
+
+/// Unpin a session key handle, returning it to the pool of evictable handles.
+/// No-op for unknown handles.
+pub fn session_key_unpin(handle: u64) {
+    let mut reg = SESSION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    reg.pinned.remove(&handle);
 }
 
 /// Destroy ALL session key handles, zeroizing every key. Used by the panic
@@ -160,6 +191,7 @@ pub fn session_key_destroy_all() {
     reg.keys.clear();
     reg.fingerprints.clear();
     reg.lru.clear();
+    reg.pinned.clear();
 }
 
 /// Encrypt data using a session key handle.

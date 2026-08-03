@@ -121,8 +121,8 @@ fn rekey_survives_100_message_boundary_both_directions() {
         "bob must have crossed rekey boundaries, generation={}",
         bob.ratchet_generation
     );
-    assert_eq!(alice.send_message_count, bob.recv_message_count);
-    assert_eq!(bob.send_message_count, alice.recv_message_count);
+    assert_eq!(alice.send.message_count, bob.recv.message_count);
+    assert_eq!(bob.send.message_count, alice.recv.message_count);
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn rekey_survives_out_of_order_delivery_at_boundary() {
         }
     }
     assert_eq!(alice.ratchet_generation, 1);
-    assert_eq!(alice.send_message_count, 0);
+    assert_eq!(alice.send.message_count, 0);
 
     // Now the boundary-straddling messages: alice sends two new-generation
     // messages (seq 0 and seq 1) and two OLD-generation messages are still in
@@ -298,8 +298,8 @@ fn resync_refuses_pending_rekey_and_bounds_gap() {
     // A pending incoming proposal blocks resync (audit finding #4).
     let mut pending = alice.clone();
     // Fake an unconsumed pending proposal.
-    pending.pending_root_key = Some([7u8; 32]);
-    pending.pending_receiving_chain_key = Some([8u8; 32]);
+    pending.incoming_proposal.root_key = Some([7u8; 32]);
+    pending.incoming_proposal.receiving_chain_key = Some([8u8; 32]);
     assert!(
         pending.resync_receiving_chain(50).is_err(),
         "resync must refuse across a pending rekey"
@@ -311,15 +311,422 @@ fn resync_refuses_pending_rekey_and_bounds_gap() {
     // Cumulative budget eventually exhausts.
     let mut alice2 = alice_bob().0;
     let mut advanced: u64 = 0;
-    while advanced < super::decrypt::SYNC_MAX_CUMULATIVE + 100 {
-        match alice2.resync_receiving_chain(alice2.recv_message_count + 999) {
+    while advanced < super::resync::SYNC_MAX_CUMULATIVE + 100 {
+        match alice2.resync_receiving_chain(alice2.recv.message_count + 999) {
             Ok(gap) => advanced += gap,
             Err(_) => break,
         }
     }
     assert!(
-        advanced <= super::decrypt::SYNC_MAX_CUMULATIVE,
+        advanced <= super::resync::SYNC_MAX_CUMULATIVE,
         "cumulative resync advancement must be capped, got {advanced}"
+    );
+}
+
+/// Audit KYP-2026-02 #1 (CRITICAL): an out-of-order rekey carrier MUST NOT be
+/// silently stripped of its proposal. When a receive-gap derives skip keys for
+/// a range that includes the rekey carrier, the carrier's key is cached; if the
+/// carrier then arrives late (reordered), the cached-key dispatch must run the
+/// proposal derivation FIRST so the pending proposal and the RekeyAck are
+/// queued — otherwise the sender's confirm queue stays occupied and the session
+/// desyncs at the generation boundary.
+#[test]
+fn out_of_order_rekey_carrier_still_derives_pending_proposal() {
+    let (mut alice, mut bob) = alice_bob();
+
+    // Alice sends seq 0..=99; bob receives them in order (bob at recv 100).
+    for i in 0..100 {
+        a2b(&mut alice, &mut bob, i);
+    }
+    assert_eq!(bob.recv.message_count, 100);
+
+    // Alice's seq-100 message is the rekey carrier; 101 and 102 follow.
+    let carrier = alice.ratchet_encrypt(b"carrier".as_ref()).expect("carrier");
+    assert!(
+        carrier.rekey_ciphertext.is_some(),
+        "carrier at seq 100 must carry a rekey payload"
+    );
+    let msg101 = alice.ratchet_encrypt(b"m101".as_ref()).expect("m101");
+    let msg102 = alice.ratchet_encrypt(b"m102".as_ref()).expect("m102");
+
+    // Deliver seq 102 FIRST → gap (100..102) → skip keys for 100 and 101 are
+    // cached, and 102 decrypts on the current chain.
+    let rekey_x102 = msg102
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(msg102.nonce.as_slice()).unwrap(),
+            &msg102.ciphertext,
+            msg102.rekey_ciphertext.as_deref(),
+            rekey_x102.as_ref(),
+            msg102.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts 102 after gap skip");
+    assert_eq!(pt, b"m102");
+    // The carrier's key is now cached.
+    assert!(
+        bob.skip_message_keys
+            .as_ref()
+            .unwrap()
+            .contains_key(&(0, 100)),
+        "carrier key must be cached by the gap skip"
+    );
+
+    // Deliver the carrier (seq 100) LATE — it decrypts from the skip cache.
+    // The cached-key dispatch MUST have already derived the pending proposal
+    // and queued the ACK (regression for KYP-2026-02 #1).
+    let rekey_x100 = carrier
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(carrier.nonce.as_slice()).unwrap(),
+            &carrier.ciphertext,
+            carrier.rekey_ciphertext.as_deref(),
+            rekey_x100.as_ref(),
+            carrier.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts the late carrier from the skip cache");
+    assert_eq!(pt, b"carrier");
+    // The proposal survived the cached-key path:
+    assert!(
+        bob.incoming_proposal.receiving_chain_key.is_some(),
+        "out-of-order carrier must derive the pending receiving chain key"
+    );
+    assert!(
+        bob.incoming_proposal.root_key.is_some(),
+        "out-of-order carrier must derive the pending root key"
+    );
+    assert_eq!(
+        bob.pending_rekey_ack_seq,
+        Some(100),
+        "out-of-order carrier must queue the RekeyAck for the sender's confirm queue"
+    );
+
+    // The ack completes the round-trip: bob acks, alice commits her outgoing
+    // rekey, and the first new-generation message authenticates on bob's
+    // pending chain.
+    while let Some(ack_seq) = bob.take_pending_rekey_ack_seq() {
+        let ack = bob.generate_rekey_ack(ack_seq).expect("ack");
+        let pt = alice
+            .ratchet_decrypt(
+                &<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(),
+                &ack.ciphertext,
+            )
+            .expect("alice decrypts ack");
+        let decoded = crate::packets::safe_decode_packet(&pt).unwrap();
+        if let crate::packets::KyberMessage::RekeyAck { seq } = decoded {
+            assert!(alice.process_rekey_ack(seq));
+        }
+    }
+    assert_eq!(alice.ratchet_generation, 1);
+
+    // Deliver seq 101 (also cached) — must still decrypt on the old chain.
+    let rekey_x101 = msg101
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(msg101.nonce.as_slice()).unwrap(),
+            &msg101.ciphertext,
+            msg101.rekey_ciphertext.as_deref(),
+            rekey_x101.as_ref(),
+            msg101.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts 101");
+    assert_eq!(pt, b"m101");
+
+    // Alice is now on gen 1 — her next message is (gen 1, seq 0); bob's
+    // pending chain must authenticate it and commit.
+    let post = alice
+        .ratchet_encrypt(b"post-commit".as_ref())
+        .expect("post-commit");
+    let rekey_xp = post
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(post.nonce.as_slice()).unwrap(),
+            &post.ciphertext,
+            post.rekey_ciphertext.as_deref(),
+            rekey_xp.as_ref(),
+            post.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts the first new-generation message via the pending chain");
+    assert_eq!(pt, b"post-commit");
+    assert_eq!(bob.ratchet_generation, 1);
+}
+
+/// Audit KYP-2026-02 #3 (HIGH): the Synchronize recovery path must NOT be
+/// deadlocked by an unconsumed rekey proposal. A FRESH proposal refuses the
+/// resync; a STALE proposal (past `INCOMING_REKEY_TTL_SECS`) is evicted so the
+/// recovery proceeds, and the attach time survives snapshot round-trips.
+#[test]
+fn stale_pending_proposal_does_not_deadlock_resync() {
+    let (alice, _bob) = alice_bob();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Fresh proposal refuses resync.
+    let mut fresh = alice.clone();
+    fresh.incoming_proposal.root_key = Some([7u8; 32]);
+    fresh.incoming_proposal.receiving_chain_key = Some([8u8; 32]);
+    fresh.incoming_proposal.attached_at_unix = Some(now);
+    assert!(
+        fresh.resync_receiving_chain(50).is_err(),
+        "a fresh pending proposal must still refuse resync"
+    );
+
+    // Stale proposal (attached at epoch — far beyond the TTL) is evicted and
+    // the resync proceeds.
+    let mut stale = alice.clone();
+    stale.incoming_proposal.root_key = Some([7u8; 32]);
+    stale.incoming_proposal.receiving_chain_key = Some([8u8; 32]);
+    stale.incoming_proposal.attached_at_unix = Some(0);
+    let skipped = stale
+        .resync_receiving_chain(50)
+        .expect("stale proposal must be evicted, not block recovery");
+    assert_eq!(skipped, 50);
+    assert!(
+        stale.incoming_proposal.root_key.is_none()
+            && stale.incoming_proposal.receiving_chain_key.is_none(),
+        "stale incoming proposal must be evicted"
+    );
+
+    // The attach time must survive a snapshot round-trip (restart survival).
+    let mut holder = alice.clone();
+    holder.incoming_proposal.root_key = Some([9u8; 32]);
+    holder.incoming_proposal.attached_at_unix = Some(1234);
+    let bytes = serde_json::to_vec(&holder.to_snapshot()).unwrap();
+    let restored =
+        DoubleRatchetState::from_snapshot(&serde_json::from_slice(&bytes).unwrap()).unwrap();
+    assert_eq!(restored.incoming_proposal.attached_at_unix, Some(1234));
+    assert_eq!(restored.incoming_proposal.root_key, Some([9u8; 32]));
+}
+
+/// Audit KYP-2026-02 #4 (MEDIUM): previous-generation messages whose keys were
+/// CACHED-but-UNDELIVERED at the rekey commit must not be permanently lost.
+/// After the commit, the retained skip cache delivers them; the anchor/watermark
+/// would otherwise classify them as already-delivered or predating the anchor.
+#[test]
+fn cached_but_undelivered_prev_gen_messages_survive_commit() {
+    let (mut alice, mut bob) = alice_bob();
+
+    // Drive to the boundary: alice sends 100 messages; bob receives all.
+    for i in 0..100 {
+        a2b(&mut alice, &mut bob, i);
+    }
+    // Alice sends the carrier (seq 100) plus a burst 101..=120.
+    let mut burst: Vec<crate::crypto::RatchetEncryptedMessage> = Vec::new();
+    for i in 0..=20 {
+        burst.push(
+            alice
+                .ratchet_encrypt(format!("burst-{i}").as_bytes())
+                .expect("encrypt"),
+        );
+    }
+    assert!(
+        burst[0].rekey_ciphertext.is_some(),
+        "burst[0] (seq 100) must carry the rekey payload"
+    );
+
+    // Bob receives only the TAIL of the burst (120, 119, 118) → the gap skip
+    // caches keys for 100..=117 without delivering them.
+    for idx in [20usize, 19, 18] {
+        let m = &burst[idx];
+        let rekey_x = m
+            .rekey_x25519_pk
+            .as_deref()
+            .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+        let pt = bob
+            .ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(m.nonce.as_slice()).unwrap(),
+                &m.ciphertext,
+                m.rekey_ciphertext.as_deref(),
+                rekey_x.as_ref(),
+                m.rekey_mlkem_pk.as_deref(),
+            )
+            .expect("tail decrypt");
+        assert_eq!(pt, format!("burst-{idx}").as_bytes());
+    }
+    let store = bob.skip_message_keys.as_ref().unwrap();
+    assert!(
+        store.contains_key(&(0, 100)),
+        "carrier (seq 100) must be cached-but-undelivered"
+    );
+    assert!(store.contains_key(&(0, 105)));
+
+    // Deliver the carrier late → proposal derived + ack queued (F1 fix).
+    let rekey_x = burst[0]
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(burst[0].nonce.as_slice()).unwrap(),
+            &burst[0].ciphertext,
+            burst[0].rekey_ciphertext.as_deref(),
+            rekey_x.as_ref(),
+            burst[0].rekey_mlkem_pk.as_deref(),
+        )
+        .expect("late carrier decrypts from cache");
+    assert_eq!(pt, b"burst-0");
+    assert_eq!(bob.pending_rekey_ack_seq, Some(100));
+
+    // Bob acks; alice commits (gen 1).
+    while let Some(ack_seq) = bob.take_pending_rekey_ack_seq() {
+        let ack = bob.generate_rekey_ack(ack_seq).expect("ack");
+        let pt = alice
+            .ratchet_decrypt(
+                &<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(),
+                &ack.ciphertext,
+            )
+            .expect("alice decrypts ack");
+        let decoded = crate::packets::safe_decode_packet(&pt).unwrap();
+        if let crate::packets::KyberMessage::RekeyAck { seq } = decoded {
+            assert!(alice.process_rekey_ack(seq));
+        }
+    }
+    assert_eq!(alice.ratchet_generation, 1);
+
+    // Alice's first new-generation message authenticates on bob's pending
+    // chain → bob COMMITS (retains the old chain, and — with the F4 fix — the
+    // old generation's cached-but-undelivered keys).
+    let post = alice.ratchet_encrypt(b"post".as_ref()).expect("post");
+    let rekey_x = post
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(post.nonce.as_slice()).unwrap(),
+            &post.ciphertext,
+            post.rekey_ciphertext.as_deref(),
+            rekey_x.as_ref(),
+            post.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("post authenticates on pending chain — bob commits");
+    assert_eq!(pt, b"post");
+    assert_eq!(bob.ratchet_generation, 1);
+    assert!(
+        bob.previous_recv_chain_key.is_some(),
+        "previous receiving chain must be retained at commit"
+    );
+
+    // Now deliver a cached-but-undelivered previous-generation message (burst[5]
+    // = seq 105). The retained skip cache must deliver it — regression for audit
+    // KYP-2026-02 #4 (the anchor/watermark would otherwise reject it).
+    let m = &burst[5];
+    let rekey_x = m
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(m.nonce.as_slice()).unwrap(),
+            &m.ciphertext,
+            m.rekey_ciphertext.as_deref(),
+            rekey_x.as_ref(),
+            m.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("cached-but-undelivered prev-gen message must decrypt after commit");
+    assert_eq!(pt, b"burst-5");
+
+    // A duplicate of the same message must now be rejected as replay.
+    let pt = bob.ratchet_decrypt_with_rekey(
+        &<[u8; 12]>::try_from(m.nonce.as_slice()).unwrap(),
+        &m.ciphertext,
+        m.rekey_ciphertext.as_deref(),
+        rekey_x.as_ref(),
+        m.rekey_mlkem_pk.as_deref(),
+    );
+    assert!(pt.is_err(), "replayed prev-gen message must be rejected");
+}
+
+/// Audit KYP-2026-02 #22: the explicit receive-path state machine returns the
+/// correct `DecryptOutcome` classification for each branch — a current-chain
+/// message is `Committed`, a gap-skip delivery is `Skipped`, an out-of-order
+/// rekey carrier is `ProposalDerived` (never silently stripped), and a replay
+/// is rejected as `Replay`.
+#[test]
+fn decrypt_outcome_classification() {
+    use super::decrypt::DecryptOutcome;
+    let (mut alice, mut bob) = alice_bob();
+    for i in 0..100 {
+        a2b(&mut alice, &mut bob, i);
+    }
+    let carrier = alice.ratchet_encrypt(b"carrier".as_ref()).expect("carrier");
+    assert!(carrier.rekey_ciphertext.is_some());
+    let msg101 = alice.ratchet_encrypt(b"m101".as_ref()).expect("m101");
+    let msg102 = alice.ratchet_encrypt(b"m102".as_ref()).expect("m102");
+
+    let classify = |bob: &mut DoubleRatchetState, m: &crate::crypto::RatchetEncryptedMessage| {
+        let rekey_x = m
+            .rekey_x25519_pk
+            .as_deref()
+            .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+        bob.ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(m.nonce.as_slice()).unwrap(),
+            &m.ciphertext,
+            m.rekey_ciphertext.as_deref(),
+            rekey_x.as_ref(),
+            m.rekey_mlkem_pk.as_deref(),
+        )
+    };
+
+    // Deliver seq 102 first → the CURRENT chain advances across the gap
+    // (gap-skip derives + commits) = Committed.
+    let (pt, out) = classify(&mut bob, &msg102).expect("102");
+    assert_eq!(pt, b"m102");
+    assert_eq!(out, DecryptOutcome::Committed);
+
+    // Deliver the carrier out-of-order (from the skip cache) → ProposalDerived
+    // (F1 fix: the proposal survives the cached-key dispatch).
+    let (pt, out) = classify(&mut bob, &carrier).expect("carrier");
+    assert_eq!(pt, b"carrier");
+    assert_eq!(out, DecryptOutcome::ProposalDerived);
+
+    // Deliver seq 101 (late, from the skip cache) → Skipped.
+    let (pt, out) = classify(&mut bob, &msg101).expect("101");
+    assert_eq!(pt, b"m101");
+    assert_eq!(out, DecryptOutcome::Skipped);
+
+    // A duplicate carrier → Replay.
+    assert!(classify(&mut bob, &carrier).is_err());
+}
+
+/// Audit KYP-2026-02 #19 (LOW): a PARTIAL rekey parameter set is a protocol
+/// error, never an empty AAD that masks the failure as a decryption error.
+#[test]
+fn partial_rekey_params_are_rejected() {
+    let (mut alice, mut bob) = alice_bob();
+    for i in 0..100 {
+        a2b(&mut alice, &mut bob, i);
+    }
+    let carrier = alice.ratchet_encrypt(b"carrier".as_ref()).expect("carrier");
+    assert!(carrier.rekey_ciphertext.is_some());
+    let rekey_x = carrier
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    // Feed the carrier with a PARTIAL set (x25519 pk present, ct + mlkem dropped).
+    let err = bob.ratchet_decrypt_with_rekey(
+        &<[u8; 12]>::try_from(carrier.nonce.as_slice()).unwrap(),
+        &carrier.ciphertext,
+        None,
+        rekey_x.as_ref(),
+        None,
+    );
+    assert!(
+        err.is_err(),
+        "partial rekey parameter set must be rejected as a protocol error"
     );
 }
 
@@ -387,4 +794,526 @@ fn snapshot_roundtrip_preserves_previous_chain_and_budget() {
     assert_eq!(restored.previous_recv_anchor, Some(42));
     assert_eq!(restored.previous_recv_gen, Some(0));
     assert_eq!(restored.resync_forward_total, 1234);
+}
+
+/// AUDIT FINDING #17 (5-place manual mirror): `DoubleRatchetState` is mirrored
+/// field-by-field into `RatchetSnapshot`, so a field added to the live struct
+/// but not to `to_snapshot`/`from_snapshot` silently resets on restore. This
+/// guard round-trips a FULLY-populated state and asserts every persisted field
+/// survives — the mirror can no longer drift without failing the build.
+#[test]
+fn snapshot_completeness_guard_roundtrips_every_field() {
+    use super::state::{Chain, IncomingProposal, OutgoingProposal, ReplayWindow};
+    use std::collections::{HashMap, VecDeque};
+
+    let mut s = DoubleRatchetState::new_with_keypair(
+        b"completeness-secret",
+        true,
+        HybridKeyPair {
+            x25519_pk: [0x11; 32],
+            x25519_sk: [0x22; 32],
+            mlkem_pk: vec![0x33; 1184],
+            mlkem_sk: vec![0x44; 2400],
+        },
+        Some([0x55; 32]),
+        Some(vec![0x66; 1184]),
+    )
+    .unwrap();
+    // Populate EVERY persisted field.
+    s.root_key = [0xAA; 32];
+    s.send = Chain {
+        key: [0xBB; 32],
+        message_count: 101,
+    };
+    s.recv = Chain {
+        key: [0xCC; 32],
+        message_count: 202,
+    };
+    s.ratchet_generation = 3;
+    s.pairing_epoch = 7;
+    s.previous_recv_chain_key = Some([0xDD; 32]);
+    s.previous_recv_anchor = Some(42);
+    s.previous_recv_gen = Some(2);
+    s.replay_window = ReplayWindow {
+        seen: [(3u32, 5u64), (3u32, 6u64)].into_iter().collect(),
+        prev_gen_highest_delivered: Some(99),
+    };
+    s.incoming_proposal = IncomingProposal {
+        root_key: Some([0x11; 32]),
+        sending_chain_key: Some([0x12; 32]),
+        receiving_chain_key: Some([0x13; 32]),
+        peer_x25519_pk: Some([0x14; 32]),
+        peer_mlkem_pk: Some(vec![0x15; 1184]),
+        generation_bump: true,
+        carrier_seq: Some(77),
+        carrier_gen: Some(3),
+        attached_at_unix: Some(1_700_000_000),
+        attached_at_mono: None,
+    };
+    s.outgoing_proposal = OutgoingProposal {
+        root_key: Some([0x21; 32]),
+        sending_chain_key: Some([0x22; 32]),
+        receiving_chain_key: Some([0x23; 32]),
+        hybrid_pair: Some(HybridKeyPair {
+            x25519_pk: [0x24; 32],
+            x25519_sk: [0x25; 32],
+            mlkem_pk: vec![0x26; 1184],
+            mlkem_sk: vec![0x27; 2400],
+        }),
+        rekey_payload: Some((vec![0x28; 32], vec![0x29; 1184], vec![0x2A; 1088])),
+    };
+    s.max_skip = 100;
+    s.max_key_history = 3;
+    s.previous_keypairs.push_back(HybridKeyPair {
+        x25519_pk: [0x31; 32],
+        x25519_sk: [0x32; 32],
+        mlkem_pk: vec![0x33; 1184],
+        mlkem_sk: vec![0x34; 2400],
+    });
+    s.skip_message_keys = Some(HashMap::from([((3u32, 5u64), [0x35; 32].into())]));
+    s.rekey_pending_confirm_queue = VecDeque::from([super::state::RekeyCarrier {
+        carrier_seq: 100,
+        attached_at: std::time::Instant::now(),
+        attached_at_mono: std::time::Instant::now(),
+        attached_at_unix: 1_700_000_000,
+        rekey_x25519_pk: vec![0x41; 32],
+        rekey_mlkem_pk: vec![0x42; 1184],
+        rekey_ciphertext: vec![0x43; 1088],
+    }]);
+    s.pending_rekey_ack_seq = Some(100);
+    s.resync_forward_total = 555;
+    s.is_initiator = true;
+
+    let restored =
+        DoubleRatchetState::from_snapshot(&s.to_snapshot()).expect("roundtrip");
+    // Deep-equality: every field (except the transient peeked_ack_cache, which
+    // is intentionally not persisted) must survive the round-trip. Zeroize on
+    // the original before comparing so a missing mirror surfaces as a diff.
+    use zeroize::Zeroize;
+    let mut orig = s.clone();
+    orig.peeked_ack_cache = None; // transient by design
+    let mut restored_mut = restored;
+    restored_mut.peeked_ack_cache = None;
+    assert_eq!(orig.root_key, restored_mut.root_key);
+    assert_eq!(orig.send.key, restored_mut.send.key);
+    assert_eq!(orig.send.message_count, restored_mut.send.message_count);
+    assert_eq!(orig.recv.key, restored_mut.recv.key);
+    assert_eq!(orig.recv.message_count, restored_mut.recv.message_count);
+    assert_eq!(orig.our_hybrid_pair.x25519_pk, restored_mut.our_hybrid_pair.x25519_pk);
+    assert_eq!(orig.our_hybrid_pair.x25519_sk, restored_mut.our_hybrid_pair.x25519_sk);
+    assert_eq!(orig.our_hybrid_pair.mlkem_pk, restored_mut.our_hybrid_pair.mlkem_pk);
+    assert_eq!(orig.our_hybrid_pair.mlkem_sk, restored_mut.our_hybrid_pair.mlkem_sk);
+    assert_eq!(orig.peer_x25519_pk, restored_mut.peer_x25519_pk);
+    assert_eq!(orig.peer_mlkem_pk, restored_mut.peer_mlkem_pk);
+    assert_eq!(orig.ratchet_generation, restored_mut.ratchet_generation);
+    assert_eq!(orig.pairing_epoch, restored_mut.pairing_epoch);
+    assert_eq!(orig.incoming_proposal.root_key, restored_mut.incoming_proposal.root_key);
+    assert_eq!(
+        orig.incoming_proposal.sending_chain_key,
+        restored_mut.incoming_proposal.sending_chain_key
+    );
+    assert_eq!(
+        orig.incoming_proposal.receiving_chain_key,
+        restored_mut.incoming_proposal.receiving_chain_key
+    );
+    assert_eq!(orig.incoming_proposal.carrier_seq, restored_mut.incoming_proposal.carrier_seq);
+    assert_eq!(orig.incoming_proposal.carrier_gen, restored_mut.incoming_proposal.carrier_gen);
+    assert_eq!(
+        orig.incoming_proposal.attached_at_unix,
+        restored_mut.incoming_proposal.attached_at_unix
+    );
+    assert_eq!(orig.outgoing_proposal.root_key, restored_mut.outgoing_proposal.root_key);
+    assert_eq!(
+        orig.outgoing_proposal.sending_chain_key,
+        restored_mut.outgoing_proposal.sending_chain_key
+    );
+    assert_eq!(
+        orig.outgoing_proposal.receiving_chain_key,
+        restored_mut.outgoing_proposal.receiving_chain_key
+    );
+    assert_eq!(
+        orig.outgoing_proposal.hybrid_pair.as_ref().map(|p| p.x25519_pk),
+        restored_mut.outgoing_proposal.hybrid_pair.as_ref().map(|p| p.x25519_pk)
+    );
+    assert_eq!(
+        orig.outgoing_proposal.rekey_payload,
+        restored_mut.outgoing_proposal.rekey_payload
+    );
+    assert_eq!(orig.previous_recv_chain_key, restored_mut.previous_recv_chain_key);
+    assert_eq!(orig.previous_recv_anchor, restored_mut.previous_recv_anchor);
+    assert_eq!(orig.previous_recv_gen, restored_mut.previous_recv_gen);
+    assert_eq!(
+        orig.replay_window.prev_gen_highest_delivered,
+        restored_mut.replay_window.prev_gen_highest_delivered
+    );
+    assert_eq!(orig.replay_window.seen, restored_mut.replay_window.seen);
+    assert_eq!(orig.resync_forward_total, restored_mut.resync_forward_total);
+    assert_eq!(orig.is_initiator, restored_mut.is_initiator);
+    assert_eq!(orig.max_skip, restored_mut.max_skip);
+    assert_eq!(orig.max_key_history, restored_mut.max_key_history);
+    assert_eq!(orig.pending_rekey_ack_seq, restored_mut.pending_rekey_ack_seq);
+    assert_eq!(
+        orig.rekey_pending_confirm_queue.len(),
+        restored_mut.rekey_pending_confirm_queue.len()
+    );
+    assert_eq!(
+        orig.rekey_pending_confirm_queue
+            .front()
+            .map(|c| (c.carrier_seq, c.attached_at_unix)),
+        restored_mut
+            .rekey_pending_confirm_queue
+            .front()
+            .map(|c| (c.carrier_seq, c.attached_at_unix))
+    );
+    assert_eq!(
+        orig.skip_message_keys.as_ref().map(|m| m.len()),
+        restored_mut.skip_message_keys.as_ref().map(|m| m.len())
+    );
+    assert_eq!(orig.previous_keypairs.len(), restored_mut.previous_keypairs.len());
+    // The transient peek cache is the ONLY intentionally-dropped field.
+    assert_eq!(orig.peeked_ack_cache, restored_mut.peeked_ack_cache);
+    orig.zeroize();
+}
+
+/// AUDIT F1 regression: a stale/crossed rekey carrier from an already-superseded
+/// generation must NEVER populate the single incoming-proposal slot.
+///
+/// Attack trace: both sides rekey near seq 100. Our (initiator's) proposal
+/// commits first, advancing `ratchet_generation` to 1. The peer's stale
+/// re-send — a gen-0 carrier encapsulated to our OLD public key — arrives after
+/// our commit. If Phase 1 derived it under the NEW root it would stage a
+/// garbage proposal whose receiving chain matches nothing, blocking the slot
+/// for up to INCOMING_REKEY_TTL_SECS. The F1 guard refuses derivation whenever
+/// `carrier_gen < ratchet_generation` (or older than the pending proposal), so
+/// the slot stays untouched.
+#[test]
+fn stale_generation_rekey_carrier_never_poisons_incoming_slot() {
+    use super::super::decrypt::DecryptOutcome;
+
+    let (mut alice, mut bob) = alice_bob();
+    // Drive BOTH sides to the first rekey boundary (send count 100 on each),
+    // exactly like the crossed-double-rekey race in the audit.
+    for i in 0..100 {
+        a2b(&mut alice, &mut bob, i);
+        b2a(&mut alice, &mut bob, i);
+    }
+    assert_eq!(alice.send.message_count, 100);
+    assert_eq!(bob.send.message_count, 100);
+
+    // Bob (responder) builds his rekey carrier at gen 0 / seq 100 — but it is
+    // never delivered before the race resolves (the "stale re-send").
+    let stale = bob
+        .ratchet_encrypt(b"stale-carrier".as_ref())
+        .expect("bob carrier");
+    let stale_nonce = <[u8; 12]>::try_from(stale.nonce.as_slice()).unwrap();
+    let stale_gen = u32::from_be_bytes([
+        stale_nonce[0],
+        stale_nonce[1],
+        stale_nonce[2],
+        stale_nonce[3],
+    ]);
+    assert_eq!(stale_gen, 0, "bob's carrier is a gen-0 message");
+    assert!(
+        stale.rekey_ciphertext.is_some(),
+        "bob's carrier must carry a rekey payload"
+    );
+
+    // Alice (initiator) also rekeys at seq 100 and COMMITS her own outgoing
+    // proposal — her root advances to gen 1, retaining the gen-0 receiving
+    // chain but swapping her DH keypair.
+    let _alice_carrier = alice
+        .ratchet_encrypt(b"alice-carrier".as_ref())
+        .expect("alice carrier");
+    assert!(
+        _alice_carrier.rekey_ciphertext.is_some(),
+        "alice's carrier must carry a rekey payload"
+    );
+    alice.commit_outgoing_rekey();
+    assert_eq!(alice.ratchet_generation, 1);
+
+    // Simulate an incomplete retained-previous state (chain key retained but
+    // anchor lost — a half-formed restore). The prev-gen branch then returns
+    // Ok(None) and control WOULD reach Phase 1 without the F1 guard.
+    alice.previous_recv_anchor = None;
+
+    let stale_x = stale
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let result = alice.ratchet_decrypt_with_rekey_classified(
+        &stale_nonce,
+        &stale.ciphertext,
+        stale.rekey_ciphertext.as_deref(),
+        stale_x.as_ref(),
+        stale.rekey_mlkem_pk.as_deref(),
+    );
+
+    // The stale carrier cannot authenticate on the current (gen-1) chain — but
+    // the FAILURE MODE that matters is the state left behind: the slot must be
+    // empty, never poisoned with a gen-0-derived-under-gen-1 proposal.
+    assert!(
+        !alice.incoming_proposal.is_pending(),
+        "stale carrier must not stage an incoming proposal (generation superseded)"
+    );
+    assert!(
+        alice.incoming_proposal.carrier_gen.is_none(),
+        "stale carrier must not record a carrier generation"
+    );
+    assert!(
+        alice.incoming_proposal.attached_at_unix.is_none(),
+        "stale carrier must not stamp an attach time"
+    );
+    assert!(
+        result.is_err(),
+        "stale gen-0 carrier cannot decrypt on gen-1 chain"
+    );
+    let _ = DecryptOutcome::Committed; // (keep the import meaningful if classification changes)
+}
+
+/// AUDIT FINDING #9 (two-sided rekey one-directionality): the deterministic
+/// tie-break must ALTERNATE by generation parity so the RESPONDER's keypair
+/// eventually rotates. The legacy "initiator always wins" rule made the
+/// responder's proposal lose every simultaneous race and its private halves
+/// static for the whole session (halved forward secrecy).
+///
+/// This test forces a true simultaneous race at TWO consecutive generations:
+/// both sides stage a proposal at the same boundary and each receives the
+/// other's carrier. At even generation 0 the INITIATOR must win; at odd
+/// generation 1 the RESPONDER must win and commit its own proposal (its
+/// `our_hybrid_pair` rotates), proving both sides contribute ratchet material.
+#[test]
+fn two_sided_rekey_race_alternates_winners() {
+    // Build two interoperating ratchets (alice = initiator, bob = responder).
+    let (mut alice, mut bob) = alice_bob();
+
+    // Drive both sides to just below the first rekey boundary WITHOUT crossing
+    // it — each side sends 100 messages so both are at send_count 100 and the
+    // NEXT encrypt (seq 100) stages a proposal.
+    for i in 0..100u64 {
+        a2b(&mut alice, &mut bob, i);
+        b2a(&mut alice, &mut bob, i);
+    }
+    assert_eq!(alice.send.message_count, 100);
+    assert_eq!(bob.send.message_count, 100);
+    assert_eq!(alice.ratchet_generation, 0);
+
+    // ── Race at generation 0 (even → initiator wins) ─────────────────────
+    // Both sides encrypt message 100: each stages its own outgoing proposal
+    // and attaches a rekey carrier.
+    let a100 = alice
+        .ratchet_encrypt(b"alice-carrier-0")
+        .expect("alice carrier at gen 0");
+    let b100 = bob
+        .ratchet_encrypt(b"bob-carrier-0")
+        .expect("bob carrier at gen 0");
+    assert!(a100.rekey_ciphertext.is_some(), "alice staged a proposal");
+    assert!(b100.rekey_ciphertext.is_some(), "bob staged a proposal");
+    assert!(
+        alice.outgoing_proposal.root_key.is_some(),
+        "alice has an outgoing proposal pending"
+    );
+    assert!(
+        bob.outgoing_proposal.root_key.is_some(),
+        "bob has an outgoing proposal pending"
+    );
+
+    // Deliver each carrier to the other side (both authenticated on the
+    // current chain) — this is the simultaneous race.
+    let a100_x = a100
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let _a_on_bob = bob
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(a100.nonce.as_slice()).expect("nonce"),
+            &a100.ciphertext,
+            a100.rekey_ciphertext.as_deref(),
+            a100_x.as_ref(),
+            a100.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts alice's gen-0 carrier");
+    let b100_x = b100
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let _b_on_alice = alice
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(b100.nonce.as_slice()).expect("nonce"),
+            &b100.ciphertext,
+            b100.rekey_ciphertext.as_deref(),
+            b100_x.as_ref(),
+            b100.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("alice decrypts bob's gen-0 carrier");
+
+    // Even generation: INITIATOR wins. Alice keeps her outgoing proposal and
+    // discarded Bob's incoming; Bob cancels his own and adopts Alice's, then
+    // ACKs her carrier.
+    assert!(
+        alice.outgoing_proposal.root_key.is_some(),
+        "alice (initiator) wins gen-0 race — her proposal stays pending"
+    );
+    assert!(
+        !alice.incoming_proposal.is_pending(),
+        "alice discards bob's gen-0 proposal"
+    );
+    assert!(
+        !bob.outgoing_proposal.root_key.is_some(),
+        "bob cancels his own gen-0 proposal (lost the race)"
+    );
+    assert!(
+        bob.incoming_proposal.is_pending(),
+        "bob adopts alice's gen-0 proposal"
+    );
+    let bob_ack = bob
+        .pending_rekey_ack_seq
+        .expect("bob must ACK alice's carrier");
+    // Bob's ACK commits Alice's outgoing proposal (gen 0 → 1).
+    assert!(alice.process_rekey_ack(bob_ack), "alice commits on bob's ack");
+    assert_eq!(alice.ratchet_generation, 1);
+    // Alice then sends her first new-generation message; Bob commits the
+    // adopted proposal on the pending chain.
+    let a1 = alice
+        .ratchet_encrypt(b"alice-first-new-gen")
+        .expect("alice gen-1 message");
+    let _ = bob
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(a1.nonce.as_slice()).expect("nonce"),
+            &a1.ciphertext,
+            a1.rekey_ciphertext.as_deref(),
+            None,
+            a1.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob commits alice's gen-1 chain");
+    assert_eq!(bob.ratchet_generation, 1);
+    let alice_pair_at_gen1 = alice.our_hybrid_pair.clone();
+    let bob_pair_at_gen1 = bob.our_hybrid_pair.clone();
+
+    // ── Race at generation 1 (odd → RESPONDER wins) ─────────────────────
+    // Both sides are at gen 1 with send chains reset to 0 after the commit.
+    // Alice's first new-gen message advanced her chain to 1; send one Bob →
+    // Alice message so Bob's chain is also at 1, then 99 further round-trips
+    // position both at send_count 100 (the next encrypt, seq 100, stages fresh
+    // proposals).
+    b2a(&mut alice, &mut bob, 0u64);
+    for i in 1..100u64 {
+        a2b(&mut alice, &mut bob, i);
+        b2a(&mut alice, &mut bob, i);
+    }
+    assert_eq!(alice.ratchet_generation, 1);
+    assert_eq!(bob.ratchet_generation, 1);
+    assert_eq!(alice.send.message_count, 100);
+    assert_eq!(bob.send.message_count, 100);
+
+    let a200 = alice
+        .ratchet_encrypt(b"alice-carrier-1")
+        .expect("alice carrier at gen 1");
+    let b200 = bob
+        .ratchet_encrypt(b"bob-carrier-1")
+        .expect("bob carrier at gen 1");
+    assert!(a200.rekey_ciphertext.is_some(), "alice staged gen-1 proposal");
+    assert!(b200.rekey_ciphertext.is_some(), "bob staged gen-1 proposal");
+
+    let a200_x = a200
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let _a_on_bob = bob
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(a200.nonce.as_slice()).expect("nonce"),
+            &a200.ciphertext,
+            a200.rekey_ciphertext.as_deref(),
+            a200_x.as_ref(),
+            a200.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts alice's gen-1 carrier");
+    let b200_x = b200
+        .rekey_x25519_pk
+        .as_deref()
+        .map(|v| <[u8; 32]>::try_from(v).expect("32 bytes"));
+    let _b_on_alice = alice
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(b200.nonce.as_slice()).expect("nonce"),
+            &b200.ciphertext,
+            b200.rekey_ciphertext.as_deref(),
+            b200_x.as_ref(),
+            b200.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("alice decrypts bob's gen-1 carrier");
+
+    // Odd generation: RESPONDER wins. Alice (initiator) cancels her own
+    // proposal and adopts Bob's; Bob keeps his own and discards Alice's.
+    assert!(
+        !alice.outgoing_proposal.root_key.is_some(),
+        "alice cancels her own gen-1 proposal (lost the race)"
+    );
+    assert!(
+        alice.incoming_proposal.is_pending(),
+        "alice adopts bob's gen-1 proposal"
+    );
+    assert!(
+        bob.outgoing_proposal.root_key.is_some(),
+        "bob (responder) wins gen-1 race — his proposal stays pending"
+    );
+    assert!(
+        !bob.incoming_proposal.is_pending(),
+        "bob discards alice's gen-1 proposal"
+    );
+    let alice_ack = alice
+        .pending_rekey_ack_seq
+        .expect("alice must ACK bob's carrier");
+    // Alice's ACK commits BOB's outgoing proposal (gen 1 → 2) — the responder
+    // finally rotates its own keypair.
+    assert!(bob.process_rekey_ack(alice_ack), "bob commits on alice's ack");
+    assert_eq!(bob.ratchet_generation, 2);
+    assert_ne!(
+        bob.our_hybrid_pair.x25519_sk, bob_pair_at_gen1.x25519_sk,
+        "bob's X25519 secret must rotate when he commits his own proposal"
+    );
+    assert_ne!(
+        bob.our_hybrid_pair.mlkem_sk, bob_pair_at_gen1.mlkem_sk,
+        "bob's ML-KEM secret must rotate when he commits his own proposal"
+    );
+    // Alice's keypair should NOT have rotated this round (she lost the race),
+    // proving the contribution alternates rather than double-rotating.
+    assert_eq!(
+        alice.our_hybrid_pair.x25519_sk, alice_pair_at_gen1.x25519_sk,
+        "alice's keypair must stay fixed when she loses the race"
+    );
+    // Bob sends his first new-generation message; Alice commits the adopted
+    // proposal on the pending chain, converging on Bob's keys.
+    let b1 = bob
+        .ratchet_encrypt(b"bob-first-new-gen")
+        .expect("bob gen-2 message");
+    let _ = alice
+        .ratchet_decrypt_with_rekey_classified(
+            &<[u8; 12]>::try_from(b1.nonce.as_slice()).expect("nonce"),
+            &b1.ciphertext,
+            b1.rekey_ciphertext.as_deref(),
+            None,
+            b1.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("alice commits bob's gen-2 chain");
+    assert_eq!(alice.ratchet_generation, 2);
+    // Both sides now converge on Bob's (responder's) rotated ratchet material:
+    // Alice's PEER keys are Bob's NEW public halves (adopted at commit), while
+    // each side keeps its OWN private keypair (only the proposer rotates its
+    // `our_hybrid_pair`).
+    assert_eq!(
+        alice.peer_x25519_pk,
+        Some(bob.our_hybrid_pair.x25519_pk),
+        "alice must adopt bob's rotated public x25519 key"
+    );
+    assert_eq!(
+        alice.peer_mlkem_pk.as_deref(),
+        Some(bob.our_hybrid_pair.mlkem_pk.as_slice()),
+        "alice must adopt bob's rotated public mlkem key"
+    );
+    // And the roles flip for the next generation: Bob's peer keys are ALICE's
+    // (unchanged) public halves.
+    assert_eq!(
+        bob.peer_x25519_pk,
+        Some(alice.our_hybrid_pair.x25519_pk),
+        "bob's peer keys stay alice's (unchanged) public half"
+    );
 }

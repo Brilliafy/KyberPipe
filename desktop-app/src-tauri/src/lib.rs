@@ -158,6 +158,21 @@ pub fn run() {
     setup_panic_hook();
     let state = std::sync::Arc::new(AppState::default());
 
+    // Audit KYP-2026-02 #6: restore the persisted pairing keypair (if any) so
+    // the identity the phone pins is STABLE across restarts — regenerating it
+    // on every mount rotated the identity and silently invalidated in-flight
+    // pairing QRs. Only when no keypair is persisted (first run) does the
+    // renderer generate a fresh one via generate_keypair.
+    if state.get_keypair().is_none() {
+        if let Some(pair) = ratchet_store::load_pairing_keypair_from_keyring() {
+            state.set_keypair(Some(pair));
+            state.add_log(
+                "[PQC] Restored persisted pairing keypair from OS keyring (stable identity)"
+                    .to_string(),
+            );
+        }
+    }
+
     // Issue the mandatory QR pairing nonce at app start (audit finding #20):
     // every pairing request must echo a nonce this desktop issued, so a LAN
     // peer that never scanned a QR cannot occupy the pairing slot.
@@ -172,6 +187,42 @@ pub fn run() {
             state.add_log(format!(
                 "[Ratchet] Restored {restored} persisted session(s) from encrypted store"
             ));
+        }
+    }
+
+    // AUDIT F11: re-create the DESKTOP session-key handle from the persisted
+    // keyring entry after a restart. The handle is a process-global AtomicU64
+    // that starts at 0 — previously it was only ever set during a live
+    // `perform_sas_confirmation`, so after ANY restart it silently dropped to
+    // 0 and every session-key decrypt path returned None (a write-only keyring
+    // entry, dead weight, and a trap for any future session_key_* user).
+    if crate::handlers::DESKTOP_SESSION_KEY_HANDLE.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        if let Some(session_key_hex) = ratchet_store::session_key_from_keyring() {
+            if let Ok(sk) = hex::decode(&session_key_hex) {
+                if !sk.is_empty() {
+                    match core_crypto::session_key_create(sk) {
+                        Ok(h) if h != 0 => {
+                            crate::handlers::DESKTOP_SESSION_KEY_HANDLE
+                                .store(h, std::sync::atomic::Ordering::Release);
+                            state.add_log(
+                                "[Session] Restored desktop session-key handle from keyring"
+                                    .to_string(),
+                            );
+                        }
+                        Ok(_) => {
+                            state.add_log(
+                                "[Session] Keyring session key produced reserved handle 0 — ignoring"
+                                    .to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            state.add_log(format!(
+                                "[Session] Failed to restore session-key handle from keyring: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -212,7 +263,6 @@ pub fn run() {
             get_telemetry_metrics,
             check_flatpak_permissions,
             check_firewall,
-            generate_wormhole_code,
             dump_flight_recorder_events,
             get_pairing_config,
             read_real_clipboard,

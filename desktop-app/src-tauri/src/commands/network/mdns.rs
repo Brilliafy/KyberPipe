@@ -14,7 +14,7 @@ pub fn register_mdns_service(service_name: String, port: u16, txt_data: String) 
         ])
         .output()
         .ok()
-        .map(|o| {
+        .and_then(|o| {
             // busctl prints:  o "/org/freedesktop/Avahi/EntryGroup1"
             let s = String::from_utf8_lossy(&o.stdout);
             // Extract the quoted object path robustly (tolerant of whitespace,
@@ -28,8 +28,7 @@ pub fn register_mdns_service(service_name: String, port: u16, txt_data: String) 
             } else {
                 None
             }
-        })
-        .flatten();
+        });
     let Some(ref path) = eg_path else {
         return false;
     };

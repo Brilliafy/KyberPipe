@@ -167,11 +167,36 @@ class PipeService : Service() {
                     wrapKeyHex = wrapKey.toHexString()
                     settings.ratchetSnapshotKey = wrapKeyHex
                 }
-                val wrapped = uniffi.core_crypto.encryptPayloadWithHandle(
-                    wrapKeyHex.hexToByteArray(), snap
-                )
-                val nonceHex = wrapped.nonce.toHexString()
-                val ctHex = wrapped.ciphertext.toHexString()
+                // AUDIT FINDING #5: the ratchet snapshot is now serialized AND
+                // AEAD-wrapped INSIDE Rust (`ratchetExportSessionWrapped`). The
+                // raw serialized state (chain keys, root key, ML-KEM/X25519
+                // secret halves, previous keypairs, skip keys) never crosses
+                // the FFI boundary as plaintext, so no complete session key
+                // material ever sits in unzeroized JVM heap memory. Only the
+                // wrap key (a caller-owned at-rest key) travels; the snapshot
+                // stays in Rust zeroizing memory throughout.
+                val wrapped = uniffi.core_crypto.ratchetExportSessionWrapped(
+                    settings.peerRatchetIdentity, wrapKeyHex.hexToByteArray()
+                ) ?: return
+                persistWrappedSnapshot(settings, wrapped.nonce, wrapped.ciphertext)
+            } catch (e: Exception) {
+                // Never store plaintext — skip persistence on failure.
+                Log.w("KyberpipeService", "Ratchet snapshot persist skipped: ${e.message}")
+            }
+        }
+
+        /// Store an already-wrapped (nonce, ciphertext) pair in the standard
+        /// on-disk format: Base64("{nonce_hex}:{ct_hex}"). The wrap happened
+        /// inside Rust (audit finding #5) — this only persists the ciphertext.
+        @JvmStatic
+        fun persistWrappedSnapshot(
+            settings: org.kyberpipe.client.utils.SettingsManager,
+            nonce: ByteArray,
+            ciphertext: ByteArray
+        ) {
+            try {
+                val nonceHex = nonce.toHexString()
+                val ctHex = ciphertext.toHexString()
                 settings.ratchetSnapshot = android.util.Base64.encodeToString(
                     "$nonceHex:$ctHex".toByteArray(Charsets.UTF_8),
                     android.util.Base64.NO_WRAP
@@ -223,7 +248,22 @@ class PipeService : Service() {
             acquireWakeLock(powerManager)
             serviceScope.launch {
                 try {
-                    Log.i("KyberpipeService", "Doze heartbeat: QUIC keepalive sent")
+                    // AUDIT FINDING #25: this was a FAKE keepalive — it slept 5s
+                    // and logged "QUIC keepalive sent" without touching the
+                    // bridge, so Doze could suspend the real poll loop and the
+                    // keepalive did nothing. Now it performs an ACTUAL bridge
+                    // heartbeat: `quicBridgeTouch` pokes the live QUIC
+                    // connection (and the reconnect machinery re-establishes it
+                    // if Doze dropped it). The 5s hold keeps the wake lock
+                    // across the touch so the bridge actually completes.
+                    try {
+                        uniffi.core_crypto.quicBridgeTouch()
+                        Log.i("KyberpipeService", "Doze heartbeat: QUIC bridge touched")
+                    } catch (e: Exception) {
+                        // The bridge may be down after Doze — the touch failure
+                        // is expected and the next poll reconnects.
+                        Log.d("KyberpipeService", "Doze heartbeat: bridge touch failed: ${e.message}")
+                    }
                     delay(5000)
                     // Reschedule next heartbeat to keep the loop alive.
                     // Without this, the heartbeat fires exactly once and dies.

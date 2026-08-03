@@ -32,13 +32,25 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
         .map_err(|e| KyberError::NetworkError(format!("Failed to send STUN request: {e}")))?;
 
     let mut buf = [0u8; 512];
-    let (len, _) = tokio::time::timeout(
+    let (len, src_addr) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         socket.recv_from(&mut buf),
     )
     .await
     .map_err(|_| KyberError::NetworkError("STUN response timeout".to_string()))?
     .map_err(|e| KyberError::NetworkError(format!("Failed to receive STUN response: {e}")))?;
+
+    // Audit KYP-2026-02 #5: the response must come from the resolved STUN
+    // server address we sent the request to. STUN Binding is unauthenticated
+    // and the transaction ID travels in cleartext, so an on-path attacker who
+    // observes the request can inject a spoofed response carrying a fabricated
+    // XOR-MAPPED-ADDRESS — unless the source address is verified. A response
+    // from any other source is rejected outright.
+    if src_addr.ip() != stun_addr.ip() || src_addr.port() != stun_addr.port() {
+        return Err(KyberError::NetworkError(format!(
+            "STUN response source mismatch: got {src_addr}, expected {stun_addr} — rejecting spoofed response"
+        )));
+    }
 
     if len < 20 {
         return Err(KyberError::NetworkError(
@@ -133,9 +145,9 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
                     }
                 }
             }
-            0x8028 => {
+            0x8028
                 // FINGERPRINT attribute (RFC 5389 §15.5)
-                if attr_len == 4 {
+                if attr_len == 4 => {
                     let claimed_crc32 = u32::from_be_bytes([
                         attr_value[0],
                         attr_value[1],
@@ -156,18 +168,25 @@ pub async fn query_stun_server(stun_host: &str) -> Result<SocketAddr, KyberError
                         tracing::warn!("STUN FINGERPRINT validation failed");
                     }
                 }
-            }
             _ => {
                 // Unknown attribute — skip per RFC 5389
             }
         }
     }
 
+    // Audit KYP-2026-02 #5: a FINGERPRINT MISMATCH is FATAL — the CRC32
+    // FINGERPRINT is not a MAC, but a mismatch still proves the response was
+    // corrupted or synthesized, and must never be accepted "with a warning".
+    // (A response without a FINGERPRINT attribute is still accepted: it is
+    // optional under RFC 5389, and legacy servers omit it.)
+    if fingerprint_ok == Some(false) {
+        return Err(KyberError::NetworkError(
+            "STUN FINGERPRINT validation failed — rejecting response".to_string(),
+        ));
+    }
+
     // Prefer XOR-MAPPED-ADDRESS over MAPPED-ADDRESS per RFC 5389
     if let Some(addr) = mapped_addr {
-        if fingerprint_ok == Some(false) {
-            tracing::warn!("Accepting STUN response with invalid FINGERPRINT");
-        }
         return Ok(addr);
     }
 

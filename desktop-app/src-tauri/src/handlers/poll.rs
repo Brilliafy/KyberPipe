@@ -1,10 +1,6 @@
 use crate::state::AppState;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
-
-use super::DESKTOP_SESSION_KEY_HANDLE;
-use super::IS_SESSION_KEY_AUTHENTICATED;
 
 /// Clipboard read cache TTL — poll requests arrive every 2.5s from the phone;
 /// re-reading the OS clipboard (arboard / wl-paste / xclip, each up to 3s) on
@@ -13,7 +9,8 @@ use super::IS_SESSION_KEY_AUTHENTICATED;
 const CLIPBOARD_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Cached clipboard bytes + wall-clock timestamp.
-static CLIPBOARD_CACHE: LazyLock<Mutex<Option<(Instant, Vec<u8>)>>> =
+type ClipboardCacheEntry = (Instant, Vec<u8>);
+static CLIPBOARD_CACHE: LazyLock<Mutex<Option<ClipboardCacheEntry>>> =
     LazyLock::new(|| Mutex::new(None));
 
 /// TEST-ONLY hermetic override: when set, the poll handler treats the OS
@@ -54,24 +51,22 @@ fn cached_clipboard_read() -> Vec<u8> {
 
 /// Encapsulates which encryption method to use for a payload.
 /// Encapsulation decision is made once at the start, then dispatched cleanly.
+///
+/// Audit KYP-2026-02 #17: the session-key hex path is deleted — the ratchet
+/// TLV is the ONLY wire format, so the only decision left is whether a
+/// ratchet session exists for the peer.
 enum EncryptionMethod {
     Ratchet { peer_id: String },
-    SessionKey { handle: u64 },
     None,
 }
 
-/// Select the best encryption method for a peer. Ratchet preferred over session key.
-fn select_encryption_method(
-    peer_id: &str,
-    session_key_auth: bool,
-    sk_handle: u64,
-) -> EncryptionMethod {
+/// Select the encryption method for a peer. Ratchet is used whenever a peer
+/// identity is known; without one there is nothing to encrypt against.
+fn select_encryption_method(peer_id: &str) -> EncryptionMethod {
     if !peer_id.is_empty() {
         EncryptionMethod::Ratchet {
             peer_id: peer_id.to_string(),
         }
-    } else if session_key_auth && sk_handle != 0 {
-        EncryptionMethod::SessionKey { handle: sk_handle }
     } else {
         EncryptionMethod::None
     }
@@ -99,18 +94,6 @@ fn encrypt_clipboard_data(method: &EncryptionMethod, latest_clip: &[u8]) -> serd
                 }
             }
         }
-        EncryptionMethod::SessionKey { handle } => {
-            match core_crypto::session_key_encrypt(*handle, latest_clip.to_vec()) {
-                Ok(payload) => serde_json::json!({
-                    "nonce_hex": hex::encode(&payload.nonce),
-                    "ciphertext_hex": hex::encode(&payload.ciphertext),
-                }),
-                Err(e) => {
-                    tracing::warn!("[Poll] Session key encrypt failed: {e}");
-                    serde_json::Value::Null
-                }
-            }
-        }
         EncryptionMethod::None => serde_json::Value::Null,
     }
 }
@@ -128,19 +111,8 @@ fn sync_connection_state(s: &AppState) {
 /// Split of `handle_poll`: read the pairing/session state that drives the
 /// response. Pure in-memory reads — no filesystem, keyring, or clipboard I/O
 /// (audit finding #18).
-fn read_local_state(
-    s: &AppState,
-) -> (
-    String,
-    bool,
-    u64,
-    bool,
-    serde_json::Value,
-    serde_json::Value,
-) {
+fn read_local_state(s: &AppState) -> (String, bool, serde_json::Value, serde_json::Value) {
     let peer_id = s.get_pairing_initiator_pk();
-    let session_key_auth = IS_SESSION_KEY_AUTHENTICATED.load(Ordering::Acquire);
-    let sk_handle = DESKTOP_SESSION_KEY_HANDLE.load(Ordering::Acquire);
     let is_paired = s.settings.lock().is_paired;
     let connection = s.get_connection();
     let pending_act = s.get_pending_media_action();
@@ -151,14 +123,7 @@ fn read_local_state(
         "connection_color": connection.color,
         "pending_media_action": pending_act,
     });
-    (
-        peer_id,
-        session_key_auth,
-        sk_handle,
-        is_paired,
-        base,
-        connection.status.clone().into(),
-    )
+    (peer_id, is_paired, base, connection.status.clone().into())
 }
 
 /// Parse the peer's poll REQUEST body for an ENCRYPTED `Synchronize` packet.
@@ -178,6 +143,24 @@ fn peer_sync_packet(body: &[u8]) -> Option<Vec<u8>> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()
 }
 
+/// Whether the peer's poll REQUEST explicitly asked for a Synchronize carrier
+/// (audit finding #16). The phone sets `need_sync` when its receive chain
+/// actually needs realignment (a decrypt gap, or a slow heartbeat); the
+/// desktop then attaches its ratchet-encrypted Synchronize packet — advancing
+/// its OWN send chain — ONLY when asked. The legacy unconditional carrier
+/// advanced the desktop's send chain at least once per poll (~34,560
+/// positions/day), firing a rekey every ~4 minutes forever and generating
+/// continuous two-sided race pressure.
+fn peer_requested_sync(body: &[u8]) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("need_sync").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Parse the peer's poll REQUEST body for an ENCRYPTED `RekeyAck` TLV — the
 /// phone's outbound RekeyAck channel (audit finding #1). The phone attaches
 /// its ack of OUR outgoing proposal to the poll request; we decrypt it
@@ -192,19 +175,58 @@ fn peer_rekey_ack_packet(body: &[u8]) -> Option<Vec<u8>> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).ok()
 }
 
+/// Dirty-flag gate for ratchet persistence (audit finding #11). The legacy
+/// code rewrote the whole `ratchet_sessions.json` AND performed the keyring
+/// watermark RPC on EVERY 2.5s poll — ~240k keyring writes/day even when
+/// nothing changed. This tracks the last-persisted (generation, send, recv)
+/// high-water mark per peer and only persists when a ratchet actually mutated.
+/// (Type alias keeps the clippy::type_complexity lint happy.)
+type LastPersistedState = std::collections::HashMap<String, (u32, u64, u64)>;
+static LAST_PERSISTED_STATE: LazyLock<Mutex<LastPersistedState>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Whether the ratchet for `peer` mutated past what was last persisted. Reads
+/// the live counters WITHOUT advancing anything. `recv` is the receiver's own
+/// inbound chain (advanced by processing the peer's sync/ack above), `send`
+/// the outbound chain.
+fn ratchet_dirty_since_last_persist(peer: &str) -> bool {
+    let peer_owned = peer.to_string();
+    let (_, send, recv) = match (
+        core_crypto::ratchet_send_count(peer_owned.clone()),
+        core_crypto::ratchet_recv_count(peer_owned.clone()),
+    ) {
+        (Ok(s), Ok(r)) => (0u32, s, r),
+        _ => return false,
+    };
+    // Generation is not exposed directly; detect it via the exported snapshot
+    // watermark instead (cheap serde parse, no crypto).
+    let gen = core_crypto::ratchet_export_session(peer_owned)
+        .ok()
+        .flatten()
+        .and_then(|snap| serde_json::from_slice::<serde_json::Value>(&snap).ok())
+        .and_then(|v| v.get("ratchet_generation").and_then(|g| g.as_u64()))
+        .unwrap_or(0) as u32;
+    let mut guard = LAST_PERSISTED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let last = guard.get(peer).copied().unwrap_or((0, 0, 0));
+    let dirty = (gen, send, recv) != last;
+    if dirty {
+        guard.insert(peer.to_string(), (gen, send, recv));
+    }
+    dirty
+}
+
 /// Split of `handle_poll`: encrypt the clipboard and attach the rekey-ack and
 /// synchronize payloads. Runs the blocking clipboard read + ratchet persistence
 /// on a spawn_blocking thread so the accept-loop workers are never wedged
-/// (audit finding #9).
+/// (audit finding #9). `need_sync` gates the Synchronize carrier (audit
+/// finding #16): the desktop only advances its own send chain to attach a sync
+/// packet when the phone asked for one.
 async fn build_poll_response(
     peer_id: &str,
-    session_key_auth: bool,
-    sk_handle: u64,
     base: serde_json::Value,
+    need_sync: bool,
 ) -> serde_json::Value {
     let peer = peer_id.to_string();
-    let sk_auth = session_key_auth;
-    let skh = sk_handle;
 
     // Blocking I/O (OS clipboard read + keyring + full-file persistence) is
     // delegated to the tokio blocking pool, sized independently of the
@@ -214,16 +236,37 @@ async fn build_poll_response(
         let latest_clip_encrypted = if latest_clip.is_empty() {
             serde_json::Value::Null
         } else {
-            let enc_method = select_encryption_method(&peer, sk_auth, skh);
+            let enc_method = select_encryption_method(&peer);
             encrypt_clipboard_data(&enc_method, &latest_clip)
         };
         // Persist ratchet state after any mutation this poll may have caused.
         // Keyring + full-file serde_json are blocking — keep them here on the
         // blocking pool, not on the accept-loop task. Wrapped with the
         // independent snapshot key (audit finding #15b).
-        if !peer.is_empty() {
+        //
+        // AUDIT (test hermeticity): under the FORCE_EMPTY_CLIPBOARD flag the
+        // integration e2e runs fully hermetic — NO OS clipboard, NO keyring
+        // RPC, NO zbus/D-Bus connection threads. The wire-level e2e exercises
+        // pairing/poll/clipboard/rekey over real QUIC; the keyring persistence
+        // is orthogonal to what it verifies and its per-poll Secret-Service
+        // RPC (and the transient zbus threads it spawns) must not leak into
+        // the test process.
+        #[cfg(test)]
+        let hermetic =
+            crate::handlers::FORCE_EMPTY_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire);
+        #[cfg(not(test))]
+        let hermetic = false;
+        if !peer.is_empty() && !hermetic {
             if let Some(sk) = crate::ratchet_store::snapshot_key_from_keyring() {
-                crate::ratchet_store::persist_all_ratchet_sessions(&sk);
+                // AUDIT FINDING #11: persist ONLY when the ratchet actually
+                // mutated since the last write. The legacy unconditional
+                // persist performed a keyring watermark RPC + a full
+                // `ratchet_sessions.json` rewrite on every 2.5s poll — ~240k
+                // keyring writes/day and unbounded snapshot churn even when
+                // nothing changed.
+                if ratchet_dirty_since_last_persist(&peer) {
+                    crate::ratchet_store::persist_all_ratchet_sessions(&sk);
+                }
             }
         }
         latest_clip_encrypted
@@ -232,9 +275,19 @@ async fn build_poll_response(
     .unwrap_or(serde_json::Value::Null);
 
     let mut resp = base;
+    // AUDIT FINDING #18 (implicit cross-repo ordering contract): the poll
+    // response field ORDER is a wire contract the Android `processResponse`
+    // mirrors (clip → ack → sync, each decrypted in the peer's send space). A
+    // future contributor reordering the inserts would silently desync the
+    // phone (out-of-order decrypts → AEAD failures + Synchronize storms). The
+    // response now carries an explicit `manifest` listing the exact insertion
+    // order of the ratchet-encrypted fields, so the phone can validate its
+    // processing order against the producer's and any drift fails loudly.
+    let mut manifest: Vec<&str> = Vec::new();
     if let Some(obj) = resp.as_object_mut() {
         obj.insert("latest_clip_encrypted".to_string(), latest_clip_encrypted);
     }
+    manifest.push("latest_clip_encrypted");
 
     // If this side received a rekey from the peer, build the encrypted RekeyAck
     // (carrying the rekey carrier's seq in the SENDER's space) and attach it to
@@ -252,6 +305,7 @@ async fn build_poll_response(
                 obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
                     "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
                 }));
+                manifest.push("rekey_ack_encrypted");
             }
         }
         // Producer for the Synchronize recovery path (audit finding #4): our
@@ -260,14 +314,34 @@ async fn build_poll_response(
         // full BINARY TLV (audit finding #12): a ratchet message may carry a
         // rekey payload at seq 100/200, and dropping those fields would make the
         // ciphertext undecryptable (AEAD binds the rekey params).
-        if let Ok(sync_msg) = core_crypto::ratchet_synchronize_packet(peer_id.to_string()) {
-            if let Ok(bin) = sync_msg.to_binary() {
-                if let Some(obj) = resp.as_object_mut() {
-                    obj.insert("sync".to_string(), serde_json::json!({
-                        "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin),
-                    }));
+        //
+        // AUDIT FINDING #16: the carrier is now CONDITIONAL — it is only
+        // generated when the phone asked for a sync (`need_sync`). Generating
+        // it unconditionally advanced the desktop's send chain on every poll
+        // AND collided with the per-peer 15s sync rate limit (5 of every 6
+        // phone-requested syncs were rejected before decryption, so the
+        // desktop's receive chain lagged the phone's send chain by up to ~6
+        // positions every window). With the conditional carrier, the desktop
+        // only advances its chain to answer an actual recovery need.
+        if need_sync {
+            if let Ok(sync_msg) = core_crypto::ratchet_synchronize_packet(peer_id.to_string()) {
+                if let Ok(bin) = sync_msg.to_binary() {
+                    if let Some(obj) = resp.as_object_mut() {
+                        obj.insert("sync".to_string(), serde_json::json!({
+                            "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin),
+                        }));
+                        manifest.push("sync");
+                    }
                 }
             }
+        }
+        // AUDIT FINDING #18: attach the manifest last so the phone can process
+        // the ratchet-encrypted fields strictly in the listed order.
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert(
+                "manifest".to_string(),
+                serde_json::json!(manifest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            );
         }
         // AUDIT FINDING #4/#19: the plaintext `ratchet_send_count` field is
         // REMOVED. The only resync trigger is the authenticated Synchronize
@@ -278,9 +352,12 @@ async fn build_poll_response(
     resp
 }
 
-pub(crate) async fn handle_poll(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
+pub(crate) async fn handle_poll(body: Vec<u8>, peer_id: String, s: Arc<AppState>) -> Vec<u8> {
     sync_connection_state(&s);
-    let (peer_id, session_key_auth, sk_handle, _is_paired, base, _conn) = read_local_state(&s);
+    // AUDIT F12: `peer_id` is resolved per-CONNECTION from the TLS-observed
+    // client cert hash, so a second paired device's poll never decrypts
+    // against (and corrupts) the first device's ratchet session.
+    let (_legacy_peer, _is_paired, base, _conn) = read_local_state(&s);
 
     // Consumer for the Synchronize recovery path (audit finding #4): the peer
     // sends its send counter as a RATCHET-ENCRYPTED Synchronize packet. Only an
@@ -321,7 +398,13 @@ pub(crate) async fn handle_poll(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
         }
     }
 
-    let resp = build_poll_response(&peer_id, session_key_auth, sk_handle, base).await;
+    // AUDIT FINDING #16: the phone sets `need_sync` only when its receive
+    // chain genuinely needs realignment (decrypt gap or slow heartbeat). The
+    // desktop then attaches its Synchronize carrier ONLY in that case — never
+    // unconditionally — decoupling the sync HEARTBEAT from sync RECOVERY and
+    // removing the per-poll send-chain advance + the rate-limit collisions.
+    let need_sync = peer_requested_sync(&body);
+    let resp = build_poll_response(&peer_id, base, need_sync).await;
     serde_json::to_string(&resp)
         .unwrap_or_default()
         .into_bytes()

@@ -9,54 +9,28 @@
 use crate::error::KyberError;
 use serde::{Deserialize, Serialize};
 
-mod opt_hex_bytes {
-    use serde::{self, Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<String> = Option::deserialize(deserializer)?;
-        match opt {
-            Some(s) => hex::decode(&s).map(Some).map_err(serde::de::Error::custom),
-            None => Ok(None),
-        }
-    }
-}
-
-mod opt_hex_bytes_32 {
-    use serde::{self, Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<String> = Option::deserialize(deserializer)?;
-        match opt {
-            Some(s) => {
-                let decoded = hex::decode(&s).map_err(serde::de::Error::custom)?;
-                if decoded.len() != 32 {
-                    return Err(serde::de::Error::custom("expected 32 bytes"));
-                }
-                Ok(Some(decoded))
-            }
-            None => Ok(None),
-        }
-    }
-}
-
 /// Represents an encrypted ratchet message with optional DH re-key payload.
 /// UniFFI Record: nonce and ciphertext are raw byte arrays, no hex encoding.
+///
+/// AUDIT FINDING #28: the serde path was previously a SECOND, hex-based
+/// encoding of the same three rekey fields (via `opt_hex_bytes` custom
+/// deserializers). Nothing serializes this record as JSON — the wire and the
+/// snapshot both use the length-prefixed binary TLV (`to_binary`/`from_binary`)
+/// and the decoded `RatchetSnapshot` DTO respectively — so the hex contract
+/// was dead surface that could silently drift from the live wire format. The
+/// custom hex deserializers are deleted; serde is retained only as a plain
+/// default derive (never exercised by the wire), so exactly ONE (encode,
+/// decode) pair exists: the binary TLV.
 #[derive(uniffi::Record, Serialize, Deserialize)]
 pub struct RatchetEncryptedMessage {
     pub nonce: Vec<u8>,
     pub ciphertext: Vec<u8>,
     /// If Some, this message includes a new ephemeral public key for DH ratchet re-key
-    #[serde(default, deserialize_with = "opt_hex_bytes_32::deserialize")]
+    #[serde(default)]
     pub rekey_x25519_pk: Option<Vec<u8>>,
-    #[serde(default, deserialize_with = "opt_hex_bytes::deserialize")]
+    #[serde(default)]
     pub rekey_mlkem_pk: Option<Vec<u8>>,
-    #[serde(default, deserialize_with = "opt_hex_bytes::deserialize")]
+    #[serde(default)]
     pub rekey_ciphertext: Option<Vec<u8>>,
 }
 

@@ -102,7 +102,24 @@ pub(crate) fn with_timeout<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub fn read_real_clipboard() -> Result<String, String> {
+pub fn read_real_clipboard(token: String) -> Result<String, String> {
+    // Audit KYP-2026-02 #6: reading the host clipboard is a Tier-0 command
+    // whose confidentiality is otherwise tied to the webview's XSS-resistance.
+    // Require a fresh user-gesture token (same mechanism as Tier-2 destructive
+    // commands): a renderer compromise can no longer silently harvest the
+    // clipboard on a 1.5s timer. The server-side poll loop uses
+    // `read_real_clipboard_internal` (trusted Rust, no renderer) and is
+    // unaffected.
+    if !crate::commands::security::consume_privilege_token("read_real_clipboard", &token) {
+        return Err("Reading the host clipboard requires a fresh user-gesture token".to_string());
+    }
+    read_real_clipboard_internal()
+}
+
+/// The trusted Rust-side clipboard read (used by the poll loop and the gated
+/// Tauri command). No renderer involvement, so no gesture token is required
+/// here.
+pub fn read_real_clipboard_internal() -> Result<String, String> {
     if has_display_session() {
         // Bounded native read: never let a wedged compositor connection block
         // the poll handler.
@@ -282,8 +299,4 @@ pub fn write_clipboard_fallback(text: &str) -> Result<(), String> {
     write_copyq_clipboard(text).map_err(|e| {
         format!("All clipboard helper fallbacks (wl-copy, xclip, xsel) failed. CopyQ error: {e}. Last spawn error: {:?}", last_err)
     })
-}
-
-pub fn read_real_clipboard_internal() -> Result<String, String> {
-    read_real_clipboard()
 }

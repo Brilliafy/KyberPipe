@@ -291,8 +291,8 @@ mod tests {
         let restored: crate::crypto::ratchet::RatchetSnapshot =
             serde_json::from_slice(&ser).unwrap();
         let mut bob2 = DoubleRatchetState::from_snapshot(&restored).unwrap();
-        assert_eq!(bob2.recv_message_count, 5);
-        assert_eq!(bob2.send_message_count, 0);
+        assert_eq!(bob2.recv.message_count, 5);
+        assert_eq!(bob2.send.message_count, 0);
 
         // Alice sends more; restored Bob must decrypt them.
         for i in 5..8u64 {
@@ -341,7 +341,7 @@ mod tests {
             "rekey should attach at seq 100"
         );
         assert!(
-            alice.outgoing_root_key.is_some(),
+            alice.outgoing_proposal.root_key.is_some(),
             "outgoing proposal must be pending"
         );
 
@@ -394,7 +394,7 @@ mod tests {
             "carrier seq must match the confirm queue"
         );
         assert!(
-            alice.outgoing_root_key.is_none(),
+            alice.outgoing_proposal.root_key.is_none(),
             "outgoing proposal must be committed"
         );
         assert_eq!(
@@ -431,7 +431,7 @@ mod tests {
             "receiver converges to generation 1"
         );
         assert!(
-            bob.pending_root_key.is_none(),
+            bob.incoming_proposal.root_key.is_none(),
             "incoming proposal must be committed"
         );
 
@@ -485,8 +485,8 @@ mod tests {
             alice_msgs.push(alice.ratchet_encrypt(format!("a{i}").as_bytes()).unwrap());
             bob_msgs.push(bob.ratchet_encrypt(format!("b{i}").as_bytes()).unwrap());
         }
-        assert!(alice.outgoing_root_key.is_some());
-        assert!(bob.outgoing_root_key.is_some());
+        assert!(alice.outgoing_proposal.root_key.is_some());
+        assert!(bob.outgoing_proposal.root_key.is_some());
 
         // Deliver Bob's rekey-carrying message to Alice FIRST (Alice sees Bob's
         // proposal while her own is still unacked → initiator discards Bob's).
@@ -512,11 +512,11 @@ mod tests {
         // Alice keeps her own proposal; Bob's tentative proposal is discarded,
         // and NO RekeyAck for Bob's proposal is recorded.
         assert!(
-            alice.outgoing_root_key.is_some(),
+            alice.outgoing_proposal.root_key.is_some(),
             "initiator keeps its own proposal"
         );
         assert!(
-            alice.pending_root_key.is_none(),
+            alice.incoming_proposal.root_key.is_none(),
             "initiator discards responder proposal"
         );
         assert!(
@@ -546,11 +546,11 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8(pt).unwrap(), "a100");
         assert!(
-            bob.outgoing_root_key.is_none(),
+            bob.outgoing_proposal.root_key.is_none(),
             "responder must cancel its own proposal"
         );
         assert!(
-            bob.pending_root_key.is_some(),
+            bob.incoming_proposal.root_key.is_some(),
             "responder adopts the initiator's proposal"
         );
         let ack_seq = bob.take_pending_rekey_ack_seq();
@@ -614,7 +614,7 @@ mod tests {
             bob.ratchet_decrypt(&nonce, &msg.ciphertext).unwrap();
         }
         assert!(
-            alice.outgoing_root_key.is_some(),
+            alice.outgoing_proposal.root_key.is_some(),
             "proposal must stay pending (no TTL commit)"
         );
         assert_eq!(
@@ -636,7 +636,7 @@ mod tests {
             alice.ratchet_generation, 0,
             "re-send must not commit either"
         );
-        assert!(alice.outgoing_root_key.is_some());
+        assert!(alice.outgoing_proposal.root_key.is_some());
 
         // Bob decrypts the re-sent carrier via the rekey-aware path, adopts the
         // proposal and ACKs with the NEW carrier seq (101 = message index 101).
@@ -669,7 +669,7 @@ mod tests {
             alice.ratchet_generation, 1,
             "ACK commit bumps generation exactly once"
         );
-        assert!(alice.outgoing_root_key.is_none());
+        assert!(alice.outgoing_proposal.root_key.is_none());
     }
 
     /// Audit #2 known-answer test: the canonical session-key derivation salt
@@ -716,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // split_secret_shamir is superseded by *_with_meta; retained for legacy recovery
     fn test_shamir_secret_sharing() {
         let master_key = b"Kyberpipe Master Identity Secret Key Recovery Test";
         let shares = split_secret_shamir(master_key, 2, 3).unwrap();

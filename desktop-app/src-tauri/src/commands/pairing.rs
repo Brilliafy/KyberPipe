@@ -22,6 +22,7 @@ fn write_keyring_secret(key_name: &str, secret_hex: &str) -> Result<(), String> 
 }
 
 /// Read a secret previously stored by `write_keyring_secret`.
+#[allow(dead_code)] // keyring test helper / API surface
 fn read_keyring_secret(key_name: &str) -> Option<String> {
     keyring::Entry::new(KEYRING_SERVICE, key_name)
         .ok()
@@ -38,7 +39,14 @@ pub fn generate_keypair(
     // never enter the JS heap.
     let pair = generate_pq_keypair().map_err(|e| e.to_string())?;
     state.set_keypair(Some(pair.clone()));
-    state.add_log("[PQC] Generated Hybrid Keypair (X25519 + ML-KEM-768)".to_string());
+    // Audit KYP-2026-02 #6: persist the pairing keypair in the OS keyring so it
+    // is NOT regenerated on every app mount (which rotated the identity the
+    // phone pins and invalidated in-flight pairing QRs on restart).
+    crate::ratchet_store::store_pairing_keypair_to_keyring(&pair);
+    state.add_log(
+        "[PQC] Generated Hybrid Keypair (X25519 + ML-KEM-768) — persisted in OS keyring"
+            .to_string(),
+    );
     Ok(core_crypto::PqPairingPublic::from(&pair))
 }
 
@@ -93,34 +101,63 @@ pub async fn perform_sas_confirmation(
                 // to). The private halves stay in Rust — never cross to the
                 // renderer. Using a fresh ratchet keypair here would guarantee a
                 // permanent desync at the first rekey boundary (seq 100).
-                let our_pair = state.get_keypair();
-                match our_pair {
-                    Some(pair) => {
-                        let _ = core_crypto::ratchet_init_session_with_keypair(
-                            peer_id,
-                            shared_secret,
-                            true,
-                            pair.x25519_pk.clone(),
-                            pair.x25519_sk.clone(),
-                            pair.mlkem_pk.clone(),
-                            pair.mlkem_sk.clone(),
-                            peer_x25519,
-                            peer_mlkem,
-                        );
-                    }
-                    None => {
-                        // No local keypair registered — fall back to the legacy
-                        // fresh-keypair path (degrades the DH guarantee but keeps
-                        // symmetric-only ratchet working pre-first-rekey).
-                        let _ = core_crypto::ratchet_init_session(
-                            peer_id,
-                            shared_secret,
-                            true,
-                            peer_x25519,
-                            peer_mlkem,
-                        );
-                    }
-                }
+                //
+                // Audit KYP-2026-02 #2 (CRITICAL): a RE-PAIR must never silently
+                // keep the OLD ratchet session. `ratchet_init_session_with_keypair`
+                // rejects when a session already exists for this peer; the old
+                // code discarded that error with `let _ =`, leaving the stale
+                // session (old master secret, old keypair) live while the phone
+                // installed a fresh one — a guaranteed permanent desync that
+                // presents as "paired but nothing syncs". Mirror the Android
+                // flow: remove the existing session FIRST, then init, and
+                // PROPAGATE any error instead of swallowing it. There is no
+                // legacy fresh-keypair fallback: init without OUR pairing
+                // keypair would permanently desync at the first rekey boundary,
+                // so pairing fails loudly instead (audit KYP-2026-02 #18).
+                let mut our_pair = state.get_keypair().ok_or_else(|| {
+                    "No local pairing keypair registered — cannot initialize the ratchet session. \
+                     Generate a pairing keypair first, then re-pair."
+                        .to_string()
+                })?;
+                // Remove any pre-existing session for this peer so the fresh
+                // pairing key material is installed atomically. The Rust-INTERNAL
+                // impl is called directly (not the raw-secrets UniFFI export,
+                // which is cfg(test)-gated — audit KYP-2026-02 #25): this is a
+                // same-process crate call, never an FFI boundary, so no secret
+                // bytes are marshalled.
+                core_crypto::ratchet_remove_session(peer_id.clone());
+                core_crypto::ratchet_ffi::ratchet_init_session_with_keypair_impl(
+                    &peer_id,
+                    &shared_secret,
+                    true,
+                    Some((
+                        our_pair.x25519_pk.clone(),
+                        our_pair.x25519_sk.clone(),
+                        our_pair.mlkem_pk.clone(),
+                        our_pair.mlkem_sk.clone(),
+                    )),
+                    if peer_x25519.is_empty() {
+                        None
+                    } else {
+                        Some(peer_x25519.as_slice())
+                    },
+                    if peer_mlkem.is_empty() {
+                        None
+                    } else {
+                        Some(peer_mlkem.as_slice())
+                    },
+                )
+                .map_err(|e| {
+                    format!(
+                        "Failed to initialize ratchet session for peer {peer_id}: {e} — re-pair required"
+                    )
+                })?;
+                // Audit F14: the `get_keypair()` clone (and the transient secret
+                // halves it carried) must not linger in freed heap — the
+                // ratchet impl has copied what it needs into ZeroizeOnDrop
+                // storage; wipe the clone now.
+                use zeroize::Zeroize;
+                our_pair.zeroize();
             }
         }
 
@@ -147,6 +184,10 @@ pub async fn perform_sas_confirmation(
                     ));
                 }
             };
+            // Audit finding #23: the master session key is used only at
+            // restore/startup (long-idle) and must NEVER be silently evicted by
+            // the LRU cap — pin it so per-poll churn cannot destroy it.
+            core_crypto::session_key_pin(handle);
             crate::handlers::DESKTOP_SESSION_KEY_HANDLE
                 .store(handle, std::sync::atomic::Ordering::Release);
         }
@@ -157,7 +198,21 @@ pub async fn perform_sas_confirmation(
         // Promote the pairing connection's identity to the trusted peer identity
         // used to authorize post-pairing streams.
         state.set_paired_client_cert_hash(cert_hash.clone());
+        // AUDIT F12: register the per-peer cert→ratchet-id mapping so this
+        // device's poll/clipboard/SMS/media streams route to ITS session, not
+        // the global pairing id (which a SECOND paired device would otherwise
+        // corrupt).
+        let peer_id = state.get_pairing_initiator_pk();
+        if !peer_id.is_empty() {
+            state.register_peer_cert_mapping(&peer_id, &cert_hash);
+        }
         core_crypto::quic_app::set_pinned_client_cert(cert_hash.clone());
+        // AUDIT FINDING #4 (multi-device): registering the per-peer mapping
+        // must ALSO extend the TLS-layer allowlist so a SECOND paired device's
+        // certificate passes the TLS handshake (the single-pin verifier would
+        // otherwise reject it before the stream layer ever ran). Both layers
+        // now enforce the same set.
+        core_crypto::quic_app::register_allowed_client_cert(cert_hash.clone());
         match core_crypto::quic_app::QuicAppManager::rebind_server(9876).await {
             Ok(()) => {
                 tracing::info!("[Pairing] Server rebound with mTLS enforcement completed prior to pairing state promotion");
@@ -232,7 +287,7 @@ pub async fn confirm_pairing_sas(
     paired_name: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
-    perform_sas_confirmation(&state.inner(), verified_sas, paired_name).await
+    perform_sas_confirmation(state.inner(), verified_sas, paired_name).await
 }
 
 #[tauri::command]
@@ -273,8 +328,16 @@ pub fn store_key_in_secure_enclave(
 pub fn get_pairing_config(
     host_pk_hex: String,
     wireguard_pk_hex: String,
+    token: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::PairingConfig, String> {
+    // Audit KYP-2026-02 #6: the pairing config discloses host identity
+    // metadata (local IP, Wi-Fi Direct MAC, P2P IP) plus a fresh QR nonce — an
+    // enumeration oracle. Gate it behind a fresh user-gesture token so a
+    // renderer compromise cannot harvest it silently.
+    if !crate::commands::security::consume_privilege_token("get_pairing_config", &token) {
+        return Err("Building a pairing QR requires a fresh user-gesture token".into());
+    }
     state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
     let mut config = core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
         .map_err(|e| e.to_string())?;
@@ -295,7 +358,16 @@ pub fn get_pairing_config(
 /// request (audit finding #5 — QR-nonce contract drift). Returns an empty
 /// string when no nonce is pending (keypair not generated / already consumed).
 #[tauri::command]
-pub fn get_pairing_nonce(state: State<'_, std::sync::Arc<AppState>>) -> Result<String, String> {
+pub fn get_pairing_nonce(
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    // Audit KYP-2026-02 #6: the QR nonce defeats the pairing-slot hijack gate;
+    // disclosing it to an unauthenticated renderer would defeat its purpose.
+    // Require a fresh user-gesture token.
+    if !crate::commands::security::consume_privilege_token("get_pairing_nonce", &token) {
+        return Err("Reading the pairing nonce requires a fresh user-gesture token".into());
+    }
     Ok(state.get_pending_pairing_nonce())
 }
 
@@ -308,24 +380,30 @@ pub fn get_server_cert_hash() -> Result<String, String> {
     Ok(core_crypto::quic_server_cert_hash().unwrap_or_default())
 }
 
-#[tauri::command]
-pub fn generate_wormhole_code() -> String {
-    use super::bip39_words;
-    let mut rng = rand::thread_rng();
-    let n1 = rand::Rng::gen_range(&mut rng, 0..bip39_words::BIP39_WORDS.len());
-    let n2 = rand::Rng::gen_range(&mut rng, 0..bip39_words::BIP39_WORDS.len());
-    let n3 = rand::Rng::gen_range(&mut rng, 0..bip39_words::BIP39_WORDS.len());
-    format!(
-        "{}-{}-{}",
-        bip39_words::BIP39_WORDS[n1],
-        bip39_words::BIP39_WORDS[n2],
-        bip39_words::BIP39_WORDS[n3]
-    )
-}
-
 #[cfg(test)]
 mod keyring_tests {
     use super::*;
+
+    /// Probe the keyring backend with a hard timeout so a STUCK Secret Service
+    /// daemon (hung D-Bus call) cannot hang the whole test binary after the
+    /// assertions pass. Returns None when the backend is unavailable OR does
+    /// not answer within the bound — both are treated as a graceful skip.
+    fn keyring_available(name: &'static str) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ok = keyring::Entry::new(KEYRING_SERVICE, name)
+                .and_then(|e| e.set_password("probe"))
+                .is_ok();
+            let _ = tx.send(ok);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(ok) => ok,
+            Err(_) => {
+                eprintln!("Skipping keyring test: keyring probe timed out (stuck backend)");
+                false
+            }
+        }
+    }
 
     /// Round-trip: secrets written to the OS keyring must survive a simulated
     /// process restart (the old per-boot wrap key made this fail — every blob
@@ -334,11 +412,9 @@ mod keyring_tests {
     /// the same guarantee the app needs across reboots.
     #[test]
     fn test_keyring_secret_roundtrip_across_restart() {
-        // Gracefully skip when no keyring backend is available (headless CI).
-        if keyring::Entry::new(KEYRING_SERVICE, "test_roundtrip_key")
-            .and_then(|e| e.set_password("probe"))
-            .is_err()
-        {
+        // Gracefully skip when no keyring backend is available (headless CI)
+        // or a stuck daemon does not answer within the bound (audit follow-up).
+        if !keyring_available("test_roundtrip_key") {
             eprintln!("Skipping keyring test: no OS keyring backend available");
             return;
         }
@@ -359,10 +435,7 @@ mod keyring_tests {
     /// it hex-decodes the keyring entry directly.
     #[test]
     fn test_keyring_does_not_double_encrypt() {
-        if keyring::Entry::new(KEYRING_SERVICE, "test_plain_key")
-            .and_then(|e| e.set_password("probe"))
-            .is_err()
-        {
+        if !keyring_available("test_plain_key") {
             eprintln!("Skipping keyring test: no OS keyring backend available");
             return;
         }

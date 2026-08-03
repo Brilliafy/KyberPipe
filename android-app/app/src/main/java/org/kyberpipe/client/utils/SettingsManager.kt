@@ -29,9 +29,26 @@ class SettingsManager(context: Context) {
 
     // ── Security-critical settings (encrypted) ──
 
-    var sessionKey: String
-        get() = securePrefs.getString("session_key", "") ?: ""
-        set(value) = securePrefs.edit().putString("session_key", value).apply()
+    /// Opaque Rust-side session-key handle (ULong stored as Long; 0 = none).
+    /// Raw session key bytes NEVER touch the JVM heap or this prefs file — the
+    /// key lives in Rust zeroizing memory and is reached only via the handle
+    /// (audit finding F7). Handles are process-scoped: after a process restart
+    /// the ratchet is restored from the AEAD-wrapped snapshot instead.
+    var sessionKeyHandle: Long
+        get() = securePrefs.getLong("session_key_handle", 0L)
+        set(value) = securePrefs.edit().putLong("session_key_handle", value).apply()
+
+    /// Opaque Rust-side hybrid keypair handle (0 = none). Zeroized via
+    /// destroyPqKeypairHandle on unpair/self-destruct (audit finding F7).
+    var keypairHandle: Long
+        get() = securePrefs.getLong("keypair_handle", 0L)
+        set(value) = securePrefs.edit().putLong("keypair_handle", value).apply()
+
+    /// Opaque Rust-side KEM shared-secret handle (0 = none). Zeroized via
+    /// destroyKemHandle on unpair/self-destruct (audit finding F7).
+    var kemHandleId: Long
+        get() = securePrefs.getLong("kem_handle_id", 0L)
+        set(value) = securePrefs.edit().putLong("kem_handle_id", value).apply()
 
     var isPaired: Boolean
         get() = securePrefs.getBoolean("is_paired", false)

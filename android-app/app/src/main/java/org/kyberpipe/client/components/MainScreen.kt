@@ -39,7 +39,6 @@ import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.bindToWifiNetwork
 import org.kyberpipe.client.utils.onFirewallDropDetected
-import org.kyberpipe.client.utils.SessionKeyManager
 import uniffi.core_crypto.*
 import java.io.ByteArrayInputStream
 import java.util.zip.InflaterInputStream
@@ -96,7 +95,9 @@ fun MainScreen(
     onThemeChanged: (String, Boolean) -> Unit
 ) {
     var currentTab by remember { mutableStateOf(TabItem.HOME) }
-    var keyPair by remember { mutableStateOf<PqKeyPair?>(null) }
+    // Audit finding F7: the hybrid keypair lives in Rust behind an opaque handle.
+    // The PqKeyPair object (with secret halves) is NEVER held in Compose state.
+    var keyPairHandle by remember { mutableStateOf<ULong?>(null) }
     var ambientLux by remember { mutableStateOf(250.0f) }
 
     // Zero-Trust Local Logging state
@@ -123,8 +124,10 @@ fun MainScreen(
     var resolvedPublicIp by remember { mutableStateOf("Not Queried") }
     var pairingConfigInput by remember { mutableStateOf("") }
     var sasCodeDisplay by remember { mutableStateOf("") }
-    var pendingSharedSecret by remember { mutableStateOf("") }
-    var sessionKey by remember { mutableStateOf("") }
+    // KEM shared-secret handle produced during the handshake; the derived
+    // session-key handle is created from it at SAS confirmation (audit F7).
+    // Only handles are held — never raw secret bytes.
+    var pendingKemHandleId by remember { mutableStateOf<ULong?>(null) }
     var kemCiphertext by remember { mutableStateOf("") }
     var p2pIp by remember { mutableStateOf("") }
 
@@ -194,7 +197,7 @@ fun MainScreen(
     }
 
     // mDNS/LAN Beacon Listener
-    val beaconListener = remember { MdnsBeaconListener(coroutineScope) }
+    val beaconListener = remember { MdnsBeaconListener(coroutineScope, context.applicationContext) }
     LaunchedEffect(Unit) {
         beaconListener.start { host: BeaconHost ->
             addLog("[mDNS] Discovered ${host.deviceName} @ ${host.localIp}")
@@ -308,7 +311,9 @@ fun MainScreen(
     // Load keys & setup listeners
     LaunchedEffect(Unit) {
         try {
-            keyPair = uniffi.core_crypto.generatePqKeypair()
+            // Audit finding F7: generate the hybrid keypair inside Rust and keep
+            // only the opaque handle — the private halves never reach the JVM.
+            keyPairHandle = uniffi.core_crypto.generatePqKeypairHandle()
             addLog("[PQC] Loaded cryptographic provider successfully")
         } catch (e: Exception) {
             e.printStackTrace()
@@ -337,12 +342,20 @@ fun MainScreen(
 
                         if (settings.isPaired) {
                             val hostIp = p2pIp.takeIf { it.isNotEmpty() } ?: settings.pairedHostIp
-                            if (hostIp.isNotEmpty()) {
-                                val encrypted = SessionKeyManager.encrypt(text)
-                                if (encrypted != null) {
-                                    val jsonBody = JSONObject().put("encrypted", JSONObject()
-                                        .put("nonce_hex", encrypted.nonce.toHex())
-                                        .put("ciphertext_hex", encrypted.ciphertext.toHex())
+                            val peer = settings.peerRatchetIdentity
+                            if (hostIp.isNotEmpty() && peer.isNotEmpty()) {
+                                // Audit finding F7: the legacy session-key wire path
+                                // is gone — encrypt with the ratchet (binary TLV)
+                                // instead. No raw key bytes touch this process.
+                                val tlv = try {
+                                    uniffi.core_crypto.ratchetEncryptMessageBinary(peer, text.toByteArray())
+                                } catch (e: Exception) {
+                                    addLog("[Clipboard] Ratchet encrypt failed: ${e.message}")
+                                    null
+                                }
+                                if (tlv != null) {
+                                    val jsonBody = JSONObject().put("encrypted_ratchet", JSONObject()
+                                        .put("tlv_b64", android.util.Base64.encodeToString(tlv, android.util.Base64.NO_WRAP))
                                     ).toString()
                                     // Clipboard sync with debounce + single in-flight.
                                     clipboardSyncJob?.cancel()
@@ -482,6 +495,11 @@ fun MainScreen(
             if (!update.isPaired) {
                 settings.isPaired = false
                 settings.pairedDeviceName = ""
+                // Audit finding F7: the host unpaired us — release every Rust-side
+                // pairing handle (keypair, KEM shared secret, session key).
+                org.kyberpipe.client.PairingManager.destroyPairingHandles(context)
+                keyPairHandle = null
+                pendingKemHandleId = null
                 connectionStatus = "DISCONNECTED (Host unpaired)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
@@ -517,7 +535,7 @@ fun MainScreen(
     var tempHostIp by remember { mutableStateOf("") }
     var tempHostPk by remember { mutableStateOf("") }
 
-    val performKemHandshake: (org.json.JSONObject) -> Unit = { json ->
+    val performKemHandshake: (org.json.JSONObject) -> Unit = handshake@{ json ->
         val hostPkHex = json.optString("pqc_pub", json.optString("host_identity_pk_hex", ""))
         val wireguardPkHex = json.optString("x25519_pub", json.optString("wireguard_pk_hex", ""))
         if (hostPkHex.isNotEmpty() && wireguardPkHex.isNotEmpty()) {
@@ -564,46 +582,46 @@ fun MainScreen(
                     }
                 }
             }
-            val kemResponse = uniffi.core_crypto.encapsulatePqSecret(wireguardPkHex.hexToByteArray(), hostPkHex.hexToByteArray())
-            val myPk = keyPair?.mlkemPk ?: ByteArray(0)
-            val myPkHex = myPk.toHex()
-            val computedSas = uniffi.core_crypto.generateSasCode(hostPkHex.hexToByteArray(), myPk, kemResponse.sharedSecret)
+            // Audit finding F7: the KEM shared secret stays in Rust behind the
+            // handle returned by encapsulatePqSecretHandle. Only the public
+            // halves of OUR keypair (for the payload/SAS) and the peer's public
+            // halves cross the boundary — never raw secret bytes.
+            val handle = keyPairHandle
+            if (handle == null) {
+                addLog("[Pairing] Aborted: no keypair handle — regenerate the keypair and retry")
+                return@handshake
+            }
+            val clientPublic = uniffi.core_crypto.getPqKeypairPublic(handle)
+            val clientMlkemPkHex = clientPublic.mlkemPkHex
+            val clientX25519PkHex = clientPublic.x25519PkHex
+            val kemResponse = uniffi.core_crypto.encapsulatePqSecretHandle(
+                wireguardPkHex.hexToByteArray(),
+                hostPkHex.hexToByteArray()
+            )
+            val computedSas = uniffi.core_crypto.generateSasCodeWithKemHandle(
+                hostPkHex.hexToByteArray(),
+                clientMlkemPkHex.hexToByteArray(),
+                kemResponse.handle
+            )
             sasCodeDisplay = computedSas
-            pendingSharedSecret = kemResponse.sharedSecret.toHex()
+            pendingKemHandleId = kemResponse.handle
             kemCiphertext = kemResponse.ciphertext.toHex()
 
             // Initialize the ratchet session NOW (single handshake path), keyed by
             // the host PK fingerprint — the same identity every later decrypt uses.
+            // ratchetInitSessionFromKemHandle derives everything from the KEM
+            // handle — no raw sharedSecret bytes (audit finding F7).
             val peerIdentity = hostPkHex
-            val kp = keyPair
             try {
                 uniffi.core_crypto.ratchetRemoveSession(peerIdentity)
-                if (kp != null) {
-                    // Rekey keypair mismatch (audit finding #1): init the ratchet
-                    // with OUR OWN pairing keypair so the DH/KEM chains and the
-                    // desktop's rekey proposals share the same secret state. Peer
-                    // keys are the desktop's wireguard x25519 pk and host mlkem pk.
-                    uniffi.core_crypto.ratchetInitSessionWithKeypair(
-                        peerIdentity,
-                        kemResponse.sharedSecret,
-                        false,
-                        kp.x25519Pk,
-                        kp.x25519Sk,
-                        kp.mlkemPk,
-                        kp.mlkemSk,
-                        wireguardPkHex.hexToByteArray(),
-                        hostPkHex.hexToByteArray()
-                    )
-                } else {
-                    addLog("[Pairing] keyPair null — falling back to legacy ratchet init")
-                    uniffi.core_crypto.ratchetInitSession(
-                        peerIdentity,
-                        kemResponse.sharedSecret,
-                        false,
-                        wireguardPkHex.hexToByteArray(),
-                        hostPkHex.hexToByteArray()
-                    )
-                }
+                uniffi.core_crypto.ratchetInitSessionFromKemHandle(
+                    peerIdentity,
+                    false, // Android is not the initiator
+                    handle,
+                    kemResponse.handle,
+                    wireguardPkHex.hexToByteArray(),
+                    hostPkHex.hexToByteArray()
+                )
                 settings.peerRatchetIdentity = peerIdentity
                 addLog("[Pairing] Ratchet session initialized (peer=$peerIdentity)")
             } catch (e: Exception) {
@@ -615,26 +633,37 @@ fun MainScreen(
             var hostAccepted = false
             if (tempHostIp.isNotEmpty()) {
                 try {
+                    // AUDIT FINDING #1 (CRITICAL): the bootstrap connection MUST
+                    // present the per-install client identity certificate. The
+                    // desktop pins the TLS-OBSERVED client cert at pairing time;
+                    // a cert-less bootstrap leaves the pin empty, skips the mTLS
+                    // rebind, and rejects every post-pairing stream. Generate the
+                    // identity BEFORE connecting and present it on the SAME
+                    // connection that carries the KEM (single connect path).
+                    val certHash = org.kyberpipe.client.PairingManager.ensureClientIdentityCert(context)
+                    val certDer = android.util.Base64.decode(
+                        settings.clientIdentityCert, android.util.Base64.NO_WRAP
+                    )
+                    val keyDer = android.util.Base64.decode(
+                        settings.clientIdentityKey, android.util.Base64.NO_WRAP
+                    )
                     // Establish the QUIC bridge to the desktop BEFORE sending any
-                    // stream. Bootstrap pairing pins the server cert from the QR
-                    // (audit finding #15); empty pin = legacy accept-any
-                    // allow-private connect (the SSRF guard — audit #6).
+                    // stream. Pins the QR-bound server cert (audit finding #15)
+                    // AND presents the client identity cert (audit finding #1).
                     try {
-                        uniffi.core_crypto.quicConnectPairingBootstrap(tempHostIp, 9876.toUShort(), qrServerCertHash)
-                        addLog("[Pairing] QUIC bridge connected to $tempHostIp:9876")
+                        uniffi.core_crypto.quicConnectWithClientCert(
+                            tempHostIp, 9876.toUShort(), qrServerCertHash, certDer, keyDer
+                        )
+                        addLog("[Pairing] QUIC bridge connected to $tempHostIp:9876 (mTLS identity presented)")
                     } catch (connectErr: Exception) {
                         addLog("[Pairing] QUIC connect: ${connectErr.message}")
                     }
-                    // Ensure the per-install identity certificate exists and echo
-                    // its hash + the QR nonce so the desktop pins OUR identity and
-                    // rejects blind races (audit #8/#20).
-                    val certHash = org.kyberpipe.client.PairingManager.ensureClientIdentityCert(context)
                     val nonceHex = settings.pendingPairingNonce
                     val jsonBody = JSONObject()
                         .put("name", settings.deviceName)
                         .put("ciphertext_hex", kemCiphertext)
-                        .put("client_pk_hex", myPkHex)
-                        .put("client_x25519_pk_hex", keyPair?.x25519Pk?.toHex() ?: "")
+                        .put("client_pk_hex", clientMlkemPkHex)
+                        .put("client_x25519_pk_hex", clientX25519PkHex)
                         .put("cert_hash_hex", certHash)
                     if (nonceHex.isNotEmpty()) {
                         jsonBody.put("pairing_nonce_hex", nonceHex)
@@ -665,31 +694,38 @@ fun MainScreen(
     }
 
 
-    val handlePairingHandshake = {
-        val rawInput = pairingConfigInput.trim()
-        when {
-            rawInput.isEmpty() -> {
-                Toast.makeText(context, "Please scan the QR code from the desktop app", Toast.LENGTH_SHORT).show()
-            }
-            rawInput.startsWith("{") -> {
-                // Raw JSON pasted directly
-                try {
-                    performKemHandshake(JSONObject(rawInput))
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    addLog("[Pairing] Error: Handshake verification failed (${e.message})")
-                }
-            }
-            else -> {
-                // Base64(zlib) encoded QR payload (from QR scanner or deep link)
-                try {
-                    val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
-                    val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
-                    addLog("[Pairing] Decompressed QR payload (${jsonStr.length} chars)")
-                    performKemHandshake(JSONObject(jsonStr))
-                } catch (_: Exception) {
-                    Toast.makeText(context, "Invalid pairing data — scan QR from desktop or use the share link", Toast.LENGTH_LONG).show()
-                    addLog("[Pairing] Error: Could not decode pairing payload")
+    // Audit finding F9: every block_on_sync FFI call inside the handshake
+    // (encapsulate*, ratchetInit*, quicConnectPairingBootstrap, quicSendAndRecv)
+    // runs on Dispatchers.IO inside a coroutine — never on the Main thread.
+    val handlePairingHandshake: () -> Unit = {
+        coroutineScope.launch {
+            withContext(Dispatchers.IO) {
+                val rawInput = pairingConfigInput.trim()
+                when {
+                    rawInput.isEmpty() -> {
+                        Toast.makeText(context, "Please scan the QR code from the desktop app", Toast.LENGTH_SHORT).show()
+                    }
+                    rawInput.startsWith("{") -> {
+                        // Raw JSON pasted directly
+                        try {
+                            performKemHandshake(JSONObject(rawInput))
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Handshake failed: ${e.message}", Toast.LENGTH_LONG).show()
+                            addLog("[Pairing] Error: Handshake verification failed (${e.message})")
+                        }
+                    }
+                    else -> {
+                        // Base64(zlib) encoded QR payload (from QR scanner or deep link)
+                        try {
+                            val decoded = android.util.Base64.decode(rawInput, android.util.Base64.DEFAULT)
+                            val jsonStr = java.util.zip.InflaterInputStream(ByteArrayInputStream(decoded)).bufferedReader().readText()
+                            addLog("[Pairing] Decompressed QR payload (${jsonStr.length} chars)")
+                            performKemHandshake(JSONObject(jsonStr))
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Invalid pairing data — scan QR from desktop or use the share link", Toast.LENGTH_LONG).show()
+                            addLog("[Pairing] Error: Could not decode pairing payload")
+                        }
+                    }
                 }
             }
         }
@@ -832,7 +868,7 @@ fun MainScreen(
                     TabItem.SETTINGS -> {
                         SettingsTab(
                             settings = settings,
-                            keyPair = keyPair,
+                            keyPairHandle = keyPairHandle,
                             pairingConfigInput = pairingConfigInput,
                             onPairingConfigChange = { pairingConfigInput = it },
                             onTriggerHandshake = handlePairingHandshake,
@@ -850,6 +886,11 @@ fun MainScreen(
                             onExportCrashLog = onExportCrashLog,
                             hasCrashLog = hasCrashLog,
                             onPanicTriggered = {
+                                // Audit finding F7: self-destruct must also release
+                                // the Rust-side pairing handles.
+                                org.kyberpipe.client.PairingManager.destroyPairingHandles(context)
+                                keyPairHandle = null
+                                pendingKemHandleId = null
                                 try {
                                     uniffi.core_crypto.triggerPanicHardwareWipe()
                                     settings.isPaired = false
@@ -903,7 +944,11 @@ fun MainScreen(
                 },
                 confirmButton = {
                     Button(
+                        // Audit finding F9: deriveSessionKeyHandle and the cert-pin
+                        // FFI calls are block_on_sync — run them off the Main thread.
                         onClick = {
+                            coroutineScope.launch {
+                                withContext(Dispatchers.IO) {
                             val realIp = p2pIp.takeIf { it.isNotEmpty() }
                                 ?: tempHostIp.takeIf { it.isNotEmpty() }
                                 ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
@@ -913,13 +958,24 @@ fun MainScreen(
                                 // isPaired before the desktop confirms the SAS — it may reject the
                                 // code or time out. We persist everything except the commit signal
                                 // and let the poll loop commit once the desktop reports is_paired.
-                                // Canonical salt — SAME bytes as the desktop (audit finding #2).
-                                sessionKey = uniffi.core_crypto.deriveSessionKey(
-                                    pendingSharedSecret.hexToByteArray(),
-                                    uniffi.core_crypto.sessionDerivationSalt()
-                                ).toHex()
-                                SessionKeyManager.initFromHex(sessionKey)
-                                settings.sessionKey = sessionKey
+                                // Audit finding F7: derive the opaque session-key handle from
+                                // the KEM handle — the derived key bytes never leave Rust.
+                                val handle = keyPairHandle
+                                val kemId = pendingKemHandleId
+                                if (handle != null && kemId != null) {
+                                    try {
+                                        val sessionKeyHandle =
+                                            uniffi.core_crypto.deriveSessionKeyHandle(kemId)
+                                        settings.sessionKeyHandle = sessionKeyHandle.toLong()
+                                        settings.keypairHandle = handle.toLong()
+                                        settings.kemHandleId = kemId.toLong()
+                                        addLog("[Pairing] Session key handle derived (opaque)")
+                                    } catch (e: Exception) {
+                                        addLog("[Pairing] Session key handle derive failed: ${e.message}")
+                                    }
+                                } else {
+                                    addLog("[Pairing] No KEM handle — session key handle not derived")
+                                }
 
                                 // Pin the server TLS certificate ONLY after the user
                                 // confirmed the SAS — never on first connect (TOFU MitM
@@ -966,6 +1022,8 @@ fun MainScreen(
                                     }
                                 } catch (se: Exception) {
                                     addLog("[Pairing] Service restart failed: ${se.message}")
+                                }
+                            }
                                 }
                             }
                         }

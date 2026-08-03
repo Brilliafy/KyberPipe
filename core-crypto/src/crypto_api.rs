@@ -5,8 +5,8 @@
 
 use crate::error::KyberError;
 use crate::{
-    crypto, ensure_panic_hook_installed, session_handle, EncryptedPayload, PqKemResponse,
-    PqKeyPair, PqKeyPairRaw,
+    crypto, ensure_panic_hook_installed, kem_handle, session_handle, EncryptedPayload,
+    PqKemHandleResponse, PqKemResponse, PqKeyPair, PqPairingPublic,
 };
 use pqcrypto_kyber::kyber768;
 use zeroize::Zeroize;
@@ -59,7 +59,11 @@ pub fn trigger_panic_hardware_wipe() -> Result<(), KyberError> {
     Ok(())
 }
 
-#[uniffi::export]
+/// Generate a hybrid pairing keypair. NOTE (audit F10 follow-up): this is NO
+/// LONGER a UniFFI export — it returns the private halves as plain `Vec<u8>`,
+/// which would put secrets on the JVM heap for any Kotlin caller. The desktop
+/// uses it as a same-process crate call (secrets never cross a boundary); the
+/// Android companion MUST use `generate_pq_keypair_handle` (opaque handle).
 pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
     ensure_panic_hook_installed();
     let pair = crypto::generate_hybrid_keypair();
@@ -71,21 +75,12 @@ pub fn generate_pq_keypair() -> Result<PqKeyPair, KyberError> {
     })
 }
 
-#[uniffi::export]
-pub fn generate_pq_keypair_raw() -> Result<PqKeyPairRaw, KyberError> {
-    ensure_panic_hook_installed();
-    let pair = crypto::generate_hybrid_keypair();
-    Ok(PqKeyPairRaw {
-        x25519_pk: pair.x25519_pk.to_vec(),
-        x25519_sk: pair.x25519_sk.to_vec(),
-        mlkem_pk: pair.mlkem_pk.clone(),
-        mlkem_sk: pair.mlkem_sk.clone(),
-    })
-}
-
 // ── Hybrid KEM ──
 
-#[uniffi::export]
+/// Encapsulate to the peer's hybrid public keys. NOTE (audit F10 follow-up):
+/// NOT a UniFFI export — `PqKemResponse` carries the raw `shared_secret`,
+/// which must never sit on the JVM heap. Crate-internal only; the Android
+/// companion uses `encapsulate_pq_secret_handle`.
 pub fn encapsulate_pq_secret(
     peer_x25519_pk: Vec<u8>,
     peer_mlkem_pk: Vec<u8>,
@@ -112,7 +107,11 @@ pub fn encapsulate_pq_secret(
     })
 }
 
-#[uniffi::export]
+/// Decapsulate a hybrid KEM ciphertext. NOTE (audit F10 follow-up): NOT a
+/// UniFFI export — it accepts raw private-key bytes from the caller and
+/// returns the raw shared secret. Crate-internal only (desktop pairing); the
+/// Android companion uses `decapsulate_pq_secret_handle`. The caller-owned sk
+/// buffers are zeroized after use.
 pub fn decapsulate_pq_secret(
     ciphertext: Vec<u8>,
     my_x25519_sk: Vec<u8>,
@@ -143,7 +142,9 @@ pub fn decapsulate_pq_secret(
 
 // ── Session Key Derivation ──
 
-#[uniffi::export]
+/// Derive the session key from the raw KEM shared secret. NOTE (audit F10
+/// follow-up): NOT a UniFFI export — raw secrets must not cross the boundary.
+/// Crate-internal only; the Android companion uses `derive_session_key_handle`.
 pub fn derive_session_key(shared_secret: Vec<u8>, salt: Vec<u8>) -> Result<Vec<u8>, KyberError> {
     ensure_panic_hook_installed();
     let derived = crypto::derive_session_key(&shared_secret, &salt, b"kyberpipe-hybrid-session")?;
@@ -184,6 +185,22 @@ pub fn session_key_destroy_all() {
     session_handle::session_key_destroy_all()
 }
 
+/// Pin a session key handle so the LRU cap can never silently evict it (audit
+/// finding #23). Returns false for an unknown handle. Pinned handles are still
+/// destroyed explicitly via `session_key_destroy`.
+#[uniffi::export]
+pub fn session_key_pin(handle: u64) -> bool {
+    ensure_panic_hook_installed();
+    session_handle::session_key_pin(handle)
+}
+
+/// Unpin a session key handle, returning it to the pool of evictable handles.
+#[uniffi::export]
+pub fn session_key_unpin(handle: u64) {
+    ensure_panic_hook_installed();
+    session_handle::session_key_unpin(handle)
+}
+
 #[uniffi::export]
 pub fn session_key_encrypt(handle: u64, data: Vec<u8>) -> Result<EncryptedPayload, KyberError> {
     ensure_panic_hook_installed();
@@ -207,11 +224,170 @@ pub fn session_key_hash(handle: u64) -> Result<String, KyberError> {
     session_handle::session_key_hash(handle)
 }
 
-// ── Deprecated Key-Byte API ──
+/// Verify a NIST ML-DSA-65 detached signature (audit F13). Exported so the
+/// Android companion can authenticate LAN beacon payloads at DISCOVERY time:
+/// the beacon embeds its own signing public key, and a self-consistent
+/// signature proves the sender owns that key (the phone then adopts the key
+/// during pairing). The signed region reconstructed by the caller MUST match
+/// exactly what the sender signed (`pk:ip:timestamp:nonce`).
+#[uniffi::export]
+pub fn verify_mldsa_signature(payload: Vec<u8>, signature: Vec<u8>, public_key: Vec<u8>) -> bool {
+    ensure_panic_hook_installed();
+    crate::crypto::verify_mldsa_signature(&payload, &signature, &public_key)
+}
+
+// ── Opaque Secret Handles (audit KYP-2026-02 #7) ──
+// Raw pairing private halves and KEM shared secrets NEVER cross the FFI
+// boundary. The Android app works exclusively with opaque handles; only public
+// keys, SAS strings and ciphertexts are returned.
+
+/// Generate a hybrid pairing keypair and return only an opaque handle. The
+/// private halves stay in Rust and are zeroized when the handle is destroyed.
+#[uniffi::export]
+pub fn generate_pq_keypair_handle() -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    kem_handle::generate_pq_keypair_handle_impl()
+}
+
+/// The PUBLIC halves of a handle-held keypair (for QR / pairing payloads).
+#[uniffi::export]
+pub fn get_pq_keypair_public(handle: u64) -> Result<PqPairingPublic, KyberError> {
+    ensure_panic_hook_installed();
+    kem_handle::get_pq_keypair_public_impl(handle)
+}
+
+/// Destroy a keypair handle, zeroizing the private halves.
+#[uniffi::export]
+pub fn destroy_pq_keypair_handle(handle: u64) -> bool {
+    ensure_panic_hook_installed();
+    kem_handle::destroy_pq_keypair_handle_impl(handle)
+}
+
+/// Destroy EVERY keypair handle (zeroizing all private halves) — self-destruct
+/// / unpair path.
+#[uniffi::export]
+pub fn destroy_all_pq_keypair_handles() {
+    ensure_panic_hook_installed();
+    kem_handle::destroy_all_pq_keypair_handles_impl();
+}
+
+/// Initialize a ratchet session using the keypair held behind `keypair_handle`
+/// as the initial DH identity.
+///
+/// AUDIT F10: this export is GONE. The previous signature took
+/// `master_shared_secret: Vec<u8>` — the caller had to receive and re-supply
+/// the KEM shared secret, which put the secret on the JVM heap and contradicted
+/// the documented "no secret bytes cross the FFI boundary" invariant of the
+/// handle architecture. The ONLY public entry is
+/// [`ratchet_init_session_from_kem_handle`] (handle → handle); the raw-param
+/// implementation lives crate-internal in `kem_handle` where the secret is
+/// looked up by handle and consumed without ever crossing the boundary.
+///
+/// Encapsulate to the peer's hybrid public keys. Returns an opaque handle to
+/// the derived KEM shared secret (kept in Rust) plus the PUBLIC ciphertext that
+/// is sent to the peer. The shared secret never crosses the FFI boundary.
+#[uniffi::export]
+pub fn encapsulate_pq_secret_handle(
+    peer_x25519_pk: Vec<u8>,
+    peer_mlkem_pk: Vec<u8>,
+) -> Result<PqKemHandleResponse, KyberError> {
+    ensure_panic_hook_installed();
+    let (handle, ciphertext) =
+        kem_handle::encapsulate_pq_secret_handle_impl(&peer_x25519_pk, &peer_mlkem_pk)?;
+    Ok(PqKemHandleResponse { handle, ciphertext })
+}
+
+/// Decapsulate a hybrid KEM ciphertext with the private halves held behind
+/// `keypair_handle`, returning an opaque handle to the recovered shared secret
+/// (kept in Rust, zeroized on destroy).
+#[uniffi::export]
+pub fn decapsulate_pq_secret_handle(
+    ciphertext: Vec<u8>,
+    keypair_handle: u64,
+) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    kem_handle::decapsulate_pq_secret_handle_impl(&ciphertext, keypair_handle)
+}
+
+/// Generate the pairing SAS from a handle-held KEM shared secret. Returns only
+/// the (public) SAS string.
+#[uniffi::export]
+pub fn generate_sas_code_with_kem_handle(
+    host_pk: Vec<u8>,
+    client_mlkem_pk: Vec<u8>,
+    kem_handle_id: u64,
+) -> Result<String, KyberError> {
+    ensure_panic_hook_installed();
+    kem_handle::generate_sas_code_with_kem_handle_impl(&host_pk, &client_mlkem_pk, kem_handle_id)
+}
+
+/// Derive the session key from a handle-held KEM shared secret and return an
+/// opaque SESSION KEY handle. The session key bytes never leave Rust.
+#[uniffi::export]
+pub fn derive_session_key_handle(kem_handle_id: u64) -> Result<u64, KyberError> {
+    ensure_panic_hook_installed();
+    kem_handle::derive_session_key_handle_impl(kem_handle_id)
+}
+
+/// Initialize a ratchet session entirely from opaque handles: the pairing
+/// keypair handle (our DH identity) and the KEM shared-secret handle (master
+/// secret). No secret bytes cross the FFI boundary.
+#[uniffi::export]
+pub fn ratchet_init_session_from_kem_handle(
+    peer_identity: String,
+    is_initiator: bool,
+    keypair_handle: u64,
+    kem_handle_id: u64,
+    peer_x25519_pk: Vec<u8>,
+    peer_mlkem_pk: Vec<u8>,
+) -> Result<String, KyberError> {
+    ensure_panic_hook_installed();
+    let x25519 = if peer_x25519_pk.is_empty() {
+        None
+    } else {
+        Some(peer_x25519_pk.as_slice())
+    };
+    let mlkem = if peer_mlkem_pk.is_empty() {
+        None
+    } else {
+        Some(peer_mlkem_pk.as_slice())
+    };
+    kem_handle::ratchet_init_session_from_kem_handle_impl(
+        &peer_identity,
+        is_initiator,
+        keypair_handle,
+        kem_handle_id,
+        x25519,
+        mlkem,
+    )?;
+    Ok("Session initialized".to_string())
+}
+
+/// Destroy a KEM shared-secret handle (zeroizing the secret).
+#[uniffi::export]
+pub fn destroy_kem_handle(kem_handle_id: u64) -> bool {
+    ensure_panic_hook_installed();
+    kem_handle::destroy_kem_handle_impl(kem_handle_id)
+}
+
+/// Destroy every KEM shared-secret handle.
+#[uniffi::export]
+pub fn destroy_all_kem_handles() {
+    ensure_panic_hook_installed();
+    kem_handle::destroy_all_kem_handles_impl();
+}
+
+// ── Raw-Key API (audit finding #27) ──
 // Use session_key_* with opaque handles instead.
 
+/// AUDIT FINDING #27: this is the ONLY raw-key-across-the-boundary surface in
+/// the library. It was originally misnamed `encrypt_payload_with_handle` —
+/// which implied handle semantics while actually accepting the raw 32-byte
+/// key. It is renamed to say exactly what it does, and the internal copy is
+/// zeroized on drop so no unzeroized duplicate lingers on the stack/heap.
+/// Every other key path goes through opaque handles.
 #[uniffi::export]
-pub fn encrypt_payload_with_handle(
+pub fn encrypt_with_raw_key_32(
     session_key: Vec<u8>,
     data: Vec<u8>,
 ) -> Result<EncryptedPayload, KyberError> {
@@ -222,7 +398,9 @@ pub fn encrypt_payload_with_handle(
             got: session_key.len() as u64,
         });
     }
-    let mut key_arr = [0u8; 32];
+    // Zeroizing: the key copy is wiped when it drops, so an error path (or a
+    // dropped EncryptedPayload) never leaves the key bytes in freed memory.
+    let mut key_arr: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
     key_arr.copy_from_slice(&session_key);
 
     // Fresh random 96-bit nonce. The previous scheme derived a deterministic
@@ -240,7 +418,7 @@ pub fn encrypt_payload_with_handle(
 }
 
 #[uniffi::export]
-pub fn decrypt_payload_with_handle(
+pub fn decrypt_with_raw_key_32(
     session_key: Vec<u8>,
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
@@ -252,7 +430,8 @@ pub fn decrypt_payload_with_handle(
             got: session_key.len() as u64,
         });
     }
-    let mut key_arr = [0u8; 32];
+    // Zeroizing: the key copy is wiped when it drops (audit finding #27).
+    let mut key_arr: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
     key_arr.copy_from_slice(&session_key);
 
     if nonce.len() != 12 {

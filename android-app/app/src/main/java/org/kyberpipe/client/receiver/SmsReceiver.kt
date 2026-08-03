@@ -50,20 +50,27 @@ class SmsReceiver : BroadcastReceiver() {
                 Log.d("KyberpipeSmsReceiver", "SMS packet created (${body.length} chars)")
 
                 // Forward the packet to the paired desktop over the encrypted
-                // QUIC stream (STREAM_SMS = 0x07), wrapped with the session key.
-                // All SMS forwarding is SERIALIZED through a single-thread
-                // executor — never a raw thread per SMS (audit finding #11: an
-                // SMS flood or dead peer previously spawned an unbounded
-                // thread/connection storm).
+                // QUIC stream (STREAM_SMS = 0x07), wrapped with the ratchet
+                // (binary TLV). The legacy session-key wire path is gone (audit
+                // F7/F17) — no raw key bytes ever touch this process. All SMS
+                // forwarding is SERIALIZED through a single-thread executor —
+                // never a raw thread per SMS (audit finding #11: an SMS flood
+                // or dead peer previously spawned an unbounded thread/connection
+                // storm).
                 val settings = org.kyberpipe.client.utils.SettingsManager(ctx)
+                val peer = settings.peerRatchetIdentity
                 // Forward only when paired AND the user has explicitly enabled
                 // SMS forwarding (audit finding #14 — opt-in, default OFF).
-                if (settings.isPaired && settings.smsForwardingEnabled) {
-                    val encrypted = org.kyberpipe.client.utils.SessionKeyManager.encrypt(jsonPacket)
-                    if (encrypted != null) {
-                        val payload = org.json.JSONObject().put("encrypted", org.json.JSONObject()
-                            .put("nonce_hex", encrypted.nonce.toHex())
-                            .put("ciphertext_hex", encrypted.ciphertext.toHex())
+                if (settings.isPaired && settings.smsForwardingEnabled && peer.isNotEmpty()) {
+                    val tlv = try {
+                        uniffi.core_crypto.ratchetEncryptMessageBinary(peer, jsonPacket.toByteArray())
+                    } catch (e: Exception) {
+                        Log.e("KyberpipeSmsReceiver", "Ratchet encrypt failed: ${e.message}")
+                        null
+                    }
+                    if (tlv != null) {
+                        val payload = org.json.JSONObject().put("encrypted_ratchet", org.json.JSONObject()
+                            .put("tlv_b64", android.util.Base64.encodeToString(tlv, android.util.Base64.NO_WRAP))
                         ).toString()
                         SmsForwarder.enqueue(ctx, payload)
                     }
@@ -262,6 +269,3 @@ object SmsForwarder {
 /// first digit 1-9, then 6-14 digits.
 internal fun isValidE164Number(recipient: String): Boolean =
     Regex("^\\+?[1-9][0-9]{6,14}$").matches(recipient)
-
-/** Byte array → lowercase hex. */
-private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

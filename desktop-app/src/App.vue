@@ -10,6 +10,9 @@ import { useNotifications } from "./composables/useNotifications";
 import { useFlatpak } from "./composables/useFlatpak";
 import { useAutomation } from "./composables/useAutomation";
 import { usePanic } from "./composables/usePanic";
+import { useClipboardHistory } from "./composables/useClipboardHistory";
+import { usePairingDialogs } from "./composables/usePairingDialogs";
+import { useBackgroundSync } from "./composables/useBackgroundSync";
 
 // Import Refactored Sub-Components
 import Sidebar from "./components/Sidebar.vue";
@@ -25,13 +28,6 @@ import { CheckCircle2, Loader2, XCircle, Terminal, ShieldAlert } from "@lucide/v
 interface KeyPair {
   x25519_pk_hex: string;
   mlkem_pk_hex: string;
-}
-
-interface ClipboardRecord {
-  id: string;
-  text: string;
-  source: "pc" | "phone";
-  timestamp: number;
 }
 
 // ── Composable imports (deps-free first) ────────────────────────────────
@@ -106,18 +102,11 @@ const pairingQrData = ref("");
 const pairingQrUrl = ref("");
 const showPairingQr = ref(false);
 const showManualIpDialog = ref(false);
-const showSasVerification = ref(false);
-const sasWords = ref(["", "", "", ""]);
-const sasCode = ref("");
 const localMethod = ref("");
 const remoteMethod = ref("");
 const localActive = ref(false);
 const remoteActive = ref(false);
 const localPriority = ref(true);
-
-// Clipboard state
-const lastSyncStatus = ref("");
-const clipboardItems = ref<ClipboardRecord[]>([]);
 
 // ── Local functions (needed by composable deps, defined BEFORE calls) ───
 
@@ -142,9 +131,17 @@ const handleGenerateKeyPair = async () => {
 const loadPairingConfig = async () => {
   if (!keyPair.value) return;
   try {
+    // AUDIT F9: `get_pairing_config` is token-gated (KYP-2026-02 #6
+    // hardening) — the renderer MUST mint a single-use token for this exact
+    // action and pass it through, or every call fails and the pairing config
+    // is silently dropped.
+    const token = await invoke<string>("request_privilege_token", {
+      action: "get_pairing_config",
+    });
     const config = await invoke<Record<string, unknown>>("get_pairing_config", {
       hostPkHex: keyPair.value.mlkem_pk_hex,
       wireguardPkHex: keyPair.value.x25519_pk_hex,
+      token,
     });
     pairingConfigJson.value = JSON.stringify(config);
     await refreshLogs();
@@ -180,6 +177,20 @@ const handleDeleteConnection = async () => {
 
 // ── Composable imports (with deps) ──────────────────────────────────────
 
+// SAS pairing dialog state + backend pairing event listeners (F21: replaces
+// the old 1.5 s SAS poller with pairing::sas-ready/complete/timeout events).
+const {
+  showSasVerification, sasCode, sasInput,
+  pollPairingStatus, startSasListeners, stopSasListeners,
+} = usePairingDialogs({ isPaired, checkConnectionState });
+
+// Clipboard history: gesture-gated read (F6-renderer) + record helpers (F21).
+const {
+  clipboardItems, lastSyncStatus,
+  startClipboardSync, stopClipboardSync,
+  addRecord, copyToClipboard, removeRecord, updateRecord,
+} = useClipboardHistory({ onSynced: refreshLogs });
+
 const {
   flightRecorderEnabled, neuralAnomalyEnabled,
   handleToggleFlightRecorder, handleToggleNeuralAnomaly
@@ -203,7 +214,6 @@ const pairingDeps = {
   showPairingQr,
   showManualIpDialog,
   showSasVerification,
-  sasWords,
   sasCode,
   isConnected,
   connectionStatus,
@@ -226,7 +236,6 @@ const {
   submitManualPairing,
   confirmSas,
   rejectSas,
-  pollPairingStatus,
   checkFirewall,
   requestFirewallOpen,
   handleFixFirewall,
@@ -234,9 +243,6 @@ const {
   firewallBusy,
   firewallResult,
 } = usePairing(pairingDeps);
-
-// SAS code the user types from the phone's display (audit finding #7).
-const sasInput = ref("");
 
 const {
   mediaState, currentLatency, latencyColor,
@@ -259,83 +265,24 @@ const { currentLux, scriptResult, handleRunScript } = useAutomation(refreshLogs)
 
 const { triggerSelfDestruct } = usePanic(refreshLogs, checkConnectionState);
 
-// ── Clipboard polling + handlers ────────────────────────────────────────
+// Background reconciliation poller — the single 2 s settings tick (F21).
+const {
+  startBackgroundSync, stopBackgroundSync,
+} = useBackgroundSync({
+  isPaired,
+  deviceName,
+  devicePicture,
+  pairedDeviceName,
+  pairedDevicePicture,
+  isConnected,
+  triggerConnectionAttempt,
+  fetchMediaState,
+  pollPairingStatus,
+  showSasVerification,
+});
 
-const pollClipboard = async () => {
-  try {
-    const text = await invoke<string>("read_real_clipboard");
-    if (text && text.trim() !== "") {
-      const exists = clipboardItems.value.some(item => item.text === text);
-      if (!exists) {
-        const newRecord: ClipboardRecord = {
-          id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-          text: text,
-          source: "pc",
-          timestamp: Date.now()
-        };
-        clipboardItems.value.unshift(newRecord);
-        await invoke("sync_clipboard", { text });
-      }
-    }
-  } catch (e) {
-    // Ignore clipboard read errors (e.g. empty or binary content)
-  }
-};
-
-const handleAddClipboard = async (text: string) => {
-  const newRecord: ClipboardRecord = {
-    id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-    text: text,
-    source: "pc",
-    timestamp: Date.now()
-  };
-  clipboardItems.value.unshift(newRecord);
-  try {
-    await invoke("write_real_clipboard", { text });
-    await invoke("sync_clipboard", { text });
-    lastSyncStatus.value = "Synced item locally & pushed remote";
-    await refreshLogs();
-  } catch (e) {
-    lastSyncStatus.value = "Sync warning: " + e;
-  }
-};
-
-const handleCopyClipboard = async (text: string) => {
-  try {
-    await invoke("write_real_clipboard", { text });
-    lastSyncStatus.value = "Copied to desktop clipboard";
-  } catch (e) {
-    lastSyncStatus.value = "Copy failed: " + e;
-  }
-};
-
-const handleRemoveClipboard = (id: string) => {
-  clipboardItems.value = clipboardItems.value.filter(item => item.id !== id);
-  lastSyncStatus.value = "Item removed";
-};
-
-const handleSaveEditClipboard = async (payload: { id: string; text: string }) => {
-  const idx = clipboardItems.value.findIndex(item => item.id === payload.id);
-  if (idx !== -1) {
-    clipboardItems.value[idx].text = payload.text;
-    try {
-      await invoke("write_real_clipboard", { text: payload.text });
-      await invoke("sync_clipboard", { text: payload.text });
-      lastSyncStatus.value = "Updated and synced item";
-      await refreshLogs();
-    } catch (e) {
-      lastSyncStatus.value = "Update warning: " + e;
-    }
-  }
-};
-
-// Poller handles
-let clipPoller: ReturnType<typeof setInterval> | null = null;
-let customPoller: ReturnType<typeof setInterval> | null = null;
-let sasPoller: ReturnType<typeof setInterval> | null = null;
-let unlistenSasReady: (() => void) | null = null;
-let unlistenPairingComplete: (() => void) | null = null;
-let unlistenPairingTimeout: (() => void) | null = null;
+// Latency reset for the top-bar display.
+let latencyPoller: ReturnType<typeof setInterval> | null = null;
 
 // ── Lifecycle hooks ─────────────────────────────────────────────────────
 
@@ -354,7 +301,7 @@ onMounted(async () => {
   checkFirewall(); // Silent check, modal shows on connection failure
 
   // Latency for top-bar display
-  setInterval(() => {
+  latencyPoller = setInterval(() => {
     currentLatency.value = 0;
   }, 2000);
 
@@ -372,67 +319,23 @@ onMounted(async () => {
     console.error("mDNS registration failed:", e);
   }
 
-  // Real clipboard poller (1.5s interval)
-  clipPoller = setInterval(pollClipboard, 1500);
+  // Clipboard polling is gesture-driven (F6-renderer): read_real_clipboard
+  // requires a user-gesture privilege token, so no raw 1.5 s timer runs.
+  startClipboardSync();
 
-  // Custom poller for settings refresh + media state + auto-retry
-  // (connection status polling is handled independently by useConnectionPolling)
-  customPoller = setInterval(async () => {
-    try {
-      const settings = await invoke<Record<string, unknown>>("get_settings");
-      isPaired.value = (settings.is_paired as boolean) || false;
-      deviceName.value = (settings.device_name as string) || "Linux Workstation";
-      devicePicture.value = (settings.device_picture as string) || "";
-      pairedDeviceName.value = (settings.paired_device_name as string) || "";
-      pairedDevicePicture.value = (settings.paired_device_picture as string) || "";
+  // Single settings/status reconciliation poller (2 s).
+  startBackgroundSync();
 
-      if (isPaired.value && !isConnected.value) {
-        triggerConnectionAttempt();
-      }
-
-      await fetchMediaState();
-
-      // Reconcile pairing state against the BACKEND (audit finding #7): the
-      // old flow only trusted local state, which drifted from the backend.
-      if (showSasVerification.value) {
-        pollPairingStatus();
-      }
-    } catch (e) {
-      console.error("Poll status error:", e);
-    }
-  }, 2000);
-
-  // Pairing SAS polling: surface the modal when the backend enters
-  // PAIRING_PENDING_SAS (audit finding #7 — the modal was previously dead
-  // code because nothing ever populated it).
-  sasPoller = setInterval(async () => {
-    await pollPairingStatus();
-  }, 1500);
-
-  // Listen for backend pairing events pushed from Rust (sas-ready / complete /
-  // timeout) so the UI cannot drift from backend state (audit finding #13).
-  const { listen } = await import("@tauri-apps/api/event");
-  unlistenSasReady = await listen("pairing::sas-ready", () => {
-    pollPairingStatus();
-  });
-  unlistenPairingComplete = await listen("pairing::complete", () => {
-    showSasVerification.value = false;
-    isPaired.value = true;
-    checkConnectionState();
-  });
-  unlistenPairingTimeout = await listen("pairing::timeout", () => {
-    showSasVerification.value = false;
-    sasInput.value = "";
-  });
+  // SAS pairing state arrives via backend events (pairing::sas-ready /
+  // pairing::complete / pairing::timeout) — no separate SAS poller (F21).
+  await startSasListeners();
 });
 
 onUnmounted(() => {
-  if (clipPoller) clearInterval(clipPoller);
-  if (customPoller) clearInterval(customPoller);
-  if (sasPoller) clearInterval(sasPoller);
-  if (unlistenSasReady) unlistenSasReady();
-  if (unlistenPairingComplete) unlistenPairingComplete();
-  if (unlistenPairingTimeout) unlistenPairingTimeout();
+  stopClipboardSync();
+  stopBackgroundSync();
+  stopSasListeners();
+  if (latencyPoller) clearInterval(latencyPoller);
 });
 </script>
 
@@ -527,10 +430,10 @@ onUnmounted(() => {
             :clipboardItems="clipboardItems" 
             :lastSyncStatus="lastSyncStatus"
             :isConnected="isConnected"
-            @add="handleAddClipboard"
-            @copy="handleCopyClipboard"
-            @remove="handleRemoveClipboard"
-            @saveEdit="handleSaveEditClipboard"
+            @add="addRecord"
+            @copy="copyToClipboard"
+            @remove="removeRecord"
+            @saveEdit="updateRecord"
             @connectDevice="currentTab = 'dashboard'"
           />
 

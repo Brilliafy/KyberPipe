@@ -32,7 +32,7 @@ mod tests {
     fn test_quic_server_client_configs() {
         let (certs, key) = generate_self_signed_cert().unwrap();
         assert!(!certs.is_empty());
-        let server_config = configure_quic_server(certs, key, false, None);
+        let server_config = configure_quic_server(certs, key, false, vec![]);
         assert!(server_config.is_ok());
 
         let client_config = configure_quic_client(None);

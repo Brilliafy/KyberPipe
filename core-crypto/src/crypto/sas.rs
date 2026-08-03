@@ -26,25 +26,49 @@ pub fn generate_sas_code(
         .map_err(|e| KyberError::CryptoError(e.to_string()))?;
 
     let charset = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars (no I, O, 0, 1)
-    let mut code = String::with_capacity(7);
-    // Extract 5 bits per character using the full HKDF output.
-    // Each byte provides one character (upper 5 bits) with carry to the next.
+                                                       // Audit finding F17: extract exactly `CODE_LEN` contiguous 5-bit windows
+                                                       // from the big-endian OKM bit stream (MSB-first), never fewer, never more.
+                                                       // The previous implementation had a second loop that subtracted 5 from
+                                                       // `bits_in_accum` while it was still 1–4 bits and then shifted `accum` by
+                                                       // the resulting NEGATIVE amount — a shift-overflow panic in debug builds
+                                                       // and masked/garbage index arithmetic in release. It was unreachable only
+                                                       // because 7 bytes * 8 = 56 bits happened to exhaust the code length before
+                                                       // the remainder hit 1–4 bits; ANY future change to the byte count, charset
+                                                       // size, or code length would activate it.
+                                                       //
+                                                       // The rolling window below is the original algorithm minus the bug: `accum`
+                                                       // is a shift register whose TOP `bits_in_accum` bits are the unconsumed
+                                                       // stream, bytes are topped up when fewer than 5 valid bits remain, and each
+                                                       // extraction is guarded by an explicit `>= 5` assertion so the shift can
+                                                       // never go negative. At most 8+4 = 12 bits are ever buffered, so `u64` is
+                                                       // always sufficient regardless of `okm.len()`.
+    const CODE_LEN: usize = 7;
+    let mut code = String::with_capacity(CODE_LEN);
     let mut accum: u64 = 0;
-    let mut bits_in_accum = 0;
-    for &byte in okm.iter() {
-        accum = (accum << 8) | byte as u64;
-        bits_in_accum += 8;
-        while bits_in_accum >= 5 && code.len() < 7 {
-            bits_in_accum -= 5;
-            let idx = ((accum >> bits_in_accum) & 0x1F) as usize;
-            code.push(charset[idx] as char);
+    let mut bits_in_accum: u32 = 0;
+    let mut byte_idx = 0usize;
+    for _ in 0..CODE_LEN {
+        while bits_in_accum < 5 {
+            // Top up with the next OKM byte. If the stream is exhausted but
+            // fewer than 5 bits remain, the last window is zero-padded (same
+            // effective value as the original's dead remainder loop, which
+            // could never run with these constants).
+            if byte_idx < okm.len() {
+                accum = (accum << 8) | okm[byte_idx] as u64;
+                byte_idx += 1;
+                bits_in_accum += 8;
+            } else {
+                // Zero-pad: shift the (depleted) register and keep the count
+                // at 5 so the guard below is satisfied deterministically.
+                accum <<= 8;
+                bits_in_accum += 8;
+            }
         }
-    }
-    // Consume any remaining bits
-    while bits_in_accum > 0 && code.len() < 7 {
-        bits_in_accum -= 5;
-        let idx = ((accum >> bits_in_accum) & 0x1F) as usize;
+        debug_assert!(bits_in_accum >= 5, "window must never go negative");
+        let shift = bits_in_accum - 5;
+        let idx = ((accum >> shift) & 0x1F) as usize;
         code.push(charset[idx] as char);
+        bits_in_accum -= 5;
     }
 
     Ok(code)

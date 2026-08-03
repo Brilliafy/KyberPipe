@@ -1,35 +1,20 @@
 use crate::state::AppState;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::DESKTOP_SESSION_KEY_HANDLE;
+use super::decrypt_json_payload;
 
-pub(crate) async fn handle_media(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
-    let body_str = String::from_utf8_lossy(&body);
-    let decrypted = serde_json::from_str::<serde_json::Value>(&body_str)
-        .ok()
-        .and_then(|json| {
-            let encrypted = json.get("encrypted").and_then(|e| {
-                let nonce = e.get("nonce_hex").and_then(|v| v.as_str())?;
-                let ct = e.get("ciphertext_hex").and_then(|v| v.as_str())?;
-                Some((nonce.to_string(), ct.to_string()))
-            })?;
-            if !super::IS_SESSION_KEY_AUTHENTICATED.load(Ordering::Acquire) {
-                return None;
-            }
-            let handle = DESKTOP_SESSION_KEY_HANDLE.load(Ordering::Acquire);
-            if handle == 0 {
-                return None;
-            }
-            core_crypto::session_key_decrypt(
-                handle,
-                hex::decode(&encrypted.0).unwrap_or_default(),
-                hex::decode(&encrypted.1).unwrap_or_default(),
-            )
-            .ok()
-        })
-        .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok());
-    if let Some(json) = decrypted {
+/// Handle a media-state packet forwarded from the Android client over QUIC.
+///
+/// AUDIT F8 (CRITICAL): the body is the SHARED ratchet-TLV wire format
+/// `{"encrypted_ratchet": {"tlv_b64": ...}}` — exactly what the Android
+/// `NotificationHook` produces via `ratchetEncryptMessageBinary`. The legacy
+/// session-key hex format (`encrypted.nonce_hex` / `encrypted.ciphertext_hex`)
+/// is DELETED: no sender produces it, and the drift silently dropped every
+/// forwarded media update. Decryption goes through the same
+/// [`decrypt_json_payload`] helper as clipboard/SMS.
+pub(crate) async fn handle_media(body: Vec<u8>, peer_id: String, s: Arc<AppState>) -> Vec<u8> {
+    let decrypted = decrypt_json_payload(&body, &peer_id);
+    if let Some(json) = decrypted.and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok()) {
         let title = json
             .get("title")
             .and_then(|v| v.as_str())
@@ -74,6 +59,13 @@ pub(crate) async fn handle_media(body: Vec<u8>, s: Arc<AppState>) -> Vec<u8> {
             is_playing,
             actions,
         });
+    } else if !body.is_empty() {
+        tracing::warn!(
+            "[Media] Non-empty body could not be decrypted as a ratchet-TLV media packet"
+        );
+        return r#"{"status":"error","reason":"Decryption failed"}"#
+            .to_string()
+            .into_bytes();
     }
     r#"{"status":"synced"}"#.to_string().into_bytes()
 }

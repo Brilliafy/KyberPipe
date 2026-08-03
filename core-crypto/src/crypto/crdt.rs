@@ -40,11 +40,7 @@ impl<T: Clone> LwwRegisterCRDT<T> {
             tracing::warn!("CRDT merge rejected: u64::MAX timestamp (time-warp poisoning)");
             return false;
         }
-        let drift = if incoming.timestamp >= local_now {
-            incoming.timestamp - local_now
-        } else {
-            local_now - incoming.timestamp
-        };
+        let drift = incoming.timestamp.abs_diff(local_now);
         if drift > MAX_CLOCK_DRIFT_MS {
             tracing::warn!(
                 "CRDT merge rejected: drift {} ms exceeds {} ms",

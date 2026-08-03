@@ -24,15 +24,19 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.kyberpipe.client.utils.SettingsManager
-import uniffi.core_crypto.PqKeyPair
+import uniffi.core_crypto.PqPairingPublic
 import java.io.ByteArrayOutputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsTab(
     settings: SettingsManager,
-    keyPair: PqKeyPair?,
+    keyPairHandle: ULong?,
     pairingConfigInput: String,
     onPairingConfigChange: (String) -> Unit,
     onTriggerHandshake: () -> Unit,
@@ -57,6 +61,26 @@ fun SettingsTab(
     var ddnsEnabled by remember { mutableStateOf(settings.enableDdns) }
     var themeState by remember { mutableStateOf(settings.themeMode) }
     var amoledState by remember { mutableStateOf(settings.amoledMode) }
+
+    // Audit finding F7: only the PUBLIC halves of the pairing keypair are shown
+    // here, fetched from the Rust handle off the Main thread (audit F9).
+    var keyPairPublic by remember { mutableStateOf<PqPairingPublic?>(null) }
+    LaunchedEffect(keyPairHandle) {
+        keyPairPublic = if (keyPairHandle != null) {
+            withContext(Dispatchers.IO) {
+                try {
+                    uniffi.core_crypto.getPqKeypairPublic(keyPairHandle!!)
+                } catch (e: Exception) {
+                    Log.e("KyberpipeSettings", "getPqKeypairPublic failed: ${e.message}")
+                    null
+                }
+            }
+        } else {
+            null
+        }
+    }
+    val context = LocalContext.current
+    val unpairScope = rememberCoroutineScope()
 
     val colors = MaterialTheme.colorScheme
 
@@ -419,15 +443,23 @@ fun SettingsTab(
                         ) {
                             Button(
                                 onClick = {
-                                    val hostIp = settings.pairedHostIp
-                                    if (hostIp.isNotEmpty()) {
-                                        try {
-                                            uniffi.core_crypto.quicSendAndRecv(0x05.toUByte(), "{}")
-                                        } catch (e: Exception) {
-                                            Log.e("KyberpipeSettings", "QUIC unpair failed: ${e.message}")
+                                    // Audit finding F9: the unpair QUIC call is
+                                    // block_on_sync — run it off the Main thread.
+                                    unpairScope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            val hostIp = settings.pairedHostIp
+                                            if (hostIp.isNotEmpty()) {
+                                                try {
+                                                    uniffi.core_crypto.quicSendAndRecv(0x05.toUByte(), "{}")
+                                                } catch (e: Exception) {
+                                                    Log.e("KyberpipeSettings", "QUIC unpair failed: ${e.message}")
+                                                }
+                                            }
                                         }
+                                        // Audit finding F7: release every Rust-side
+                                        // pairing handle (keypair, KEM, session key).
+                                        org.kyberpipe.client.PairingManager.destroyPairingHandles(context)
                                     }
-
                                     settings.isPaired = false
                                     settings.pairedDeviceName = ""
                                     onPairingConfigChange("")
@@ -548,8 +580,9 @@ fun SettingsTab(
             }
         }
 
-        // Cryptographic keys vault display card
-        keyPair?.let { pair ->
+        // Cryptographic keys vault display card — public halves only, fetched
+        // from the Rust keypair handle (audit finding F7).
+        keyPairPublic?.let { pub ->
             Card(
                 colors = CardDefaults.cardColors(containerColor = colors.surface),
                 shape = RoundedCornerShape(16.dp),
@@ -565,7 +598,7 @@ fun SettingsTab(
                     Spacer(modifier = Modifier.height(10.dp))
                     Text("NIST ML-KEM-768 PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
-                        text = pair.mlkemPk.joinToString("") { "%02x".format(it) }.take(48) + "...",
+                        text = pub.mlkemPkHex.take(48) + "...",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFC084FC)
@@ -573,7 +606,7 @@ fun SettingsTab(
                     Spacer(modifier = Modifier.height(10.dp))
                     Text("X25519 Ephemeral PK (Hex):", fontSize = 11.sp, color = colors.onSurface.copy(alpha = 0.6f))
                     Text(
-                        text = pair.x25519Pk.joinToString("") { "%02x".format(it) }.take(48) + "...",
+                        text = pub.x25519PkHex.take(48) + "...",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFC084FC)

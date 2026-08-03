@@ -1,0 +1,178 @@
+//! Synchronize recovery protocol (audit KYP-2026-02 #22 — extracted from the
+//! former `ratchet_ffi.rs` monolith): authenticated resync, per-peer rate
+//! limiting, and the send/recv counter accessors.
+
+use super::registry::with_ratchet_session;
+use crate::crypto;
+use crate::error::KyberError;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+const SYNC_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+static LAST_SYNC_AT: std::sync::LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// NOTE (audit F2): the raw-number `ratchet_synchronize_session_impl` entry was
+// DELETED. Every resync must go through `ratchet_process_synchronize_impl`,
+// which authenticates the Synchronize packet (AEAD) before advancing the
+// receive chain. A raw `target_seq` export bypassed the generation gate and
+// let an unauthenticated caller jump the receive chain by up to SYNC_MAX_GAP,
+// permanently discarding skip keys for in-flight messages.
+
+pub fn ratchet_synchronize_packet_impl(
+    peer_identity: &str,
+) -> Result<crypto::RatchetEncryptedMessage, KyberError> {
+    with_ratchet_session(peer_identity, |ratchet| {
+        let msg = crate::packets::KyberMessage::Synchronize {
+            send_count: ratchet.send.message_count,
+        };
+        ratchet.ratchet_encrypt(msg.to_json()?.as_bytes())
+    })
+}
+
+pub fn ratchet_synchronize_packet_binary_impl(peer_identity: &str) -> Result<Vec<u8>, KyberError> {
+    ratchet_synchronize_packet_impl(peer_identity)?.to_binary()
+}
+
+pub fn ratchet_process_synchronize_impl(
+    peer_identity: &str,
+    data: &[u8],
+) -> Result<u64, KyberError> {
+    let msg = crate::crypto::RatchetEncryptedMessage::from_binary(data)?;
+    if msg.nonce.len() != 12 {
+        return Err(KyberError::DecryptionFailed(
+            "Nonce must be 12 bytes".into(),
+        ));
+    }
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(&msg.nonce);
+    // The sync message's chain position (the sender's send-space seq) is
+    // encoded in the nonce — this is the authenticated resync target.
+    let sync_gen = u32::from_be_bytes([nonce_arr[0], nonce_arr[1], nonce_arr[2], nonce_arr[3]]);
+    let sync_seq = u64::from_be_bytes([
+        nonce_arr[4],
+        nonce_arr[5],
+        nonce_arr[6],
+        nonce_arr[7],
+        nonce_arr[8],
+        nonce_arr[9],
+        nonce_arr[10],
+        nonce_arr[11],
+    ]);
+
+    // Rate-limit CHECK per peer BEFORE touching the session (audit finding #4),
+    // but the budget is STAMPED only after the Synchronize is AUTHENTICATED
+    // (audit KYP-2026-02 #20): the AEAD verification below is the only proof
+    // this is a legitimate peer, so a garbage/injected payload must not consume
+    // the resync budget for the real peer.
+    {
+        let last = LAST_SYNC_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = last.get(peer_identity) {
+            if at.elapsed() < SYNC_RATE_WINDOW {
+                return Err(KyberError::CryptoError(format!(
+                    "Synchronize rate-limited for peer {peer_identity} — retry in {}s",
+                    SYNC_RATE_WINDOW.as_secs()
+                )));
+            }
+        }
+    }
+
+    let result = with_ratchet_session(peer_identity, |ratchet| {
+        // Shared rekey-aware decrypt for the live state or the trial clone.
+        let do_decrypt =
+            |r: &mut crate::crypto::DoubleRatchetState| -> Result<Vec<u8>, KyberError> {
+                if msg.rekey_x25519_pk.is_some()
+                    || msg.rekey_mlkem_pk.is_some()
+                    || msg.rekey_ciphertext.is_some()
+                {
+                    let rekey_x = msg
+                        .rekey_x25519_pk
+                        .as_deref()
+                        .map(|s| {
+                            <[u8; 32]>::try_from(s).map_err(|_| KyberError::InvalidKeyLength {
+                                expected: 32,
+                                got: s.len() as u64,
+                            })
+                        })
+                        .transpose()?;
+                    r.ratchet_decrypt_with_rekey(
+                        &nonce_arr,
+                        &msg.ciphertext,
+                        msg.rekey_ciphertext.as_deref(),
+                        rekey_x.as_ref(),
+                        msg.rekey_mlkem_pk.as_deref(),
+                    )
+                } else {
+                    r.ratchet_decrypt(&nonce_arr, &msg.ciphertext)
+                }
+            };
+        // Verify the decrypted payload is a Synchronize packet whose send_count
+        // matches the nonce position (a mismatched packet is a protocol error).
+        let verify = |plaintext: &[u8]| -> Result<(), KyberError> {
+            let packet =
+                crate::packets::KyberMessage::from_json(&String::from_utf8_lossy(plaintext))
+                    .map_err(|_| {
+                        KyberError::CryptoError(
+                            "Decrypted Synchronize payload is not a valid packet".into(),
+                        )
+                    })?;
+            let crate::packets::KyberMessage::Synchronize { send_count } = packet else {
+                return Err(KyberError::CryptoError(
+                    "Decrypted payload is not a Synchronize packet".into(),
+                ));
+            };
+            if send_count != sync_seq {
+                return Err(KyberError::CryptoError(format!(
+                    "Synchronize send_count {send_count} does not match nonce position {sync_seq}"
+                )));
+            }
+            Ok(())
+        };
+
+        let cur = ratchet.recv.message_count;
+        let gap = seq_gap(cur, sync_seq);
+        if sync_gen == ratchet.ratchet_generation && gap > ratchet.max_skip as u64 {
+            // Real handoff gap beyond max_skip: position the chain at the sync
+            // message's seq on a CLONE (bounded by SYNC_MAX_GAP + cumulative
+            // budget + pending-rekey refusal inside resync_receiving_chain),
+            // then decrypt. Only an AEAD-verified Synchronize commits the
+            // clone — the recovery path is gated entirely on authentication.
+            let mut trial = ratchet.clone();
+            let skipped = trial.resync_receiving_chain(sync_seq)?;
+            let plaintext = do_decrypt(&mut trial)?;
+            verify(&plaintext)?;
+            *ratchet = trial;
+            Ok(skipped)
+        } else {
+            // Within max_skip (or cross-generation): the normal decrypt path
+            // positions the chain; no additional resync is needed. A stale
+            // target (already aligned) is simply a no-op.
+            let plaintext = do_decrypt(ratchet)?;
+            verify(&plaintext)?;
+            Ok(0)
+        }
+    });
+    // Audit KYP-2026-02 #20: stamp the rate-limit budget ONLY after the
+    // Synchronize authenticated (AEAD verified + packet type verified). An
+    // unauthenticated payload must not consume the per-peer resync budget.
+    if result.is_ok() {
+        LAST_SYNC_AT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer_identity.to_string(), std::time::Instant::now());
+    }
+    result
+}
+
+pub fn ratchet_recv_count_impl(peer_identity: &str) -> Result<u64, KyberError> {
+    with_ratchet_session(peer_identity, |ratchet| Ok(ratchet.recv.message_count))
+}
+
+pub fn ratchet_send_count_impl(peer_identity: &str) -> Result<u64, KyberError> {
+    with_ratchet_session(peer_identity, |ratchet| Ok(ratchet.send.message_count))
+}
+
+fn seq_gap(cur: u64, target: u64) -> u64 {
+    target.saturating_sub(cur)
+}

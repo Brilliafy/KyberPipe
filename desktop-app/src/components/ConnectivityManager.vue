@@ -32,10 +32,16 @@ const localMethods = [
   { id: "manual_ip", label: "Manual IP / DDNS", icon: "🌐", desc: "Enter IP or hostname manually. SAS verification." }
 ];
 
-const externalMethods = [
-  { id: "wormhole", label: "Magic Wormhole", icon: "🐛", desc: "Relay-based WAN pairing. 3-word code + PQC key in QR." },
+const externalMethods: Array<{ id: string; label: string; icon: string; desc: string; unavailable?: boolean }> = [
+  { id: "wormhole", label: "Magic Wormhole", icon: "🐛", desc: "Relay-based WAN pairing. 3-word code + PQC key in QR.", unavailable: true },
   { id: "tor", label: "Tor Onion (arti)", icon: "🧅", desc: "Ephemeral .onion service. Zero-trust, no MITM." }
 ];
+
+// Honest "unavailable" notice (audit finding KYP-2026-02, F6): the backend
+// no longer provides generate_wormhole_code (typed FeatureUnavailable), so the
+// option is disabled and selecting it surfaces the real state instead of
+// pretending success.
+const externalNotice = ref("");
 
 const handleLocalSelect = (method: string) => {
   selectedMethod.value = method;
@@ -44,6 +50,12 @@ const handleLocalSelect = (method: string) => {
 };
 
 const handleExternalSelect = (method: string) => {
+  const option = externalMethods.find((m) => m.id === method);
+  if (option?.unavailable) {
+    externalNotice.value = "Magic Wormhole is unavailable in this build. Choose Tor Onion or a local pairing method.";
+    return;
+  }
+  externalNotice.value = "";
   selectedMethod.value = method;
   showPairModal.value = false;
   emit("pairExternally", method);
@@ -213,6 +225,7 @@ const handleExternalSelect = (method: string) => {
           <div
             v-for="m in externalMethods" :key="m.id"
             class="method-option"
+            :class="{ 'unavailable': m.unavailable }"
             @click="handleExternalSelect(m.id)"
           >
             <span class="method-icon">{{ m.icon }}</span>
@@ -221,6 +234,7 @@ const handleExternalSelect = (method: string) => {
               <p class="card-desc">{{ m.desc }}</p>
             </div>
           </div>
+          <p v-if="externalNotice" class="external-notice">{{ externalNotice }}</p>
           <button class="btn btn-secondary btn-sm" style="margin-top: 0.75rem;" @click="showExternalOptions = false">Back</button>
         </div>
 
@@ -292,6 +306,9 @@ const handleExternalSelect = (method: string) => {
   transition: all 0.2s ease;
 }
 .method-option:hover { border-color: var(--accent-cyan); background: rgba(6,182,212,0.05); }
+.method-option.unavailable { opacity: 0.55; cursor: not-allowed; }
+.method-option.unavailable:hover { border-color: var(--border-color); background: var(--bg-dark); }
+.external-notice { margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.35); border-radius: 8px; color: #f87171; font-size: 0.8rem; }
 .method-icon { font-size: 1.5rem; }
 
 .modal-overlay {

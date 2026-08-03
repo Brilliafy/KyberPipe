@@ -128,10 +128,13 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
     }
 }
 
+/// AUDIT F22: the `is_sandboxed` flag is GONE — both branches previously ran
+/// `run_boa_sandboxed_script` (the flag was ignored), so the command now has a
+/// single, always-enforced sandboxed path. The UI toggle that sent it is
+/// removed with it (see useAutomation.ts).
 #[tauri::command]
 pub async fn execute_boa_script(
     script_code: String,
-    is_sandboxed: bool,
     lux: f64,
     feed_source_command: String,
     token: String,
@@ -153,25 +156,15 @@ pub async fn execute_boa_script(
         state.add_log(format!("[Automation] Resolved feed data: {}", feed_value));
     }
 
-    if is_sandboxed {
-        state.add_log(format!("[Sandbox] Running Boa script (lux = {lux})"));
-        let res = run_boa_sandboxed_script(&script_code, lux, &feed_value);
-        state.add_log(format!(
-            "[Sandbox] Result: success={}, output={}",
-            res.success, res.output
-        ));
-        Ok(res)
-    } else {
-        state.add_log(format!(
-            "[Sandbox-Enforced] Running Boa script (lux = {lux})"
-        ));
-        let res = run_boa_sandboxed_script(&script_code, lux, &feed_value);
-        state.add_log(format!(
-            "[Sandbox-Enforced] Result: success={}, output={}",
-            res.success, res.output
-        ));
-        Ok(res)
-    }
+    state.add_log(format!(
+        "[Sandbox-Enforced] Running Boa script (lux = {lux})"
+    ));
+    let res = run_boa_sandboxed_script(&script_code, lux, &feed_value);
+    state.add_log(format!(
+        "[Sandbox-Enforced] Result: success={}, output={}",
+        res.success, res.output
+    ));
+    Ok(res)
 }
 
 #[tauri::command]
@@ -187,7 +180,7 @@ pub fn execute_fallback_script(
     // Resolve against the SINGLE shared allowlist (audit finding #19). The
     // resolved value is the same relative key `run_fallback_subprocess` uses,
     // so the command layer and the executor can never disagree.
-    let allowed_path = resolve_allowed_fallback_script(&script_path).map_err(|e| e)?;
+    let allowed_path = resolve_allowed_fallback_script(&script_path)?;
     state.add_log(format!(
         "[Subprocess] Executing fallback script: {allowed_path} (lux = {lux})"
     ));
