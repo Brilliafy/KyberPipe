@@ -29,6 +29,15 @@ pub enum KyberError {
     #[error("[SESSION_DESYNC] {0}")]
     SessionDesynchronized(String),
 
+    /// AUDIT #3: a Synchronize packet from a HIGHER ratchet generation could
+    /// not be applied because the rekey carrier that would derive the pending
+    /// proposal was missed (the handoff dropped it). This is NOT a benign
+    /// no-op — the session cannot silently resync across the generation
+    /// boundary and the poll layer must escalate to a re-pair hint instead of
+    /// retrying forever against the 15s sync rate limit.
+    #[error("[CROSS_GENERATION_RESYNC_REQUIRED] {0}")]
+    CrossGenerationResyncRequired(String),
+
     #[error("[INVALID_KEY_LENGTH] expected {expected}, got {got}")]
     InvalidKeyLength { expected: u64, got: u64 },
 }
@@ -47,6 +56,7 @@ impl KyberError {
             KyberError::SerializationError(_) => "SERIALIZATION_ERROR",
             KyberError::NetworkError(_) => "NETWORK_ERROR",
             KyberError::SessionDesynchronized(_) => "SESSION_DESYNC",
+            KyberError::CrossGenerationResyncRequired(_) => "CROSS_GENERATION_RESYNC_REQUIRED",
             KyberError::InvalidKeyLength { .. } => "INVALID_KEY_LENGTH",
         }
     }

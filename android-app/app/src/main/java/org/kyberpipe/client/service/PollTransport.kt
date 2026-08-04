@@ -177,14 +177,33 @@ class PollTransport(
                 "sync" -> {
                     // The desktop's authenticated Synchronize packet keeps our
                     // receiving chain aligned; processed even when the clip
-                    // decrypted fine (audit #4).
+                    // decrypted fine (audit #4). AUDIT #4: this is the ONLY
+                    // consumer of the sync packet — `decryptClip` no longer
+                    // processes it in-band, so one packet is applied exactly
+                    // once per poll (the Rust consumer is idempotent anyway: an
+                    // already-aligned sync is a no-op success, never a
+                    // rate-limit or replay error).
                     val sync = json.optJSONObject("sync")
                     if (sync != null && peer.isNotEmpty()) {
                         try {
                             val tlv = Base64.decode(sync.getString("tlv_b64"), Base64.NO_WRAP)
                             ffi.processSynchronize(peer, tlv)
                         } catch (e: Exception) {
-                            Log.d(TAG, "Synchronize not applied: ${e.message}")
+                            // AUDIT #3: a cross-generation sync that cannot be
+                            // applied (the handoff dropped the rekey carrier)
+                            // is NOT a benign no-op — surface it loudly so the
+                            // user gets a re-pair hint instead of silent
+                            // "paired but nothing syncs" + infinite retries
+                            // against the rate limiter.
+                            val code = e.message?.substringBefore("]")
+                            if (code?.contains("CROSS_GENERATION_RESYNC_REQUIRED") == true) {
+                                Log.w(
+                                    TAG,
+                                    "Cross-generation sync cannot be applied (rekey carrier lost in handoff) — re-pair recommended: ${e.message}"
+                                )
+                            } else {
+                                Log.d(TAG, "Synchronize not applied: ${e.message}")
+                            }
                         }
                     }
                 }
@@ -213,9 +232,14 @@ class PollTransport(
 
     /**
      * Decrypt the desktop's clipboard payload (binary TLV, rekey-aware in Rust).
-     * On a gap past max_skip, the desktop's authenticated Synchronize packet is
-     * processed first and the decrypt retried ONCE (audit finding #4). A
-     * decrypt gap additionally requests a sync on the NEXT poll (audit #16).
+     *
+     * AUDIT #4: this method does NOT process the desktop's Synchronize packet
+     * in-band. The legacy path decrypted the sync TLV here and then the
+     * manifest loop reached the same "sync" field and applied it a SECOND
+     * time — a guaranteed stale/replay rejection that wasted the rate budget
+     * and logged noise. The manifest loop is the single consumer; on a decrypt
+     * gap this method simply requests a sync so the NEXT poll realigns the
+     * receive chain (the desktop re-sends its latest clip after the sync).
      */
     fun decryptClip(
         json: JSONObject,
@@ -238,26 +262,11 @@ class PollTransport(
                 )
             } catch (e: Exception) {
                 // Ratchet decrypt failed — the desktop may be ahead of our
-                // receiving chain after a handoff. Its poll response carries an
-                // authenticated Synchronize packet: process it, then retry ONCE.
-                val sync = json.optJSONObject("sync")
-                if (sync != null) {
-                    try {
-                        val syncTlv = Base64.decode(sync.getString("tlv_b64"), Base64.NO_WRAP)
-                        uniffi.core_crypto.ratchetProcessSynchronize(peer, syncTlv)
-                        return String(
-                            uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
-                            Charsets.UTF_8
-                        )
-                    } catch (e2: Exception) {
-                        Log.w(TAG, "Synchronize recovery failed: ${e2.message}")
-                        return null
-                    }
-                }
-                Log.d(TAG, "Ratchet decrypt failed (no sync): ${e.message}")
-                // AUDIT FINDING #16: no sync was available — request one on the
-                // NEXT poll so our receive chain can realign against the
-                // desktop's send position.
+                // receiving chain after a handoff. The poll response's sync
+                // packet is applied by the manifest loop (the single consumer,
+                // audit #4); request another sync for the NEXT poll so the
+                // chain realigns and the desktop's next clip decrypts.
+                Log.d(TAG, "Ratchet decrypt failed: ${e.message}")
                 requestSync()
                 return null
             }

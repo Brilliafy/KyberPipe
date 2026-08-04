@@ -879,6 +879,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -948,6 +950,10 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_get_pq_keypair_public(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_hex_decode(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_hex_encode(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_initialize_pq_handshake(uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_core_crypto_fn_func_kem_sizes(uniffi_out_err: UniffiRustCallStatus, 
@@ -990,8 +996,6 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_core_crypto_fn_func_ratchet_consume_rekey_ack(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_core_crypto_fn_func_ratchet_decrypt_message(`peerIdentity`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_ratchet_decrypt_message_binary(`peerIdentity`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_ratchet_decrypt_with_rekey_message(`peerIdentity`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,`rekeyCiphertext`: RustBuffer.ByValue,`rekeyX25519Pk`: RustBuffer.ByValue,`rekeyMlkemPk`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1228,6 +1232,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_get_pq_keypair_public(
     ): Short
+    fun uniffi_core_crypto_checksum_func_hex_decode(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_hex_encode(
+    ): Short
     fun uniffi_core_crypto_checksum_func_initialize_pq_handshake(
     ): Short
     fun uniffi_core_crypto_checksum_func_kem_sizes(
@@ -1269,8 +1277,6 @@ internal interface UniffiLib : Library {
     fun uniffi_core_crypto_checksum_func_ratchet_clear_all_sessions(
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_consume_rekey_ack(
-    ): Short
-    fun uniffi_core_crypto_checksum_func_ratchet_decrypt_message(
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_decrypt_message_binary(
     ): Short
@@ -1410,7 +1416,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_encrypt_with_raw_key_32() != 60649.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy() != 22994.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy() != 55367.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_generate_client_identity_cert() != 51801.toShort()) {
@@ -1438,6 +1444,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_get_pq_keypair_public() != 48094.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_hex_decode() != 45804.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_hex_encode() != 52476.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_initialize_pq_handshake() != 6463.toShort()) {
@@ -1503,13 +1515,10 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_ratchet_consume_rekey_ack() != 30610.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_message() != 18104.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_message_binary() != 47629.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_with_rekey_message() != 16380.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_with_rekey_message() != 56293.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_ratchet_encrypt_message() != 55841.toShort()) {
@@ -2283,15 +2292,25 @@ public object FfiConverterTypeRatchetEncryptedMessage: FfiConverterRustBuffer<Ra
 /**
  * Full rollback watermark of a ratchet session (audit finding #2 follow-up).
  * `(pairing_epoch, ratchet_generation, send_message_count,
- * recv_message_count)` — lexicographically comparable. The send chain is
- * exactly as stateful as the recv chain (chain key + counter advance on every
- * `ratchet_encrypt`), so a live session that has sent MORE than a snapshot
- * contains must never be replaced by it: the send chain would roll back and
- * the derived message keys + (generation, seq) nonces would be reused for NEW
- * plaintext — the exact IV-reuse class the nonce-generation redesign
- * eliminates elsewhere. This record is the SINGLE watermark representation
- * shared by the UniFFI import guard, the UniFFI export surface and the store
- * restore paths, so the comparisons cannot drift.
+ * recv_message_count)`. The send chain is exactly as stateful as the recv
+ * chain (chain key + counter advance on every `ratchet_encrypt`), so a live
+ * session that has sent MORE than a snapshot contains must never be replaced
+ * by it: the send chain would roll back and the derived message keys +
+ * (generation, seq) nonces would be reused for NEW plaintext — the exact
+ * IV-reuse class the nonce-generation redesign eliminates elsewhere. This
+ * record is the SINGLE watermark representation shared by the UniFFI import
+ * guard, the UniFFI export surface and the store restore paths, so the
+ * comparisons cannot drift.
+ *
+ * AUDIT #1 (HIGH, one-sided rollback): ordering is COMPONENT-WISE, never
+ * lexicographic. A lexicographic order lets ONE chain's lead mask the other
+ * chain's regression (send dominates recv, so a snapshot with send=50/recv=0
+ * is judged "not a rollback" against a live session with send=0/recv=100 —
+ * and the live receiving chain, positioned at seq 100, is replaced by the
+ * snapshot's chain at seq 0: silent desync + an authenticated replay window
+ * for messages 0..=99). `is_ahead_of` is therefore the monotonic partial
+ * order (dominance), and the import guard refuses any snapshot that is not
+ * at least as advanced as the live session in EVERY component.
  */
 data class RatchetWatermark (
     var `pairingEpoch`: kotlin.ULong, 
@@ -2409,6 +2428,22 @@ sealed class KyberException: kotlin.Exception() {
             get() = "v1=${ v1 }"
     }
     
+    /**
+     * AUDIT #3: a Synchronize packet from a HIGHER ratchet generation could
+     * not be applied because the rekey carrier that would derive the pending
+     * proposal was missed (the handoff dropped it). This is NOT a benign
+     * no-op — the session cannot silently resync across the generation
+     * boundary and the poll layer must escalate to a re-pair hint instead of
+     * retrying forever against the 15s sync rate limit.
+     */
+    class CrossGenerationResyncRequired(
+        
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
     class InvalidKeyLength(
         
         val `expected`: kotlin.ULong, 
@@ -2462,7 +2497,10 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
             9 -> KyberException.SessionDesynchronized(
                 FfiConverterString.read(buf),
                 )
-            10 -> KyberException.InvalidKeyLength(
+            10 -> KyberException.CrossGenerationResyncRequired(
+                FfiConverterString.read(buf),
+                )
+            11 -> KyberException.InvalidKeyLength(
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
                 )
@@ -2513,6 +2551,11 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 + FfiConverterString.allocationSize(value.v1)
             )
             is KyberException.SessionDesynchronized -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.CrossGenerationResyncRequired -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
@@ -2573,8 +2616,13 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is KyberException.InvalidKeyLength -> {
+            is KyberException.CrossGenerationResyncRequired -> {
                 buf.putInt(10)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is KyberException.InvalidKeyLength -> {
+                buf.putInt(11)
                 FfiConverterULong.write(value.`expected`, buf)
                 FfiConverterULong.write(value.`got`, buf)
                 Unit
@@ -3169,6 +3217,39 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+        /**
+         * THE shared hex→bytes codec (AUDIT #12). Mirrors [`hex_encode`].
+         */
+    @Throws(KyberException::class) fun `hexDecode`(`encoded`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_hex_decode(
+        FfiConverterString.lower(`encoded`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * THE shared byte→hex codec (AUDIT #12). One encode/decode pair, exposed via
+         * UniFFI so BOTH platforms serialize wire fields identically. The Android app
+         * previously hand-rolled `joinToString { "%02x".format(it) }` for the pairing
+         * KEM ciphertext while the desktop used the Rust `hex` crate — two
+         * independent implementations of the same serialization is exactly the drift
+         * surface the binary-TLV mandate was meant to eliminate (a future contributor
+         * "fixing" one side's encoding silently corrupts the other). Round-tripping
+         * every wire field through this codec (see the desktop wire-format conformance
+         * test) makes the encoding a single source of truth.
+         */ fun `hexEncode`(`data`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_hex_encode(
+        FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `initializePqHandshake`()
         = 
     uniffiRustCallWithError(KyberException) { _status ->
@@ -3446,16 +3527,6 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
-    @Throws(KyberException::class) fun `ratchetDecryptMessage`(`peerIdentity`: kotlin.String, `nonce`: kotlin.ByteArray, `ciphertext`: kotlin.ByteArray): kotlin.ByteArray {
-            return FfiConverterByteArray.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_decrypt_message(
-        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`nonce`),FfiConverterByteArray.lower(`ciphertext`),_status)
-}
-    )
-    }
-    
-
         /**
          * Decrypt a ratchet message from a BINARY TLV frame, rekey-aware (audit
          * finding #12). Handles the same rekey payloads as the hex path.
@@ -3470,6 +3541,19 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+        /**
+         * AUDIT #13: the NON-rekey-aware decrypt surface is REMOVED from the UniFFI
+         * surface entirely (previously `ratchet_decrypt_message`). It was a footgun —
+         * it accepted only (nonce, ciphertext), so a message carrying a rekey payload
+         * (every `rekey_interval`-th message) is AEAD-bound to that payload and
+         * CANNOT be decrypted with an empty AAD; a misrouting caller silently dropped
+         * every carrier, never derived the peer's proposal, never ACKed, and stalled
+         * the peer's rekey. The rekey-aware binary dispatcher
+         * [`ratchet_decrypt_message_binary`] is now the ONLY inbound decrypt path —
+         * the footgun cannot be re-introduced by a future caller, because the type-
+         * level surface no longer exists. (The internal `ratchet_decrypt_message_impl`
+         * remains for tests/back-compat inside the crate.)
+         */
     @Throws(KyberException::class) fun `ratchetDecryptWithRekeyMessage`(`peerIdentity`: kotlin.String, `nonce`: kotlin.ByteArray, `ciphertext`: kotlin.ByteArray, `rekeyCiphertext`: kotlin.ByteArray?, `rekeyX25519Pk`: kotlin.ByteArray?, `rekeyMlkemPk`: kotlin.ByteArray?): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
     uniffiRustCallWithError(KyberException) { _status ->

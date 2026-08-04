@@ -311,14 +311,30 @@ object KyberPipePollEngine {
                             peer, settings.ratchetSnapshotKey.hexToByteArray()
                         )
                         if (wrapped != null) {
-                            PipeService.persistWrappedSnapshot(settings, wrapped.nonce, wrapped.ciphertext)
-                        }
-                        // AUDIT #2 (follow-up): advance the monotonic rollback
-                        // watermark AFTER a successful export so a later cold-start
-                        // restore refuses a rolled-back snapshot (device backup /
-                        // same-user tamper) exactly like the desktop store does.
-                        uniffi.core_crypto.ratchetSessionWatermark(peer)?.let { wm ->
-                            RatchetWatermarkStore.update(settings, peer, wm)
+                            // AUDIT FINDING #4: the rollback watermark advances
+                            // ONLY when the snapshot write actually succeeded.
+                            // The legacy order ran the export+persist and then
+                            // unconditionally updated the watermark — if the
+                            // persist failed (prefs/Keystore transient) the
+                            // recorded high-water mark moved strictly ahead of
+                            // the on-disk snapshot, and the next cold start
+                            // refused the snapshot as a "rollback", silently
+                            // un-pairing the phone.
+                            val persisted = PipeService.persistWrappedSnapshot(
+                                settings, wrapped.nonce, wrapped.ciphertext
+                            )
+                            if (persisted) {
+                                // Advance the monotonic rollback watermark AFTER
+                                // a successful write so a later cold-start restore
+                                // refuses a rolled-back snapshot (device backup /
+                                // same-user tamper) exactly like the desktop
+                                // store does. `RatchetWatermarkStore.update`
+                                // records max(persisted, live) and only moves
+                                // forward.
+                                uniffi.core_crypto.ratchetSessionWatermark(peer)?.let { wm ->
+                                    RatchetWatermarkStore.update(settings, peer, wm)
+                                }
+                            }
                         }
                     } catch (e: Exception) {
                         Log.d(TAG, "Snapshot persist skipped: ${e.message}")

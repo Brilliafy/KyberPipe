@@ -152,14 +152,12 @@ pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {
                 }
             }
         }
-        KyberMessage::FileChunk(f) => {
-            if f.data_base64.len() > MAX_FILE_CHUNK_BASE64_CHARS {
-                return Err(KyberError::SerializationError(format!(
-                    "File chunk too large ({} base64 chars > {})",
-                    f.data_base64.len(),
-                    MAX_FILE_CHUNK_BASE64_CHARS
-                )));
-            }
+        KyberMessage::FileChunk(f) if f.data_base64.len() > MAX_FILE_CHUNK_BASE64_CHARS => {
+            return Err(KyberError::SerializationError(format!(
+                "File chunk too large ({} base64 chars > {})",
+                f.data_base64.len(),
+                MAX_FILE_CHUNK_BASE64_CHARS
+            )));
         }
         _ => {}
     }

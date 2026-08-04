@@ -194,10 +194,74 @@ fn watermark_path() -> PathBuf {
     dir.join("ratchet_watermarks.json")
 }
 
-/// Per-peer monotonic watermark: `(ratchet_generation, send_message_count,
-/// recv_message_count)` — lexicographically comparable. An older watermark
-/// means an older (potentially rolled-back) snapshot.
-type Watermark = (u32, u64, u64);
+/// Per-peer monotonic watermark: `(pairing_epoch, ratchet_generation,
+/// send_message_count, recv_message_count)`. An older watermark means an older
+/// (potentially rolled-back) snapshot.
+///
+/// AUDIT FINDING #7: the watermark is EPOCH-AWARE. The legacy 3-tuple dropped
+/// `pairing_epoch`, so after a re-pair the fresh session (epoch 1, counters
+/// reset to 0) was compared against the OLD epoch-0 high-water (large
+/// counters) and REFUSED as a "rollback" — every re-pair followed by a restart
+/// lost the session. A newer epoch always outranks an older one regardless of
+/// counters (re-pair is accepted), while a stale pre-re-pair snapshot (old
+/// epoch, even with large counters) is still refused against the recorded
+/// higher-epoch watermark.
+///
+/// AUDIT #1 (HIGH, one-sided rollback): WITHIN one epoch the ordering is
+/// COMPONENT-WISE, never lexicographic. The legacy lexicographic 4-tuple let
+/// the send chain's lead mask a recv-chain regression: a snapshot with
+/// send=50/recv=0 was judged "not below" a high-water of send=0/recv=100 and
+/// restored, rolling the receiving chain back (silent desync + authenticated
+/// replay window). The helpers below (`dominates`, `merge_watermark`,
+/// `is_rollback`) encode the same partial order the Rust registry guard and
+/// the Kotlin store enforce, so the three cannot drift.
+type Watermark = (u64, u32, u64, u64);
+
+/// Merge a fresh watermark into a high-water mark (audit #1). A NEWER pairing
+/// epoch supersedes an older one wholesale (re-pair resets counters); within
+/// one epoch the mark is the component-wise MAX so a send-chain lead can never
+/// mask a recv-chain regression (or vice versa). Only ever moves forward.
+fn merge_watermark(high: &mut Watermark, fresh: &Watermark) {
+    if fresh.0 > high.0 {
+        *high = *fresh;
+        return;
+    }
+    if fresh.0 < high.0 {
+        return;
+    }
+    high.1 = high.1.max(fresh.1);
+    high.2 = high.2.max(fresh.2);
+    high.3 = high.3.max(fresh.3);
+}
+
+/// True when a snapshot watermark is a ROLLBACK relative to the recorded
+/// high-water mark (audit #1 + finding #7). A snapshot from an OLDER pairing
+/// epoch is stale (refuse); a SAME-epoch snapshot that is behind in ANY of
+/// generation/send/recv is a rollback (refuse). A snapshot from a NEWER epoch
+/// (re-pair, counters reset) is accepted. Equal = the current snapshot.
+fn is_rollback(snap: &Watermark, high: &Watermark) -> bool {
+    if snap.0 < high.0 {
+        return true;
+    }
+    if snap.0 > high.0 {
+        return false;
+    }
+    snap.1 < high.1 || snap.2 < high.2 || snap.3 < high.3
+}
+
+/// True when `fresh` ADVANCES the recorded high-water mark `high` (component-
+/// wise, audit #1): a newer pairing epoch, or a same-epoch component that
+/// moved forward. Used by the persist path's early-out so a keyring write only
+/// happens when something actually moved.
+fn advances(high: &Watermark, fresh: &Watermark) -> bool {
+    if fresh.0 > high.0 {
+        return true;
+    }
+    if fresh.0 < high.0 {
+        return false;
+    }
+    fresh.1 > high.1 || fresh.2 > high.2 || fresh.3 > high.3
+}
 
 /// Extract the watermark from a DECRYPTED ratchet snapshot JSON. The snapshot
 /// is AEAD-authenticated, so a watermark extracted from a validly-decrypted
@@ -207,17 +271,26 @@ type Watermark = (u32, u64, u64);
 /// AUDIT #2 (follow-up): the field mapping is centralized in the core-crypto
 /// registry (`ratchet_snapshot_watermark`), so the desktop store and the
 /// UniFFI import guard read the same fields and cannot drift. The store keeps
-/// its 3-tuple high-water format (epoch is enforced separately by the registry
-/// import guard); the FULL 4-tuple watermark is what the registry exports.
+/// the FULL 4-tuple high-water format INCLUDING `pairing_epoch` (audit finding
+/// #7); legacy 3-element persisted entries parse with epoch 0.
 fn snapshot_watermark(snap: &[u8]) -> Option<Watermark> {
     core_crypto::ratchet_snapshot_watermark(snap.to_vec())
         .ok()?
-        .map(|wm| (wm.ratchet_generation, wm.send_message_count, wm.recv_message_count))
+        .map(|wm| {
+            (
+                wm.pairing_epoch,
+                wm.ratchet_generation,
+                wm.send_message_count,
+                wm.recv_message_count,
+            )
+        })
 }
 
 /// Read the persisted per-peer watermarks (default empty).
 /// Parse a watermark JSON map (both the file and the keyring entry use the
-/// same shape: `{ peer: [gen, send, recv] }`).
+/// same shape: `{ peer: [epoch, gen, send, recv] }`). Legacy 3-element entries
+/// `[gen, send, recv]` parse with epoch 0 (audit finding #7 — the store
+/// upgraded the persisted format in place).
 fn parse_watermark_map(v: &serde_json::Value) -> std::collections::HashMap<String, Watermark> {
     let mut out = std::collections::HashMap::new();
     let Some(obj) = v.as_object() else {
@@ -225,11 +298,22 @@ fn parse_watermark_map(v: &serde_json::Value) -> std::collections::HashMap<Strin
     };
     for (peer, wm) in obj {
         let Some(arr) = wm.as_array() else { continue };
-        if arr.len() != 3 {
-            continue;
-        }
-        if let (Some(g), Some(s), Some(r)) = (arr[0].as_u64(), arr[1].as_u64(), arr[2].as_u64()) {
-            out.insert(peer.clone(), (g as u32, s, r));
+        match arr.as_slice() {
+            // 4-tuple: [epoch, gen, send, recv]
+            [e, g, s, r] => {
+                if let (Some(e), Some(g), Some(s), Some(r)) =
+                    (e.as_u64(), g.as_u64(), s.as_u64(), r.as_u64())
+                {
+                    out.insert(peer.clone(), (e, g as u32, s, r));
+                }
+            }
+            // Legacy 3-tuple: [gen, send, recv] → epoch 0.
+            [g, s, r] => {
+                if let (Some(g), Some(s), Some(r)) = (g.as_u64(), s.as_u64(), r.as_u64()) {
+                    out.insert(peer.clone(), (0, g as u32, s, r));
+                }
+            }
+            _ => continue,
         }
     }
     out
@@ -248,10 +332,8 @@ fn load_watermarks() -> std::collections::HashMap<String, Watermark> {
         if let Ok(data) = entry.get_password() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                 for (peer, wm) in parse_watermark_map(&v) {
-                    let e = out.entry(peer).or_insert((0, 0, 0));
-                    if wm > *e {
-                        *e = wm;
-                    }
+                    let e = out.entry(peer).or_insert((0, 0, 0, 0));
+                    merge_watermark(e, &wm);
                 }
             }
         }
@@ -260,10 +342,8 @@ fn load_watermarks() -> std::collections::HashMap<String, Watermark> {
     if let Ok(data) = std::fs::read_to_string(watermark_path()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
             for (peer, wm) in parse_watermark_map(&v) {
-                let e = out.entry(peer).or_insert((0, 0, 0));
-                if wm > *e {
-                    *e = wm;
-                }
+                let e = out.entry(peer).or_insert((0, 0, 0, 0));
+                merge_watermark(e, &wm);
             }
         }
     }
@@ -285,13 +365,13 @@ fn save_watermarks(wms: &std::collections::HashMap<String, Watermark>) {
     let current = load_watermarks();
     if wms
         .iter()
-        .all(|(peer, wm)| current.get(peer).is_some_and(|c| wm <= c))
+        .all(|(peer, wm)| current.get(peer).is_some_and(|c| !advances(c, wm)))
     {
         return;
     }
     let mut obj = serde_json::Map::new();
-    for (peer, (g, s, r)) in wms {
-        obj.insert(peer.clone(), serde_json::json!([g, s, r]));
+    for (peer, (e, g, s, r)) in wms {
+        obj.insert(peer.clone(), serde_json::json!([e, g, s, r]));
     }
     if let Ok(json) = serde_json::to_string(&serde_json::Value::Object(obj)) {
         // Keyring tier FIRST — a same-user attacker cannot rewrite it. When it
@@ -325,15 +405,13 @@ pub fn persist_all_ratchet_sessions(snapshot_key_hex: &str) {
     let mut map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut fresh_watermarks: std::collections::HashMap<String, Watermark> = load_watermarks();
     for peer in peer_ids {
-        if let Ok(Some(snap)) = core_crypto::ratchet_export_session(peer.clone()) {
+        if let Ok(Some(mut snap)) = core_crypto::ratchet_export_session(peer.clone()) {
             // Record the (authenticated) watermark for this snapshot.
             if let Some(wm) = snapshot_watermark(&snap) {
-                // Only ever move the watermark forward — a stale snapshot
-                // cannot regress it.
-                let entry = fresh_watermarks.entry(peer.clone()).or_insert((0, 0, 0));
-                if wm > *entry {
-                    *entry = wm;
-                }
+                // Only ever move the watermark forward (component-wise — audit
+                // #1) — a stale snapshot cannot regress it.
+                let entry = fresh_watermarks.entry(peer.clone()).or_insert((0, 0, 0, 0));
+                merge_watermark(entry, &wm);
             }
             // Fresh random 96-bit nonce per write — never reuse.
             let mut nonce = [0u8; 12];
@@ -347,6 +425,10 @@ pub fn persist_all_ratchet_sessions(snapshot_key_hex: &str) {
                     }),
                 );
             }
+            // AUDIT #14: the exported snapshot holds full session key material;
+            // wipe the plaintext buffer as soon as it has been wrapped.
+            use zeroize::Zeroize;
+            snap.zeroize();
         }
     }
     if map.is_empty() {
@@ -376,6 +458,13 @@ pub fn clear_ratchet_store() {
 /// replay of an already-restored snapshot) and is refused. This closes the
 /// snapshot-to-snapshot regression the live-session guard in the registry
 /// cannot see (on startup there is no live session to compare against).
+///
+/// AUDIT FINDING #7: the comparison is over the EPOCH-AWARE 4-tuple, so the
+/// epoch check is enforced HERE in the store (independent of the live-session
+/// registry guard, which does not run at restore): a snapshot whose epoch is
+/// OLDER than the peer's recorded epoch is refused even if its counters are
+/// larger (stale pre-re-pair snapshot), while a fresh re-pair snapshot (newer
+/// epoch, counters reset to 0) is accepted.
 pub fn restore_all_ratchet_sessions(snapshot_key_hex: &str) -> usize {
     let Some(wk) = wrap_key(snapshot_key_hex) else {
         return 0;
@@ -402,15 +491,17 @@ pub fn restore_all_ratchet_sessions(snapshot_key_hex: &str) -> usize {
             continue;
         };
         if let Ok(snap) = core_crypto::crypto::decrypt_chacha20(&wk, &nonce_arr, &ct, &[]) {
-            // AUDIT F16: refuse a snapshot STRICTLY below the persisted
-            // high-water mark for this peer (rollback detection). The current
-            // snapshot's watermark EQUALS the high-water mark and is accepted;
-            // any older (rolled-back) snapshot is below it and is refused.
+            // AUDIT F16 + AUDIT #1: refuse a snapshot that REGRESSES the
+            // persisted high-water mark for this peer in ANY component
+            // (rollback detection). The current snapshot's watermark EQUALS
+            // the high-water mark and is accepted; any older (rolled-back)
+            // snapshot — including one that is ahead in send but behind in
+            // recv (the lexicographic blind spot) — is refused.
             if let Some(wm) = snapshot_watermark(&snap) {
                 if let Some(high) = watermarks.get(&peer) {
-                    if wm < *high {
+                    if is_rollback(&wm, high) {
                         tracing::warn!(
-                            "[RatchetStore] Refusing rollback: snapshot for {peer} at {:?} is below high-water mark {:?}",
+                            "[RatchetStore] Refusing rollback: snapshot for {peer} at {:?} regresses high-water mark {:?}",
                             wm, high
                         );
                         continue;
@@ -429,10 +520,12 @@ pub fn restore_all_ratchet_sessions(snapshot_key_hex: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// AUDIT F16: the watermark is extracted from the AEAD-authenticated
-    /// snapshot and is strictly monotonic — an older snapshot must always
-    /// compare below a newer one, and the rollback-refusal predicate only ever
-    /// rejects STRICTLY older watermarks (equal = the current snapshot).
+    /// AUDIT F16 + FINDING #7 + AUDIT #1: the watermark is extracted from the
+    /// AEAD-authenticated snapshot and the rollback-refusal predicate is
+    /// COMPONENT-WISE — it rejects a snapshot that regresses the high-water
+    /// mark in ANY of generation/send/recv (equal = the current snapshot,
+    /// accepted). The tuple is EPOCH-AWARE: a fresh re-pair snapshot (newer
+    /// epoch, counters reset) outranks an old epoch's large counters.
     #[test]
     fn watermark_is_monotonic_and_rollback_is_refused() {
         let newer =
@@ -440,27 +533,59 @@ mod tests {
         let older = br#"{"ratchet_generation":2,"send_message_count":100,"recv_message_count":99}"#;
         let current =
             br#"{"ratchet_generation":2,"send_message_count":105,"recv_message_count":102}"#;
+        // AUDIT #1: ahead in send but BEHIND in recv — the lexicographic blind
+        // spot that must now be refused.
+        let one_sided =
+            br#"{"ratchet_generation":2,"send_message_count":150,"recv_message_count":0}"#;
 
         let w_newer = snapshot_watermark(newer).expect("newer watermark");
         let w_older = snapshot_watermark(older).expect("older watermark");
         let w_current = snapshot_watermark(current).expect("current watermark");
+        let w_one_sided = snapshot_watermark(one_sided).expect("one-sided watermark");
 
-        assert_eq!(w_newer, (2, 105, 102));
-        assert!(w_newer > w_older, "watermark must be strictly monotonic");
+        // Legacy JSON (no pairing_epoch) parses with epoch 0.
+        assert_eq!(w_newer, (0, 2, 105, 102));
         assert_eq!(w_newer, w_current);
 
-        // The restore predicate: refuse STRICTLY older (rollback), accept equal
-        // (the current snapshot after a normal restart).
+        // The restore predicate: refuse any snapshot that regresses the mark in
+        // ANY component, accept equal (the current snapshot after a normal
+        // restart) and accept strictly-forward snapshots.
         let high = w_newer;
+        assert!(is_rollback(&w_older, &high), "older snapshot refused");
         assert!(
-            w_older < high,
-            "rolled-back snapshot is below the high-water mark"
+            is_rollback(&w_one_sided, &high),
+            "one-sided snapshot (send ahead, recv behind) must be refused — audit #1"
         );
         assert!(
-            !(w_current < high),
+            !is_rollback(&w_current, &high),
             "current snapshot equals the high-water mark and is accepted"
         );
-        assert!(!(w_newer < high));
+        assert!(!is_rollback(&w_newer, &high));
+
+        // AUDIT FINDING #7: a stale pre-re-pair snapshot (epoch 0, even with
+        // LARGER counters) must be refused against a re-paired epoch-1
+        // high-water; a fresh epoch-1 snapshot (counters reset) must be
+        // accepted.
+        let re_paired_high = (1u64, 0u32, 0u64, 0u64);
+        let stale_epoch0 = (0u64, 2u32, 999u64, 999u64);
+        assert!(
+            is_rollback(&stale_epoch0, &re_paired_high),
+            "a stale epoch-0 snapshot with larger counters must still be refused after a re-pair"
+        );
+        let fresh_epoch1 = (1u64, 0u32, 0u64, 0u64);
+        assert!(
+            !is_rollback(&fresh_epoch1, &re_paired_high),
+            "a fresh re-pair snapshot (epoch 1, counters reset) must be accepted"
+        );
+
+        // merge_watermark: a one-sided fresh watermark must NOT clobber the
+        // recv lead — the merged envelope keeps BOTH chains' maxima.
+        let mut merged = high;
+        merge_watermark(&mut merged, &w_one_sided);
+        assert_eq!(merged, (0, 2, 150, 102));
+        // advances() correctly reports both directions.
+        assert!(advances(&high, &merged));
+        assert!(!advances(&high, &w_current));
     }
 
     /// AUDIT F16: a malformed snapshot (missing watermark fields) yields no
@@ -513,7 +638,8 @@ mod keyring_watermark_tests {
 
         // Write a watermark via the real persistence path.
         let mut wms = std::collections::HashMap::new();
-        wms.insert("peer-a".to_string(), (3u32, 200u64, 150u64));
+        // Epoch-aware 4-tuple (audit finding #7).
+        wms.insert("peer-a".to_string(), (3u64, 2u32, 200u64, 150u64));
         save_watermarks(&wms);
 
         // The keyring entry must exist and contain the watermark.
@@ -524,7 +650,7 @@ mod keyring_watermark_tests {
             serde_json::from_str(&stored).expect("keyring watermark must be valid JSON");
         assert_eq!(
             parsed["peer-a"],
-            serde_json::json!([3, 200, 150]),
+            serde_json::json!([3, 2, 200, 150]),
             "keyring watermark must contain the saved watermark"
         );
 
@@ -532,7 +658,7 @@ mod keyring_watermark_tests {
         let loaded = load_watermarks();
         assert_eq!(
             loaded.get("peer-a"),
-            Some(&(3u32, 200u64, 150u64)),
+            Some(&(3u64, 2u32, 200u64, 150u64)),
             "load_watermarks must read the keyring tier"
         );
 

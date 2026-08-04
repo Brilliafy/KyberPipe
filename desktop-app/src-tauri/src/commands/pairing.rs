@@ -363,9 +363,10 @@ pub fn get_pairing_config(
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::PairingConfig, String> {
     // Audit KYP-2026-02 #6: the pairing config discloses host identity
-    // metadata (local IP, Wi-Fi Direct MAC, P2P IP) plus a fresh QR nonce — an
+    // metadata (local IP, WireGuard key hash) plus a fresh QR nonce — an
     // enumeration oracle. Gate it behind a fresh user-gesture token so a
-    // renderer compromise cannot harvest it silently.
+    // renderer compromise cannot harvest it silently. (Wi-Fi Direct MAC / P2P
+    // IP fields were removed with the P2P feature — audit finding #1.)
     if !crate::commands::security::consume_privilege_token("get_pairing_config", &token) {
         return Err("Building a pairing QR requires a fresh user-gesture token".into());
     }

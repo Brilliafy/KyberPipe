@@ -27,7 +27,6 @@ const selectedMethod = ref("");
 const hoveredOption = ref<string | null>(null);
 
 const localMethods = [
-  { id: "wifi_direct", label: "Wi-Fi Direct", icon: "📡", desc: "Direct peer-to-peer radio. Fastest, no router needed." },
   { id: "mdns", label: "mDNS Zeroconf", icon: "🔍", desc: "Auto-discovery on local network. QR contains PQC key." },
   { id: "manual_ip", label: "Manual IP / DDNS", icon: "🌐", desc: "Enter IP or hostname manually. SAS verification." }
 ];
@@ -182,7 +181,6 @@ const handleExternalSelect = (method: string) => {
             <h4>Pair Locally</h4>
             <p>Same network. Fast, low latency.</p>
             <div class="choice-methods">
-              <span>Wi-Fi Direct</span>
               <span>mDNS</span>
               <span>Manual IP</span>
             </div>

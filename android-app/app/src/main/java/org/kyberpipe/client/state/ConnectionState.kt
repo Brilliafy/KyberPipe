@@ -15,15 +15,13 @@ import kotlinx.coroutines.withContext
 import org.kyberpipe.client.service.BeaconHost
 import org.kyberpipe.client.service.KyberPipePollEngine
 import org.kyberpipe.client.service.MdnsBeaconListener
-import org.kyberpipe.client.service.WifiDirectManager
 import org.kyberpipe.client.utils.SettingsManager
 
 /**
  * `useConnectionState` — the connection feature state (audit #8 follow-up,
  * structural decomposition). Owns the connectivity state machine (status /
- * method / color), the Wi-Fi Direct manager + beacon listener, the ambient
- * light sensor, and the POLL slice that mirrors connection status AND the
- * explicit-unpair signal.
+ * method / color), the beacon listener, the ambient light sensor, and the
+ * POLL slice that mirrors connection status AND the explicit-unpair signal.
  *
  * AUDIT #1 follow-up: the DISCONNECTED emissions from the engine carry the
  * persisted `isPaired` (never a derived false), and `destroyPairingHandles`
@@ -31,17 +29,20 @@ import org.kyberpipe.client.utils.SettingsManager
  * (`update.unpairSignal`) — never on a transient connectivity failure. The
  * teardown calls back into [PairingState.clearPairingHandles] so the keypair /
  * KEM handles are released exactly once, on that single signal.
+ *
+ * Wi-Fi Direct (P2P) support was REMOVED (audit finding #1): the group was
+ * never actually WPA2-secured and the Android join path was a dead stub, so
+ * the WifiDirectManager, its `onWifiDirectStateChange` callback and the
+ * `p2pIp` source are gone.
  */
 class ConnectionState(
     private val settings: SettingsManager,
     private val context: Context,
     private val addLog: (String) -> Unit,
     private val coroutineScope: CoroutineScope,
-    private val p2pIpProvider: () -> String,
     private val onExplicitUnpair: () -> Unit,
     /// Created in `rememberConnectionState` (remember is composable-only);
     /// the holder owns their lifecycle through the router's DisposableEffect.
-    val p2pManager: WifiDirectManager,
     val beaconListener: MdnsBeaconListener,
 ) {
     var connectionStatus by mutableStateOf("DISCONNECTED")
@@ -50,7 +51,6 @@ class ConnectionState(
     var attemptCount by mutableStateOf(0)
     var ambientLux by mutableStateOf(250.0f)
 
-    var wifiDirectActive by mutableStateOf(true)
     var lanActive by mutableStateOf(false)
     var wireguardActive by mutableStateOf(true)
     var resolvedPublicIp by mutableStateOf("Not Queried")
@@ -65,8 +65,7 @@ class ConnectionState(
                 return@launch
             }
 
-            val hostToTry = p2pIpProvider().takeIf { it.isNotEmpty() }
-                ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
+            val hostToTry = settings.pairedHostIp.takeIf { it.isNotEmpty() }
             if (hostToTry == null) {
                 connectionStatus = "DISCONNECTED (No host IP)"
                 connectionMethod = "None"
@@ -113,24 +112,19 @@ class ConnectionState(
         connectionColor = color
     }
 
-    fun onWifiDirectStateChange(groupOwnerIp: String, connected: Boolean) {
-        if (connected && groupOwnerIp.isNotEmpty()) {
-            wifiDirectActive = true
-            addLog("[P2P] Wi-Fi Direct connected via $groupOwnerIp")
-        }
-    }
-
     fun onBeaconDiscovered(host: BeaconHost) {
-        // AUDIT #3: discovery beacons are UNAUTHENTICATED hints — never render a
-        // real device name, never auto-fill pairing, never drive a connection.
-        // The only permitted use is refreshing the LAST-KNOWN-GOOD IP for an
-        // ALREADY-PAIRED host (the pinned server cert authenticates the QUIC
-        // connection, not the beacon).
-        addLog("[mDNS] Discovered UNVERIFIED host @ ${host.localIp}")
-        if (settings.isPaired && settings.pairedHostIp.isEmpty() && host.localIp.isNotEmpty()) {
-            settings.pairedHostIp = host.localIp
-            addLog("[mDNS] Updated paired host IP from beacon hint: ${host.localIp}")
-        }
+        // AUDIT #3 + FINDING #5: discovery beacons are UNAUTHENTICATED hints.
+        // The ML-DSA signature proves only that the sender owns the key it
+        // EMBEDDED — any LAN host can mint its own keypair. The phone therefore
+        // NEVER auto-applies a beacon IP to the connection target: the legacy
+        // code wrote `pairedHostIp = host.localIp` when paired, so an attacker
+        // could inject its own IP and redirect every poll (persistent DoS plus
+        // a presence probe of the phone). The paired host IP is set ONLY from
+        // the QR config at pairing (PairingState.confirmSasAndCommit) and is
+        // never derived from an unverified hint. A beacon is surfaced as a
+        // diagnostic hint at most; the listener independently drops beacons
+        // whose embedded signing key is not the paired desktop's (finding #5).
+        addLog("[mDNS] Discovered UNVERIFIED host @ ${host.localIp} (hint only — never applied)")
     }
 
     /**
@@ -176,16 +170,14 @@ fun rememberConnectionState(
     settings: SettingsManager,
     context: Context,
     addLog: (String) -> Unit,
-    p2pIpProvider: () -> String,
     onExplicitUnpair: () -> Unit,
 ): ConnectionState {
     val scope = rememberCoroutineScope()
-    val p2pManager = remember(context) { WifiDirectManager(context) }
     val beaconListener = remember(context) { MdnsBeaconListener(scope, context.applicationContext) }
     return remember(settings, context) {
         ConnectionState(
-            settings, context, addLog, scope, p2pIpProvider, onExplicitUnpair,
-            p2pManager, beaconListener,
+            settings, context, addLog, scope, onExplicitUnpair,
+            beaconListener,
         )
     }
 }

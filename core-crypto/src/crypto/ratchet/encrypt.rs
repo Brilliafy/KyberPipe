@@ -2,7 +2,7 @@ use super::super::{
     encapsulate_hybrid, encrypt_chacha20, generate_hybrid_keypair, generate_nonce_from_seq,
     KyberError,
 };
-use super::policy::{REKEY_RETRY_TTL_SECS, now_unix_secs};
+use super::policy::{carrier_effective_age, now_unix_secs, REKEY_RETRY_TTL_SECS};
 use super::state::{build_rekey_aad, DoubleRatchetState, RekeyCarrier};
 use super::tlv::RatchetEncryptedMessage;
 use hkdf::Hkdf;
@@ -44,11 +44,29 @@ impl DoubleRatchetState {
         // REKEY_RETRY_TTL is RE-SENT on this message (the stored payload is
         // re-attached below). The proposal is NEVER committed unacknowledged —
         // that is what permanently desynchronized sessions in the field.
+        //
+        // AUDIT FINDING #8: the age is measured by `carrier_effective_age`
+        // (MAX of the monotonic stamp and the PERSISTED wall-clock
+        // attached_at_unix) — the SAME helper the resync staleness predicate
+        // uses. The legacy code measured only `attached_at.elapsed()` (a
+        // monotonic stamp that `from_snapshot` resets to `now`), so a carrier
+        // pending for hours before a restart resurrected as "fresh" for the
+        // resend path while the resync path (max wall/mono) considered it
+        // stale — the two consumers disagreed about the same object.
         let now = std::time::Instant::now();
         let mut resend: Option<RekeyCarrier> = None;
+        // AUDIT #2 (stale-carrier poison): DROP EVERY stale carrier, not just
+        // the first. All queue entries belong to the single pending proposal, so
+        // keeping a second stale entry (then re-pushing a fresh one) produced a
+        // 2-entry queue whose survivor could outlive the peer's ACK and be
+        // re-sent with the ALREADY-COMMITTED payload under the new generation.
+        // Retaining only the first stale entry as the resend source keeps the
+        // queue at exactly one carrier per proposal.
         self.rekey_pending_confirm_queue.retain(|carrier| {
-            if carrier.attached_at.elapsed() >= REKEY_RETRY_TTL && resend.is_none() {
-                resend = Some(carrier.clone());
+            if carrier_effective_age(carrier) >= REKEY_RETRY_TTL {
+                if resend.is_none() {
+                    resend = Some(carrier.clone());
+                }
                 false
             } else {
                 true
@@ -61,9 +79,13 @@ impl DoubleRatchetState {
         // from clobbering each other and diverging generations.
         let proposal_pending =
             self.outgoing_proposal.root_key.is_some() || self.incoming_proposal.root_key.is_some();
+        // AUDIT #2: a NEW proposal is only staged onto an EMPTY queue, so the
+        // "one carrier per pending proposal" invariant is enforced at staging
+        // time (the legacy `len() < 2` allowed a second carrier for the same
+        // payload to accumulate).
         let should_rekey = seq > 0
             && seq.is_multiple_of(self.rekey_interval)
-            && self.rekey_pending_confirm_queue.len() < 2
+            && self.rekey_pending_confirm_queue.is_empty()
             && !proposal_pending;
         let (rekey_x25519_pk, rekey_mlkem_pk, rekey_ciphertext) = if let Some(carrier) = resend {
             // Re-send the pending proposal — same payload, updated carrier seq,
@@ -72,7 +94,6 @@ impl DoubleRatchetState {
             self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
                 carrier_seq: seq,
                 attached_at: now,
-                attached_at_mono: now,
                 attached_at_unix: now_unix_secs(),
                 rekey_x25519_pk: carrier.rekey_x25519_pk.clone(),
                 rekey_mlkem_pk: carrier.rekey_mlkem_pk.clone(),
@@ -86,7 +107,8 @@ impl DoubleRatchetState {
         } else if should_rekey {
             if let (Some(peer_xpk), Some(ref peer_mpk)) =
                 (self.peer_x25519_pk, self.peer_mlkem_pk.clone())
-            {                let our_new = generate_hybrid_keypair();
+            {
+                let our_new = generate_hybrid_keypair();
                 let new_x25519_pk = our_new.x25519_pk;
                 let new_mlkem_pk = our_new.mlkem_pk.clone();
                 let kem_res = encapsulate_hybrid(&peer_xpk, peer_mpk)?;
@@ -121,7 +143,6 @@ impl DoubleRatchetState {
                 self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
                     carrier_seq: seq,
                     attached_at: now,
-                    attached_at_mono: now,
                     attached_at_unix: now_unix_secs(),
                     rekey_x25519_pk: new_x25519_pk.to_vec(),
                     rekey_mlkem_pk: new_mlkem_pk.clone(),
@@ -176,6 +197,8 @@ impl DoubleRatchetState {
             .map_err(|e| KyberError::CryptoError(e.to_string()))?;
 
         let ciphertext = encrypt_chacha20(&msg_key, &nonce, plaintext, &aad)?;
+
+        self.assert_confirm_queue_invariant();
 
         Ok(RatchetEncryptedMessage {
             nonce: nonce.to_vec(),

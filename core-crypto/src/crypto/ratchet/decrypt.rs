@@ -1,6 +1,6 @@
 use super::super::{decapsulate_hybrid, decrypt_chacha20, KyberError};
 use super::derive::derive_tentative_msg_key;
-use super::resync::{advance_receiving_chain, prune_skip_keys, SkipKeyMap};
+use super::resync::{advance_receiving_chain, prune_skip_keys, try_decrypt_with_cached_key, SkipKeyMap};
 use super::state::{build_rekey_aad, DoubleRatchetState};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -74,9 +74,13 @@ impl DoubleRatchetState {
             .as_mut()
             .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?;
 
-        // If this sequence number has a cached key, use it directly
-        if let Some(cached_key) = skip_keys.remove(&(nonce_gen, seq)) {
-            let plaintext = decrypt_chacha20(&cached_key, nonce, ciphertext, aad)?;
+        // If this sequence number has a cached key, use it directly. Shared
+        // verify-then-remove helper (AUDIT FINDING #13 + AUDIT #5): the key is
+        // consumed ONLY after AEAD verifies — a bit-flipped copy of a
+        // legitimate out-of-order message must not permanently consume it.
+        if let Some(plaintext) =
+            try_decrypt_with_cached_key(skip_keys, nonce_gen, seq, nonce, ciphertext, aad)?
+        {
             self.replay_window.record_delivered(nonce_gen, seq);
             return Ok(plaintext);
         }
@@ -95,7 +99,7 @@ impl DoubleRatchetState {
                     if let Ok(pending_msg_key) =
                         derive_tentative_msg_key(&pending_recv_key, 0, seq, self.max_skip)
                     {
-                    // Verify AEAD with AAD — capture plaintext in single pass
+                        // Verify AEAD with AAD — capture plaintext in single pass
                         if let Ok(plaintext) =
                             decrypt_chacha20(&pending_msg_key, nonce, ciphertext, aad)
                         {
@@ -369,13 +373,20 @@ impl DoubleRatchetState {
         // current-generation message. Runs AFTER Phase 1 so an out-of-order
         // rekey carrier is never silently stripped of its proposal (audit
         // KYP-2026-02 #1).
-        if let Some(cached_key) = self
+        //
+        // AUDIT FINDING #13 (verify-then-remove): the cached key is consumed
+        // ONLY after AEAD verifies — a bit-flipped copy of a legitimate
+        // out-of-order message must not permanently consume the key and DoS
+        // the real message when it arrives.
+        let skip_keys = self
             .skip_message_keys
             .as_mut()
-            .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?
-            .remove(&(nonce_gen, seq))
+            .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?;
+        // Shared verify-then-remove helper (AUDIT FINDING #13 + AUDIT #5) — the
+        // key is consumed only after AEAD verifies.
+        if let Some(plaintext) =
+            try_decrypt_with_cached_key(skip_keys, nonce_gen, seq, nonce, ciphertext, &aad)?
         {
-            let plaintext = decrypt_chacha20(&cached_key, nonce, ciphertext, &aad)?;
             self.replay_window.record_delivered(nonce_gen, seq);
             // Resolve the two-sided rekey race + ACK bookkeeping exactly like
             // the current-chain success path — an out-of-order carrier must be
@@ -491,41 +502,51 @@ impl DoubleRatchetState {
     /// `has_rekey_payload` is whether the authenticated message carried a rekey
     /// payload; `seq` is its receive-space sequence number.
     ///
-    /// AUDIT FINDING #9 (two-sided rekey one-directionality): a FIXED
-    /// "initiator always wins" rule made the responder's proposal lose every
-    /// simultaneous race — the responder re-staged at every boundary, was
-    /// discarded every time, and its private keypair never rotated across the
-    /// session lifetime (halved forward secrecy, wasted KEM work every 30s).
-    /// The tie-break now ALTERNATES by generation parity: on even generations
-    /// the initiator's proposal wins, on odd generations the responder's wins.
-    /// Both sides evaluate the SAME `ratchet_generation` (the race is resolved
-    /// on the current chain before either side commits), so both compute the
-    /// same winner — the loser's proposal is cancelled, the winner's is
-    /// adopted and ACKed, and each side eventually contributes ratchet
-    /// material.
+    /// AUDIT FINDING #3 (payload-anchored tie-break): the winner of a
+    /// simultaneous two-sided rekey is the proposal whose rekey x25519 public
+    /// key is lexicographically larger. Both sides hold BOTH proposals at race
+    /// time — our own staged `outgoing_proposal.rekey_payload` plus the peer's
+    /// carrier payload (`rekey_x25519_pk`/`rekey_mlkem_pk`, cryptographically
+    /// bound into the message's rekey AAD) — so both evaluate the SAME pair and
+    /// deterministically agree. The legacy parity heuristic
+    /// (`ratchet_generation % 2 == 0`) required both sides to observe the same
+    /// current generation; a transient generation drift (exactly the condition
+    /// the Synchronize path repairs) flipped the parity for one side, both
+    /// picked the same "winner", and the loser's proposal was cancelled on one
+    /// side but staged-but-unacked on the other — dead rekey traffic until TTL
+    /// eviction. The nonce/public-key anchored comparison needs NO shared
+    /// generation state, so drift can no longer make the two sides disagree.
     fn resolve_rekey_race_and_ack(&mut self, seq: u64, has_rekey_payload: bool) {
         if !has_rekey_payload {
             return;
         }
         if self.outgoing_proposal.root_key.is_some() {
-            // Deterministic alternation: even generation → initiator wins;
-            // odd generation → responder wins. Both sides see the same current
-            // generation, so both agree on the winner.
-            let initiator_wins_race = self.ratchet_generation.is_multiple_of(2);
-            let we_win = if self.is_initiator {
-                initiator_wins_race
-            } else {
-                !initiator_wins_race
+            // Compare (x25519 pk, mlkem pk) tuples lexicographically. Both are
+            // bound into the rekey payload's AEAD AAD, so neither side can be
+            // fed a forged comparison input by an on-path attacker.
+            let peer_wins = match (
+                self.outgoing_proposal.rekey_payload.as_ref(),
+                self.incoming_proposal.peer_x25519_pk,
+                self.incoming_proposal.peer_mlkem_pk.as_deref(),
+            ) {
+                (Some((our_xpk, our_mpk, _)), Some(peer_xpk), Some(peer_mpk)) => {
+                    (peer_xpk.as_slice(), peer_mpk) > (our_xpk.as_slice(), our_mpk.as_slice())
+                }
+                // We staged an outgoing proposal but the peer's carrier did not
+                // stage an incoming one (e.g. superseded generation) — nothing
+                // to race against; we win by default and do not ACK.
+                (Some(_), _, _) => false,
+                (None, _, _) => true,
             };
-            if we_win {
+            if peer_wins {
+                // We lost the race — cancel our own outgoing proposal and
+                // adopt the peer's (already staged in Phase 1), then ACK it.
+                self.cancel_outgoing_rekey();
+            } else {
                 // Our proposal wins — discard the peer's tentative proposal and
                 // do NOT ACK it (the peer cancels its own when it sees ours).
                 self.cancel_pending_incoming_rekey();
                 return;
-            } else {
-                // We lost the race — cancel our own outgoing proposal and
-                // adopt the peer's (already staged in Phase 1), then ACK it.
-                self.cancel_outgoing_rekey();
             }
         }
         // Record/refresh the ACK carrier. If this is a re-sent proposal, update

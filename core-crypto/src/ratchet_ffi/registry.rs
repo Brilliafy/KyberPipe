@@ -5,8 +5,8 @@
 use crate::crypto::DoubleRatchetState;
 use crate::error::KyberError;
 use std::collections::HashMap;
-use zeroize::Zeroizing;
 use std::sync::{Arc, LazyLock, Mutex};
+use zeroize::Zeroizing;
 
 /// Ratchet session registry keyed by peer identity fingerprint.
 /// Each peer gets its own independent mutex (wrapped in Arc), preventing one
@@ -62,11 +62,42 @@ pub fn ratchet_init_session_with_keypair_impl(
     peer_x25519_pk: Option<&[u8]>,
     peer_mlkem_pk: Option<&[u8]>,
 ) -> Result<(), KyberError> {
-    let x25519_arr = peer_x25519_pk.map(|pk| {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(pk);
-        arr
-    });
+    // AUDIT FINDING #6: the peer X25519 public key is validated to exactly 32
+    // bytes BEFORE any `copy_from_slice` — the legacy code panicked (an
+    // unwinding panic through the registry that poisoned the per-session Mutex)
+    // when a malformed pairing body carried a 31/33-byte key. The ML-KEM-768
+    // public key is validated to exactly 1184 bytes too (it is only caught
+    // later, at encapsulation time, by `kyber768::PublicKey::from_bytes` — a
+    // typed error, but better to reject at the boundary where the caller can
+    // see it). Both now return a typed `KyberError::InvalidKeyLength` instead
+    // of panicking or deferring.
+    const MLKEM768_PUBLIC_KEY_BYTES: usize = 1184;
+    let x25519_arr = match peer_x25519_pk {
+        Some(pk) => {
+            if pk.len() != 32 {
+                return Err(KyberError::InvalidKeyLength {
+                    expected: 32,
+                    got: pk.len() as u64,
+                });
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(pk);
+            Some(arr)
+        }
+        None => None,
+    };
+    let peer_mlkem = match peer_mlkem_pk {
+        Some(v) => {
+            if v.len() != MLKEM768_PUBLIC_KEY_BYTES {
+                return Err(KyberError::InvalidKeyLength {
+                    expected: MLKEM768_PUBLIC_KEY_BYTES as u64,
+                    got: v.len() as u64,
+                });
+            }
+            Some(v.to_vec())
+        }
+        None => None,
+    };
     let our_pair = match our_keypair {
         Some((xpk, xsk, mpk, msk)) => {
             let mut x25519_pk = [0u8; 32];
@@ -96,7 +127,7 @@ pub fn ratchet_init_session_with_keypair_impl(
         is_initiator,
         our_pair,
         x25519_arr,
-        peer_mlkem_pk.map(|v| v.to_vec()),
+        peer_mlkem,
     )?;
     let mut map = match RATCHET_SESSIONS.lock() {
         Ok(m) => m,
@@ -202,9 +233,13 @@ pub fn ratchet_export_session_impl(peer_identity: &str) -> Result<Option<Vec<u8>
         .lock()
         .map_err(|_| KyberError::CryptoError("Ratchet session mutex poisoned".into()))?;
     let snap = guard.to_snapshot();
-    let bytes =
-        serde_json::to_vec(&snap).map_err(|e| KyberError::SerializationError(e.to_string()))?;
-    Ok(Some(bytes))
+    // AUDIT #14: serialize into a Zeroizing buffer so the serde scratch
+    // allocation (full session key material) is wiped on drop instead of
+    // surviving in freed heap. The returned Vec is the caller's to zeroize.
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *bytes, &snap)
+        .map_err(|e| KyberError::SerializationError(e.to_string()))?;
+    Ok(Some(bytes.to_vec()))
 }
 
 /// Export a ratchet session and AEAD-wrap the serialized snapshot INSIDE Rust
@@ -228,7 +263,7 @@ pub fn ratchet_export_session_wrapped_impl(
             got: wrap_key.len() as u64,
         });
     }
-    let Some(snap_bytes) = ratchet_export_session_impl(peer_identity)? else {
+    let Some(mut snap_bytes) = ratchet_export_session_impl(peer_identity)? else {
         return Ok(None);
     };
     // Fresh random 96-bit nonce per export — never reused.
@@ -239,20 +274,33 @@ pub fn ratchet_export_session_wrapped_impl(
     let ct = crate::crypto::encrypt_chacha20(&key_arr, &nonce, &snap_bytes, &[])?;
     use zeroize::Zeroize;
     key_arr.zeroize();
+    // AUDIT #14: wipe the plaintext snapshot buffer now that it has been
+    // wrapped — the full session key material must not linger in heap memory.
+    snap_bytes.zeroize();
     Ok(Some((nonce.to_vec(), ct)))
 }
 
 /// Full rollback watermark of a ratchet session (audit finding #2 follow-up).
 /// `(pairing_epoch, ratchet_generation, send_message_count,
-/// recv_message_count)` — lexicographically comparable. The send chain is
-/// exactly as stateful as the recv chain (chain key + counter advance on every
-/// `ratchet_encrypt`), so a live session that has sent MORE than a snapshot
-/// contains must never be replaced by it: the send chain would roll back and
-/// the derived message keys + (generation, seq) nonces would be reused for NEW
-/// plaintext — the exact IV-reuse class the nonce-generation redesign
-/// eliminates elsewhere. This record is the SINGLE watermark representation
-/// shared by the UniFFI import guard, the UniFFI export surface and the store
-/// restore paths, so the comparisons cannot drift.
+/// recv_message_count)`. The send chain is exactly as stateful as the recv
+/// chain (chain key + counter advance on every `ratchet_encrypt`), so a live
+/// session that has sent MORE than a snapshot contains must never be replaced
+/// by it: the send chain would roll back and the derived message keys +
+/// (generation, seq) nonces would be reused for NEW plaintext — the exact
+/// IV-reuse class the nonce-generation redesign eliminates elsewhere. This
+/// record is the SINGLE watermark representation shared by the UniFFI import
+/// guard, the UniFFI export surface and the store restore paths, so the
+/// comparisons cannot drift.
+///
+/// AUDIT #1 (HIGH, one-sided rollback): ordering is COMPONENT-WISE, never
+/// lexicographic. A lexicographic order lets ONE chain's lead mask the other
+/// chain's regression (send dominates recv, so a snapshot with send=50/recv=0
+/// is judged "not a rollback" against a live session with send=0/recv=100 —
+/// and the live receiving chain, positioned at seq 100, is replaced by the
+/// snapshot's chain at seq 0: silent desync + an authenticated replay window
+/// for messages 0..=99). `is_ahead_of` is therefore the monotonic partial
+/// order (dominance), and the import guard refuses any snapshot that is not
+/// at least as advanced as the live session in EVERY component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct RatchetWatermark {
     pub pairing_epoch: u64,
@@ -280,19 +328,31 @@ impl RatchetWatermark {
         }
     }
 
-    /// True when `self` is strictly ahead of `other` in lexicographic order.
+    /// True when `self` strictly DOMINATES `other` component-wise: at least as
+    /// advanced in every component (epoch, generation, send, recv) and
+    /// strictly more advanced in at least one. This is a PARTIAL order — a
+    /// watermark that is ahead in send but behind in recv is INCOMPARABLE
+    /// with one that is ahead in recv but behind in send (neither dominates),
+    /// and the import guard refuses that situation too: importing either one
+    /// would roll back the chain the other leads. No caller can re-derive a
+    /// lexicographic "one chain masks the other" interpretation (audit #1).
     pub fn is_ahead_of(&self, other: &Self) -> bool {
-        (
-            self.pairing_epoch,
-            self.ratchet_generation,
-            self.send_message_count,
-            self.recv_message_count,
-        ) > (
-            other.pairing_epoch,
-            other.ratchet_generation,
-            other.send_message_count,
-            other.recv_message_count,
-        )
+        self.pairing_epoch >= other.pairing_epoch
+            && self.ratchet_generation >= other.ratchet_generation
+            && self.send_message_count >= other.send_message_count
+            && self.recv_message_count >= other.recv_message_count
+            && *self != *other
+    }
+
+    /// True when `self` is at least as advanced as `other` in EVERY component
+    /// (dominance or equality). The monotonic guard's acceptance predicate
+    /// (audit #1): a snapshot import may proceed only when it satisfies this
+    /// against the live session — any component regression refuses the import.
+    pub(crate) fn dominates_or_equals(&self, other: &Self) -> bool {
+        self.pairing_epoch >= other.pairing_epoch
+            && self.ratchet_generation >= other.ratchet_generation
+            && self.send_message_count >= other.send_message_count
+            && self.recv_message_count >= other.recv_message_count
     }
 }
 
@@ -329,8 +389,8 @@ pub fn ratchet_session_watermark_impl(
 pub fn ratchet_snapshot_watermark_impl(
     data: &[u8],
 ) -> Result<Option<RatchetWatermark>, KyberError> {
-    let v: serde_json::Value = serde_json::from_slice(data)
-        .map_err(|e| KyberError::SerializationError(e.to_string()))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(data).map_err(|e| KyberError::SerializationError(e.to_string()))?;
     let Some(gen) = v.get("ratchet_generation").and_then(|g| g.as_u64()) else {
         return Ok(None);
     };
@@ -340,10 +400,7 @@ pub fn ratchet_snapshot_watermark_impl(
     let Some(recv) = v.get("recv_message_count").and_then(|g| g.as_u64()) else {
         return Ok(None);
     };
-    let epoch = v
-        .get("pairing_epoch")
-        .and_then(|g| g.as_u64())
-        .unwrap_or(0);
+    let epoch = v.get("pairing_epoch").and_then(|g| g.as_u64()).unwrap_or(0);
     Ok(Some(RatchetWatermark {
         pairing_epoch: epoch,
         ratchet_generation: gen as u32,
@@ -353,14 +410,13 @@ pub fn ratchet_snapshot_watermark_impl(
 }
 
 /// THE single rollback guard for snapshot import (audit finding #2
-/// follow-up). A snapshot may be imported only when no live session exists OR
-/// the live session is not strictly ahead of the snapshot in the lexicographic
-/// `(pairing_epoch, ratchet_generation, send_message_count,
-/// recv_message_count)` order. Returns `Ok(true)` when the import must be
-/// REFUSED. This is the only comparison the import surface performs — the
-/// store layers either call this (via `ratchet_import_session`) or mirror the
-/// same `RatchetWatermark` ordering, so the guard and the watermark checks
-/// cannot drift.
+/// follow-up + AUDIT #1). A snapshot may be imported only when no live session
+/// exists OR the snapshot is at least as advanced as the live session in
+/// EVERY component. Returns `Ok(true)` when the import must be REFUSED. This
+/// is the only comparison the import surface performs — the store layers
+/// either call this (via `ratchet_import_session`) or mirror the same
+/// `RatchetWatermark` ordering, so the guard and the watermark checks cannot
+/// drift.
 fn import_watermark_guard(
     peer_identity: &str,
     snap_wm: &RatchetWatermark,
@@ -392,9 +448,19 @@ fn import_watermark_guard(
         );
         return Ok(true);
     }
-    if live_wm.is_ahead_of(snap_wm) {
+    // AUDIT #1 (HIGH): component-wise monotonic guard. The import is refused
+    // unless the snapshot is at least as advanced as the live session in
+    // EVERY component — `snap.send >= live.send AND snap.recv >= live.recv`
+    // (and generation). The legacy lexicographic guard let the send chain's
+    // lead mask a recv-chain regression (live send=0/recv=100, snapshot
+    // send=50/recv=0 was judged "not a rollback" and imported, replacing the
+    // live receiving chain positioned at seq 100 with the snapshot's at
+    // seq 0 — silent desync + an authenticated replay window for the old
+    // messages). `is_ahead_of`/`dominates_or_equals` encode the SAME partial
+    // order, so no caller can re-derive a divergent interpretation.
+    if !snap_wm.dominates_or_equals(&live_wm) {
         tracing::warn!(
-            "[Import] Refusing snapshot for {peer_identity}: live watermark {:?} is ahead of snapshot watermark {:?} — refusing chain rollback (audit finding #2)",
+            "[Import] Refusing snapshot for {peer_identity}: live watermark {:?} is not dominated by snapshot watermark {:?} — component-wise rollback guard refuses the import (audit finding #1)",
             live_wm, snap_wm,
         );
         return Ok(true);
@@ -407,12 +473,13 @@ pub fn ratchet_import_session_impl(peer_identity: &str, data: &[u8]) -> Result<(
         serde_json::from_slice(data).map_err(|e| KyberError::SerializationError(e.to_string()))?;
     let snap_wm = RatchetWatermark::from_snapshot(&snap);
 
-    // Centralized lexicographic watermark guard (epoch, generation, SEND count,
-    // recv count). The former guard compared only (generation, recv count) and
-    // was send-chain-blind: a live session that had sent MORE than the snapshot
-    // was judged "not ahead" and the import rolled the send chain back — the
-    // (key, nonce) reuse hazard. The store-level watermark already included
-    // send; this guard is now the single source of truth for the FFI surface.
+    // Centralized COMPONENT-WISE monotonic watermark guard (epoch, generation,
+    // SEND count, recv count). The legacy guard compared only (generation,
+    // recv count) and was send-chain-blind; the first lexicographic 4-tuple
+    // fix added send but let send MASK recv (one-sided chain rollback — audit
+    // #1). This guard refuses unless the snapshot dominates the live session
+    // in every component. The store-level watermark mirrors the same partial
+    // order; this guard is the single source of truth for the FFI surface.
     if import_watermark_guard(peer_identity, &snap_wm)? {
         return Ok(());
     }

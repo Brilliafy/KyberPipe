@@ -222,13 +222,26 @@ fn quic_connect_with_mode(
 }
 
 pub fn quic_send_and_recv_impl(stream_type: u8, body_json: String) -> Result<String, KyberError> {
-    let conn = crate::quic_bridge::get_or_reconnect()?;
-    // AUDIT F5: bound every send/recv with a hard timeout, and on expiry CLOSE
-    // the connection so the reconnect state machine re-establishes against the
-    // candidate address set instead of reusing a blackholed socket forever.
+    // AUDIT #6 (a): per-peer in-flight gate around the WHOLE round-trip (the
+    // legacy path routes through the active peer).
     let peer = crate::quic_bridge::active_peer_key();
-    match crate::block_on_sync_timeout(
-        crate::quic_bridge::quic_send_and_recv_impl(&conn, stream_type, &body_json),
+    let _gate = match &peer {
+        Some(key) => {
+            crate::quic_bridge::acquire_in_flight(key, std::time::Duration::from_secs(10))?
+        }
+        None => crate::quic_bridge::acquire_in_flight(
+            "<legacy-active>",
+            std::time::Duration::from_secs(10),
+        )?,
+    };
+    let conn = crate::quic_bridge::get_or_reconnect()?;
+    // AUDIT F5 + AUDIT #6 (b): bound every send/recv with a hard timeout, and
+    // on expiry ABORT the round-trip task (real cancellation, no leaked
+    // future) and CLOSE the connection so the reconnect state machine
+    // re-establishes against the candidate address set instead of reusing a
+    // blackholed socket forever.
+    match crate::block_on_sync_timeout_abortable(
+        crate::quic_bridge::quic_send_and_recv_impl(conn.clone(), stream_type, body_json.clone()),
         std::time::Duration::from_secs(crate::network_api::QUIC_IO_TIMEOUT_SECS),
     ) {
         Some(Ok(s)) => Ok(s),

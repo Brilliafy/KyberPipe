@@ -61,6 +61,15 @@ class SettingsManager(context: Context) : org.kyberpipe.client.service.PollSetti
         get() = securePrefs.getString("peer_ratchet_identity", "") ?: ""
         set(value) = securePrefs.edit().putString("peer_ratchet_identity", value).apply()
 
+    /// The PAIRED desktop's ML-DSA beacon signing public key (hex), persisted
+    /// from the QR at pairing (audit finding #5). The mDNS listener rejects any
+    /// LAN beacon whose embedded signing key is not this key, so an attacker
+    /// cannot forge a beacon that looks like the paired desktop. Empty when the
+    /// QR predates the field (beacons are then hints only — never applied).
+    var pairedBeaconSigningKey: String
+        get() = securePrefs.getString("paired_beacon_signing_key", "") ?: ""
+        set(value) = securePrefs.edit().putString("paired_beacon_signing_key", value).apply()
+
     /// Server TLS certificate pin (64-char hex SHA-256). Stored ONLY after the
     /// user confirms the SAS out-of-band — never on first connect (TOFU MitM
     /// hazard).
@@ -224,7 +233,7 @@ class SettingsManager(context: Context) : org.kyberpipe.client.service.PollSetti
         set(value) = prefs.edit().putBoolean("amoled_mode", value).apply()
 
     var pathwayOrder: String
-        get() = prefs.getString("pathway_order", "wifi_direct,mdns_lan,wireguard_wan") ?: "wifi_direct,mdns_lan,wireguard_wan"
+        get() = prefs.getString("pathway_order", "mdns_lan,wireguard_wan") ?: "mdns_lan,wireguard_wan"
         set(value) = prefs.edit().putString("pathway_order", value).apply()
 
     var purgeDays: Int

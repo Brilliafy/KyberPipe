@@ -111,9 +111,22 @@ export function usePairing(deps: PairingDeps) {
           "cannot build a valid pairing QR."
       );
     }
+    // The desktop's ML-DSA beacon signing public key (audit finding #5). The
+    // phone persists it at pairing and later REJECTS LAN beacons whose embedded
+    // signing key is not this key — so an unauthenticated beacon can never be
+    // forged to look like the paired desktop. Best-effort: if the command fails
+    // the QR still builds (the beacon key only gates the OPTIONAL LAN discovery
+    // IP hint, never pairing itself).
+    let beaconSigningPk = "";
+    try {
+      beaconSigningPk = (await invoke<string>("get_beacon_signing_key")) || "";
+    } catch (e) {
+      console.error("get_beacon_signing_key failed:", e);
+    }
     return {
       pairing_nonce_hex: nonce,
       server_cert_hash: serverCertHash,
+      ...(beaconSigningPk ? { beacon_signing_pk: beaconSigningPk } : {}),
     };
   };
 
@@ -125,6 +138,7 @@ export function usePairing(deps: PairingDeps) {
     const merged: Record<string, unknown> = { ...payload };
     if (binding.pairing_nonce_hex) merged.pairing_nonce_hex = binding.pairing_nonce_hex;
     if (binding.server_cert_hash) merged.server_cert_hash = binding.server_cert_hash;
+    if (binding.beacon_signing_pk) merged.beacon_signing_pk = binding.beacon_signing_pk;
     return merged;
   };
 
@@ -198,22 +212,10 @@ export function usePairing(deps: PairingDeps) {
   const handlePairLocally = async (method: string) => {
     localMethod.value = method;
     localActive.value = true;
-    if (method === "wifi_direct") {
-      try {
-        const p2pInfo = await invoke<any>("create_p2p_group");
-        await buildPairingQr({
-          method: "p2p",
-          ssid: p2pInfo.ssid,
-          pass: p2pInfo.passphrase,
-          p2p_ip: p2pInfo.ip,
-          wifi_direct_mac: p2pInfo.mac,
-          pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-          x25519_pub: keyPair.value?.x25519_pk_hex || "",
-        });
-      } catch (e) {
-        console.error("P2P group creation failed:", e);
-      }
-    } else if (method === "mdns") {
+    // Wi-Fi Direct was removed from the product (audit finding #1: the group
+    // was never actually WPA2-secured, the passphrase never applied, and the
+    // Android join path was a dead stub) — `create_p2p_group` no longer exists.
+    if (method === "mdns") {
       await buildPairingQr({
         method: "mdns",
         service: "_kyberpipe._tcp.local",

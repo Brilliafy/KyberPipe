@@ -7,7 +7,7 @@
 //! a TTL, a replay cap or a retry budget touches one module and cannot drift
 //! from the predicates that consume it.
 
-use super::state::IncomingProposal;
+use super::state::{IncomingProposal, RekeyCarrier};
 use std::collections::VecDeque;
 
 /// Wall-clock lifetime of an unconsumed INCOMING rekey proposal (audit
@@ -38,6 +38,22 @@ pub(crate) fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
+/// The effective age of a pending rekey carrier, bounded by BOTH clocks
+/// (audit finding #8): the MAXIMUM of the monotonic elapsed time and the
+/// wall-clock elapsed time. A wall-clock rollback cannot stretch the retry
+/// window; a forward jump cannot instantly evict a live carrier. The single
+/// helper is used by BOTH consumers — the encrypt-path retry eviction and the
+/// resync-path staleness predicate — so the two code paths can never disagree
+/// about the same carrier (the finding #8 drift surface). `attached_at_mono`
+/// was dead code (redundant with the monotonic `attached_at` stamp) and has
+/// been removed.
+pub(crate) fn carrier_effective_age(c: &RekeyCarrier) -> std::time::Duration {
+    let mono_elapsed = c.attached_at.elapsed();
+    let wall_elapsed =
+        std::time::Duration::from_secs(now_unix_secs().saturating_sub(c.attached_at_unix));
+    mono_elapsed.max(wall_elapsed)
+}
+
 /// Whether the INCOMING proposal has exceeded its bounded lifetime. A proposal
 /// with no recorded attach time is treated as fresh (conservative: refuses
 /// resync until a TTL has demonstrably elapsed).
@@ -66,23 +82,18 @@ pub(crate) fn incoming_proposal_is_stale(p: &IncomingProposal) -> bool {
 /// acked and no re-send traffic has flowed for the TTL window — the proposal
 /// is stale and must not block recovery.
 ///
-/// Audit finding #8: a restored-but-unacked proposal (queue entries present,
-/// no re-send has flowed since restart) must NOT be evicted. The monotonic
-/// `attached_at` is reset on restore, so staleness here is judged by the
-/// persisted wall-clock `attached_at_unix` (which survives restart) and the
-/// monotonic clock is used only as a floor: the effective age is the max of
-/// both, exactly like the incoming TTL (audit finding #10).
-pub(crate) fn outgoing_proposal_is_stale(queue: &VecDeque<super::state::RekeyCarrier>) -> bool {
+/// Audit finding #8: the effective age of every carrier is judged by
+/// [`carrier_effective_age`] — the max of the monotonic and the persisted
+/// wall-clock elapsed — so a restored carrier whose monotonic stamp was reset
+/// to `now` by `from_snapshot` still ages by its persisted wall-clock attach
+/// time and does NOT resurrect as "fresh" for the resend path while the
+/// encrypt path evicts it (or vice versa). Both consumers share the helper.
+pub(crate) fn outgoing_proposal_is_stale(queue: &VecDeque<RekeyCarrier>) -> bool {
     if queue.is_empty() {
         // No live carrier — nothing to evict (a half-committed proposal whose
         // queue was lost is re-staged by encrypt.rs, never evicted here).
         return false;
     }
-    let now_unix = now_unix_secs();
-    queue.iter().all(|c| {
-        let wall_elapsed = now_unix.saturating_sub(c.attached_at_unix);
-        let mono_elapsed = c.attached_at.elapsed().as_secs();
-        wall_elapsed.max(mono_elapsed)
-            >= std::time::Duration::from_secs(INCOMING_REKEY_TTL_SECS).as_secs()
-    })
+    let ttl = std::time::Duration::from_secs(INCOMING_REKEY_TTL_SECS);
+    queue.iter().all(|c| carrier_effective_age(c) >= ttl)
 }

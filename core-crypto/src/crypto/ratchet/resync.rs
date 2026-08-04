@@ -93,6 +93,39 @@ pub(crate) fn prune_skip_keys(
     }
 }
 
+/// THE single cached-key decrypt (AUDIT #5 — VERIFY-THEN-REMOVE).
+///
+/// All THREE skip-cache consumers (the plain decrypt path, the rekey-aware
+/// decrypt path and the previous-generation path) MUST consume a cached
+/// message key only AFTER the AEAD tag verifies. The legacy previous-
+/// generation path removed the key BEFORE `decrypt_chacha20`, so an on-path
+/// attacker who flipped one ciphertext bit of a captured legitimate frame and
+/// replayed it permanently burned the cached key — the genuine frame arriving
+/// later found no key, and the retained chain cannot step below its anchor,
+/// so that out-of-order delivery was lost forever (a deterministic message-
+/// loss DoS straddling a rekey commit).
+///
+/// Returns `Ok(Some(plaintext))` when a cached key existed AND authenticated
+/// (the key is removed ONLY then), `Ok(None)` when no key is cached for
+/// `(gen, seq)`, and `Err` on AEAD failure (the key is KEPT so the genuine
+/// frame can still be delivered).
+pub(crate) fn try_decrypt_with_cached_key(
+    store: &mut SkipKeyMap,
+    nonce_gen: u32,
+    seq: u64,
+    nonce: &[u8; 12],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Option<Vec<u8>>, KyberError> {
+    let Some(cached_key) = store.get(&(nonce_gen, seq)).cloned() else {
+        return Ok(None);
+    };
+    // AEAD verification FIRST — consume the key only after it authenticates.
+    let plaintext = super::super::decrypt_chacha20(&cached_key, nonce, ciphertext, aad)?;
+    store.remove(&(nonce_gen, seq));
+    Ok(Some(plaintext))
+}
+
 impl DoubleRatchetState {
     /// Explicit session resync after a gap exceeded `max_skip` (e.g. a Wi-Fi →
     /// cellular handoff dropped a burst of messages). Derives skip keys for the

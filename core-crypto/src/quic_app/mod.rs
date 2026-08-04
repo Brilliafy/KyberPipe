@@ -1,68 +1,27 @@
+//! QUIC application layer: endpoint lifecycle (bind/rebind/accept), server
+//! TLS identity + mTLS client-cert allowlist, and the high-level connection
+//! manager. AUDIT FINDING #14 (structural decomposition): the frame CODEC
+//! lives in [`frame`] (this module re-exports it) so a wire-format change
+//! cannot entangle with the endpoint lifecycle; the TLS client-cert verifier
+//! itself lives in `crate::network::tls_config`.
+
 use crate::error::KyberError;
 use crate::network;
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, Endpoint};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
+pub mod frame;
+pub use frame::{
+    QuicFrame, MAX_MESSAGE_SIZE, STREAM_CLIPBOARD, STREAM_MEDIA, STREAM_PAIRING, STREAM_POLL,
+    STREAM_REKEY_ACK, STREAM_SMS, STREAM_UNPAIR,
+};
+
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-
-/// Stream type identifiers for multiplexed QUIC application protocol
-pub const STREAM_PAIRING: u8 = 0x01;
-pub const STREAM_CLIPBOARD: u8 = 0x02;
-pub const STREAM_MEDIA: u8 = 0x03;
-pub const STREAM_POLL: u8 = 0x04;
-pub const STREAM_UNPAIR: u8 = 0x05;
-pub const STREAM_REKEY_ACK: u8 = 0x06;
-pub const STREAM_SMS: u8 = 0x07;
-
-/// Maximum message body size (1 MB) — clipboard/media payloads
-pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-
-/// Binary frame: [stream_type: 1B][body_len: 4B][body: body_len]
-#[derive(Debug)]
-pub struct QuicFrame {
-    #[allow(dead_code)]
-    pub stream_type: u8,
-    pub body: Vec<u8>,
-}
-
-impl QuicFrame {
-    pub fn encode(&self) -> Vec<u8> {
-        let len = self.body.len() as u32;
-        let mut buf = Vec::with_capacity(5 + self.body.len());
-        buf.push(self.stream_type);
-        buf.extend_from_slice(&len.to_be_bytes());
-        buf.extend_from_slice(&self.body);
-        buf
-    }
-
-    pub fn decode(data: &[u8]) -> Result<Self, KyberError> {
-        if data.len() < 5 {
-            return Err(KyberError::NetworkError("Frame too short".into()));
-        }
-        let stream_type = data[0];
-        let mut len_bytes = [0u8; 4];
-        len_bytes.copy_from_slice(&data[1..5]);
-        let body_len = u32::from_be_bytes(len_bytes) as usize;
-        if body_len > MAX_MESSAGE_SIZE {
-            return Err(KyberError::NetworkError(format!(
-                "Frame body too large: {body_len} > {MAX_MESSAGE_SIZE}"
-            )));
-        }
-        if data.len() < 5 + body_len {
-            return Err(KyberError::NetworkError("Frame truncated".into()));
-        }
-        Ok(QuicFrame {
-            stream_type,
-            body: data[5..5 + body_len].to_vec(),
-        })
-    }
-}
 
 /// High-level QUIC application connection manager
 pub struct QuicAppManager;
@@ -72,6 +31,17 @@ pub struct QuicAppManager;
 /// to configure server-side cert pinning on subsequent QUIC connections.
 static PINNED_CLIENT_CERT: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
+/// TEST/TEARDOWN ONLY (e2e): bypass the OS keyring for the server TLS identity
+/// and keep the 0600 `server_key.der` file as the durable store. Some
+/// headless/CI environments have a keyring backend that accepts
+/// `set_password` but does NOT persist across `keyring::Entry` instances — the
+/// mTLS rebind (which loads the server identity a SECOND time) would otherwise
+/// hit the audit-#4 unaccounted-key guard and brick the swap. The e2e sets
+/// this to make the post-pairing cert-less-rejection assertion deterministic
+/// (same pattern as `FORCE_EMPTY_CLIPBOARD`).
+pub static FORCE_LEGACY_KEY_FILE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// AUDIT FINDING #4 (multi-device): the set of client-cert hashes the TLS
 /// layer will admit. Seeded by `set_pinned_client_cert` (the first paired
 /// device) and EXTENDED by `register_allowed_client_cert` for every additional
@@ -80,8 +50,9 @@ static PINNED_CLIENT_CERT: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock
 /// same set, so a second paired device's certificate passes the TLS handshake
 /// exactly when the stream layer would route it. `rebind_server` rebuilds the
 /// verifier from the full set.
-static ALLOWED_CLIENT_CERTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static ALLOWED_CLIENT_CERTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 fn allowed_client_certs() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
     ALLOWED_CLIENT_CERTS
@@ -158,6 +129,20 @@ fn store_server_endpoint(ep: Endpoint) -> Option<Endpoint> {
     old
 }
 
+/// Take the current server endpoint OUT of the process-global static, setting
+/// it to None and returning the old endpoint (if any) for explicit teardown.
+/// Used by `rebind_server` so the old endpoint can be `close()`d and dropped
+/// BEFORE the new socket is bound — otherwise the second plain
+/// `UdpSocket::bind` to the same 0.0.0.0:port fails with EADDRINUSE (audit
+/// finding #2).
+fn take_server_endpoint() -> Option<Endpoint> {
+    let cell = SERVER_ENDPOINT.get_or_init(|| std::sync::Mutex::new(None));
+    match cell.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
 /// TEST/TEARDOWN ONLY: drop the process-global server endpoint so its UDP
 /// socket and driver tasks release before the test process exits (audit
 /// finding #4 follow-up — the lingering e2e). Returns whether an endpoint was
@@ -227,23 +212,43 @@ fn load_or_generate_cert() -> Result<
             .map_err(|e| KyberError::NetworkError(format!("Failed to read cert: {e}")))?;
         let cert = rustls::pki_types::CertificateDer::from(cert_der);
 
-        // 1) Keyring first — the preferred store.
-        if let Ok(key_der) = keyring_server_key() {
-            return Ok((
-                vec![cert],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
-            ));
+        // 1) Keyring first — the preferred store (unless the e2e forces the legacy
+        //    key-file path for determinism on keyring-less test machines).
+        if !FORCE_LEGACY_KEY_FILE.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(key_der) = keyring_server_key() {
+                return Ok((
+                    vec![cert],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+                ));
+            }
         }
         // 2) Legacy plaintext key file — migrate it into the keyring and
         //    remove it from disk. The key file is deleted ONLY after the
-        //    keyring store succeeds; if the keyring is unavailable, the
+        //    keyring store is VERIFIED by a readback of the exact key; if the
+        //    keyring is unavailable OR its write does not round-trip, the
         //    plaintext file is KEPT (with a warning) so the server can still
-        //    start — never destroy the only copy of the key.
+        //    start — never destroy the only copy of the key (audit finding #2:
+        //    a backend that accepts `set_password` but is not durable would
+        //    otherwise leave the rebind's second identity load with an
+        //    unaccounted-for key and brick the mTLS swap).
         if key_path.exists() {
             if let Ok(key_der) = std::fs::read(&key_path) {
+                if FORCE_LEGACY_KEY_FILE.load(std::sync::atomic::Ordering::Relaxed) {
+                    // e2e: the key file IS the durable store for the test run.
+                    return Ok((
+                        vec![cert],
+                        rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+                    ));
+                }
                 match keyring_store_server_key(&key_der) {
                     Ok(()) => {
-                        let _ = std::fs::remove_file(&key_path);
+                        if keyring_server_key().is_ok_and(|k| k == key_der) {
+                            let _ = std::fs::remove_file(&key_path);
+                        } else {
+                            warn!(
+                            "[TLS] Keyring write did not verify durable; keeping legacy plaintext server key on disk"
+                        );
+                        }
                         return Ok((
                             vec![cert],
                             rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
@@ -251,8 +256,8 @@ fn load_or_generate_cert() -> Result<
                     }
                     Err(e) => {
                         warn!(
-                            "[TLS] Keyring unavailable ({e}); keeping legacy plaintext server key on disk"
-                        );
+                        "[TLS] Keyring unavailable ({e}); keeping legacy plaintext server key on disk"
+                    );
                         return Ok((
                             vec![cert],
                             rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
@@ -303,8 +308,15 @@ fn load_or_generate_cert() -> Result<
         rustls::pki_types::PrivateKeyDer::Pkcs8(doc) => doc.secret_pkcs8_der().to_vec(),
         other => other.secret_der().to_vec(),
     };
-    let keyring_durable = keyring_store_server_key(&key_der).is_ok()
-        && keyring_server_key().is_ok_and(|k| k == key_der);
+    // The e2e forces the legacy key-file path so the mTLS rebind (which loads
+    // the identity a second time) is deterministic on keyring-less machines.
+    let force_legacy = FORCE_LEGACY_KEY_FILE.load(std::sync::atomic::Ordering::Relaxed);
+    let keyring_durable = if force_legacy {
+        false
+    } else {
+        keyring_store_server_key(&key_der).is_ok()
+            && keyring_server_key().is_ok_and(|k| k == key_der)
+    };
     if !keyring_durable {
         // Keyring unavailable or non-durable — persist a 0600 key file (the
         // same fallback branch 2 uses for a legacy key file), so the cert is
@@ -376,8 +388,9 @@ impl QuicAppManager {
     /// Call after pairing completes to enforce mTLS on subsequent connections.
     /// Re-binds on the SAME port the server currently uses (the peer
     /// reconnects to the same address) and swaps the endpoint atomically — the
-    /// old endpoint's `accept()` returns None, which triggers the dispatch loop
-    /// to re-acquire the new endpoint and continue.
+    /// old endpoint is CLOSED and dropped first so the new bind cannot fail
+    /// with EADDRINUSE, and the dispatch loop sees `accept() → None`, drops its
+    /// old clone, and re-acquires the new endpoint from the static.
     pub async fn rebind_server(port: u16) -> Result<(), KyberError> {
         // AUDIT FINDING #4: rebinding requires at least ONE authorized client
         // cert. An empty allowlist means no pairing ever completed — rebinding
@@ -394,11 +407,50 @@ impl QuicAppManager {
             None => port,
         };
         info!("Rebinding QUIC server on port {port} with mTLS enforcement");
+
+        // AUDIT FINDING #2 (HIGH): the old endpoint MUST be closed and dropped
+        // BEFORE the new socket is bound. The legacy code called bind_server
+        // while the old endpoint was still referenced by SERVER_ENDPOINT and by
+        // the dispatch loop's clone — the second plain UdpSocket::bind to the
+        // same 0.0.0.0:port failed with EADDRINUSE, the error was logged as
+        // "mTLS will take effect on next restart", and the running TLS verifier
+        // kept its pre-pairing accept-any snapshot. `close()` flips the
+        // dispatch loop's blocked `accept()` to None immediately (it re-acquires
+        // the current endpoint from the static and drops its old clone);
+        // dropping OUR reference here releases the UDP socket once the loop's
+        // clone is gone.
+        if let Some(old) = take_server_endpoint() {
+            old.close(quinn::VarInt::from_u32(0), b"mTLS rebind");
+            drop(old);
+            // The socket is released only when the LAST Endpoint clone is
+            // dropped (the dispatch loop's clone goes away once it observes the
+            // close). Wait for the port to become free with a bounded poll —
+            // probe-bind without SO_REUSEADDR so an EADDRINUSE answer is a
+            // reliable "still held" signal — instead of guessing a sleep.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+                match std::net::UdpSocket::bind(addr) {
+                    Ok(probe) => {
+                        drop(probe);
+                        break;
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(e) => {
+                        return Err(KyberError::NetworkError(format!(
+                            "Rebind aborted: port {port} still held by the previous endpoint: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Now that the old socket is released, the same-port bind succeeds.
+        // bind_server stores the new endpoint via store_server_endpoint; the
+        // dispatch loop's next `accept() → None` re-acquisition picks it up.
         let new_endpoint = Self::bind_server(port).await?;
-        // bind_server already stored the new endpoint via store_server_endpoint.
-        // The old endpoint (if any) was dropped by store_server_endpoint,
-        // causing the accept loop to see `accept() → None` and restart with
-        // the new endpoint.
         drop(new_endpoint);
         Ok(())
     }
@@ -454,7 +506,7 @@ impl QuicAppManager {
     pub async fn open_stream(
         conn: &Connection,
         _stream_type: u8,
-    ) -> Result<(SendStream, RecvStream), KyberError> {
+    ) -> Result<(quinn::SendStream, quinn::RecvStream), KyberError> {
         let (send, recv) = conn
             .open_bi()
             .await
@@ -462,67 +514,34 @@ impl QuicAppManager {
         Ok((send, recv))
     }
 
-    pub async fn send_frame(send: &mut SendStream, frame: &QuicFrame) -> Result<(), KyberError> {
-        let data = frame.encode();
-        send.write_all(&data)
-            .await
-            .map_err(|e| KyberError::NetworkError(format!("Send frame failed: {e}")))?;
-        Ok(())
+    pub async fn send_frame(
+        send: &mut quinn::SendStream,
+        frame: &QuicFrame,
+    ) -> Result<(), KyberError> {
+        frame::send_frame(send, frame).await
     }
 
-    pub async fn recv_frame(recv: &mut RecvStream) -> Result<QuicFrame, KyberError> {
-        let (stream_type, body_len) = Self::recv_frame_header(recv).await?;
-        let body = Self::recv_frame_body(recv, body_len).await?;
-        Ok(QuicFrame { stream_type, body })
+    pub async fn recv_frame(recv: &mut quinn::RecvStream) -> Result<QuicFrame, KyberError> {
+        frame::recv_frame(recv).await
     }
 
     /// Read ONLY the 5-byte frame header (stream_type + body_len). The server
     /// authorizes the stream from the header BEFORE reading the body, so an
     /// unauthenticated peer cannot force the server to buffer up to 1 MiB per
     /// stream before being rejected (audit finding #8).
-    pub async fn recv_frame_header(recv: &mut RecvStream) -> Result<(u8, usize), KyberError> {
-        let mut header = [0u8; 5];
-        recv.read_exact(&mut header)
-            .await
-            .map_err(|e| KyberError::NetworkError(format!("Read frame header failed: {e}")))?;
-        let stream_type = header[0];
-        let mut len_bytes = [0u8; 4];
-        len_bytes.copy_from_slice(&header[1..5]);
-        let body_len = u32::from_be_bytes(len_bytes) as usize;
-        if body_len > MAX_MESSAGE_SIZE {
-            return Err(KyberError::NetworkError(format!(
-                "Frame body too large: {body_len} > {MAX_MESSAGE_SIZE}"
-            )));
-        }
-        Ok((stream_type, body_len))
+    pub async fn recv_frame_header(
+        recv: &mut quinn::RecvStream,
+    ) -> Result<(u8, usize), KyberError> {
+        frame::recv_frame_header(recv).await
     }
 
     /// Read the frame body of `body_len` bytes (bounded by MAX_MESSAGE_SIZE,
     /// already validated in `recv_frame_header`).
     pub async fn recv_frame_body(
-        recv: &mut RecvStream,
+        recv: &mut quinn::RecvStream,
         body_len: usize,
     ) -> Result<Vec<u8>, KyberError> {
-        if body_len > MAX_MESSAGE_SIZE {
-            return Err(KyberError::NetworkError(format!(
-                "Frame body too large: {body_len} > {MAX_MESSAGE_SIZE}"
-            )));
-        }
-        let mut body = Vec::with_capacity(body_len.min(8192));
-        if body_len > 0 {
-            let mut limited = recv.take(body_len as u64);
-            limited
-                .read_to_end(&mut body)
-                .await
-                .map_err(|e| KyberError::NetworkError(format!("Read frame body failed: {e}")))?;
-            if body.len() != body_len {
-                return Err(KyberError::NetworkError(format!(
-                    "Frame body truncated: expected {body_len} bytes, got {}",
-                    body.len()
-                )));
-            }
-        }
-        Ok(body)
+        frame::recv_frame_body(recv, body_len).await
     }
 }
 

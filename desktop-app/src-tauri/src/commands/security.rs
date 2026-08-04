@@ -13,6 +13,10 @@ use tauri::State;
 // dialog). Tokens expire after TOKEN_TTL and can be used exactly once.
 
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Cap on concurrently-outstanding (unconsumed) tokens per action (AUDIT #15):
+/// a compromised renderer must not be able to mint an unbounded pool of tokens
+/// to spray across retries after the user approved the dialog once.
+const TOKEN_MAX_OUTSTANDING_PER_ACTION: usize = 4;
 static PRIVILEGE_TOKENS: LazyLock<std::sync::Mutex<VecDeque<(String, String, Instant)>>> =
     LazyLock::new(|| std::sync::Mutex::new(VecDeque::new()));
 
@@ -73,15 +77,51 @@ pub(crate) const CONSUMED_TOKEN_ACTIONS: &[&str] = &[
     "bind_pkcs11_yubikey_hardware_token",
 ];
 
+/// TEST-ONLY hermetic override: auto-confirm the native gesture dialog so
+/// token-gated commands can be exercised without a display (CI/e2e).
+#[cfg(test)]
+pub(crate) static AUTO_CONFIRM_GESTURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Issue a single-use, expiring token for a privileged action.
 /// AUDIT F15: the action is validated against the allowlist — an unknown
 /// action is rejected outright instead of minting a token that could later be
 /// matched against a command we never intended to gate.
+///
+/// AUDIT #15 (native gesture attestation): the token is minted ONLY after the
+/// user confirms a NATIVE (OS-rendered) dialog driven from Rust. The legacy
+/// design trusted the renderer's promise that a `confirm()` dialog had run —
+/// so under a webview compromise (XSS, supply-chain, devtools) the attacker
+/// called `request_privilege_token` then the privileged command in the SAME
+/// tick with a self-minted token. With the native dialog the "gesture" is
+/// un-forgeable: a compromised renderer can only trigger the dialog; a token
+/// exists only if a real user clicks "Yes" in the native window. The existing
+/// per-command capability allowlists (paths, scripts, subprocess rlimits)
+/// remain as the second boundary.
 #[tauri::command]
-pub fn request_privilege_token(action: String) -> Result<String, String> {
+pub async fn request_privilege_token(action: String) -> Result<String, String> {
     if !ALLOWED_TOKEN_ACTIONS.contains(&action.as_str()) {
         return Err(format!(
             "Privileged action '{action}' is not in the allowlist — token refused (audit F15)"
+        ));
+    }
+    let confirmed = {
+        #[cfg(test)]
+        {
+            if AUTO_CONFIRM_GESTURE.load(std::sync::atomic::Ordering::Acquire) {
+                true
+            } else {
+                native_gesture_confirmed(&action).await
+            }
+        }
+        #[cfg(not(test))]
+        {
+            native_gesture_confirmed(&action).await
+        }
+    };
+    if !confirmed {
+        return Err(format!(
+            "Privileged action '{action}' was not confirmed by the user in the native dialog"
         ));
     }
     let mut token_bytes = [0u8; 16];
@@ -89,8 +129,35 @@ pub fn request_privilege_token(action: String) -> Result<String, String> {
     let token = hex::encode(token_bytes);
     let mut guard = PRIVILEGE_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|(_, _, at)| at.elapsed() < TOKEN_TTL);
+    // AUDIT #15: cap the number of concurrently-outstanding tokens per action
+    // so a compromised renderer cannot mint an unbounded pool to spray across
+    // retries after a single user approval.
+    let outstanding = guard.iter().filter(|(a, _, _)| a == &action).count();
+    if outstanding >= TOKEN_MAX_OUTSTANDING_PER_ACTION {
+        return Err(format!(
+            "Too many outstanding tokens for '{action}' ({outstanding}) — reuse or wait for expiry (audit #15)"
+        ));
+    }
     guard.push_back((action, token.clone(), Instant::now()));
     Ok(token)
+}
+
+/// Show the native OS confirmation dialog for a privileged action. Returns
+/// true only when the user clicked "Yes". Runs via `AsyncMessageDialog` so the
+/// GTK dialog is driven off the command thread (rfd spawns a dedicated thread;
+/// a blocking GTK dialog would need the main thread).
+async fn native_gesture_confirmed(action: &str) -> bool {
+    matches!(
+        rfd::AsyncMessageDialog::new()
+            .set_title("KyberPipe — confirm privileged action")
+            .set_description(format!(
+                "A privileged action is about to run in KyberPipe:\n\n    {action}\n\nClick Yes only if you initiated this."
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            .await,
+        rfd::MessageDialogResult::Yes
+    )
 }
 
 /// Consume a token. Returns true exactly once per issued token.

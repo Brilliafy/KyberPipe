@@ -1,4 +1,6 @@
-use core_crypto::crypto::ClipboardDeduplicator;
+// AUDIT #21: the clipboard deduplicator is an app-level helper — it now lives
+// in `core_crypto::utils`, not the crypto-primitive re-export module.
+use core_crypto::utils::ClipboardDeduplicator;
 use core_crypto::packets::{SensorPacket, SmsPacket};
 use core_crypto::PqKeyPair;
 use serde::{Deserialize, Serialize};
@@ -81,12 +83,6 @@ pub struct AppSettings {
     /// is emitted instead).
     #[serde(default = "default_true")]
     pub inbound_clipboard_enabled: bool,
-    /// Opt-in Wi-Fi Direct group creation (audit finding #14). Default OFF: the
-    /// legacy code created an open P2P group on every desktop start. When the
-    /// user enables it, the group is created with WPA2/WPA3 on a RUNTIME-
-    /// detected interface — never a hardcoded per-machine adapter.
-    #[serde(default)]
-    pub p2p_group_enabled: bool,
 }
 
 /// Serde default for the inbound-clipboard policy: ON for backward

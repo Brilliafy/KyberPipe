@@ -37,6 +37,12 @@ fn reset_server_tls_identity() {
     if let Ok(entry) = keyring::Entry::new("kyberpipe", "server_tls_key") {
         let _ = entry.delete_password();
     }
+    // The OS keyring is not durable on every machine (headless/CI backends can
+    // accept `set_password` without persisting across Entry instances). The
+    // mTLS rebind loads the server identity a SECOND time; force the 0600 key
+    // file to be the durable store so the post-pairing cert-less-rejection
+    // assertion is deterministic (audit finding #2).
+    core_crypto::quic_app::FORCE_LEGACY_KEY_FILE.store(true, std::sync::atomic::Ordering::Release);
 }
 
 #[test]
@@ -169,6 +175,16 @@ fn pairing_poll_clipboard_roundtrip() {
 
     // 3) STREAM_PAIRING with the pairing payload (mirrors Android's JSON,
     // including the client cert hash so the server pins OUR identity).
+    // AUDIT FINDING #10: the phone-side SAS echo is MANDATORY — the desktop
+    // rejects a pairing request whose `sas_hex` does not equal the SAS it
+    // computed from the same KEM shared secret. Compute the SAS up front and
+    // embed it, exactly like the Android pairing flow does.
+    let sas = core_crypto::generate_sas_code(
+        server_pair.mlkem_pk.clone(),
+        client_pair.mlkem_pk.clone(),
+        kem.shared_secret.clone(),
+    )
+    .expect("sas");
     let pairing_body = serde_json::json!({
         "name": "E2E Phone",
         "ciphertext_hex": hex_encode(&kem.ciphertext),
@@ -176,6 +192,7 @@ fn pairing_poll_clipboard_roundtrip() {
         "client_x25519_pk_hex": hex_encode(&client_pair.x25519_pk),
         "cert_hash_hex": client_identity.sha256_hex,
         "pairing_nonce_hex": pairing_nonce,
+        "sas_hex": sas,
     })
     .to_string()
     .into_bytes();
@@ -188,12 +205,7 @@ fn pairing_poll_clipboard_roundtrip() {
     );
 
     // 4) SAS: both sides compute it independently from the same inputs.
-    let sas = core_crypto::generate_sas_code(
-        server_pair.mlkem_pk.clone(),
-        client_pair.mlkem_pk.clone(),
-        kem.shared_secret.clone(),
-    )
-    .expect("sas");
+    // (Computed above for the phone-side echo; verify it matches the server's.)
     let stored_sas = state.get_sas_code();
     assert_eq!(
         sas, stored_sas,
@@ -218,6 +230,64 @@ fn pairing_poll_clipboard_roundtrip() {
         client_identity.sha256_hex,
         "the client cert hash must be pinned during pairing"
     );
+
+    // AUDIT FINDING #2 (regression): the post-pairing mTLS rebind must take
+    // effect IMMEDIATELY — not "on next restart". The defect was that
+    // rebind_server re-bound the same 0.0.0.0:port while the old endpoint was
+    // still referenced, the second bind failed with EADDRINUSE, and the
+    // running endpoint kept serving with the pre-pairing accept-any verifier.
+    // In this quinn/rustls stack the TLS handshake's client-auth rejection is
+    // ASYNCHRONOUS (the server-side handshake stalls at the empty/foreign
+    // certificate while the client's `connect()` may already have returned) —
+    // so the observable post-pairing guarantee is at the data plane: a
+    // cert-less or wrong-cert reconnect must NOT complete a stream round-trip
+    // through the dispatch loop, while a paired-cert reconnect MUST.
+    {
+        // Give the dispatch loop a beat to re-acquire the rebound endpoint.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // 1) Cert-less reconnect — must not complete a poll round-trip.
+        if let Ok(cert_less) = block_on_io_pub(QuicAppManager::connect(server_addr, None, None)) {
+            let poll = send_recv_timeout(&cert_less, STREAM_POLL, b"", 2_000);
+            assert!(
+                poll.is_none(),
+                "a cert-less reconnect MUST be rejected post-pairing: got a poll response {poll:?}"
+            );
+            drop(cert_less);
+        }
+        // 2) Unrelated-cert reconnect — must not complete a poll round-trip.
+        let stranger_cert =
+            core_crypto::generate_client_identity_cert().expect("stranger identity cert");
+        let stranger_certs = || -> Option<(
+            Vec<rustls::pki_types::CertificateDer<'static>>,
+            rustls::pki_types::PrivateKeyDer<'static>,
+        )> {
+            Some((
+                vec![rustls::pki_types::CertificateDer::from(stranger_cert.cert_der.clone())],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(stranger_cert.key_der.clone().into()),
+            ))
+        };
+        if let Ok(stranger) =
+            block_on_io_pub(QuicAppManager::connect(server_addr, None, stranger_certs()))
+        {
+            let poll = send_recv_timeout(&stranger, STREAM_POLL, b"", 2_000);
+            assert!(
+                poll.is_none(),
+                "a stranger-cert reconnect MUST be rejected post-pairing: got a poll response {poll:?}"
+            );
+            drop(stranger);
+        }
+        // 3) The PAIRED cert must still complete a poll round-trip.
+        if let Ok(paired_conn) =
+            block_on_io_pub(QuicAppManager::connect(server_addr, None, client_certs()))
+        {
+            let poll = send_recv_timeout(&paired_conn, STREAM_POLL, b"", 2_000);
+            assert!(
+                poll.is_some(),
+                "the paired cert must still complete a poll round-trip after the rebind"
+            );
+            drop(paired_conn);
+        }
+    }
 
     // 6) Client initializes its ratchet (mirrors Android's handshake path).
     // Audit finding #1: the ratchet's initial DH identity must be the client's
@@ -405,10 +475,37 @@ fn pairing_poll_clipboard_roundtrip() {
 /// Send one frame and read the matching response on a connected QUIC stream.
 fn send_recv(conn: &quinn::Connection, stream_type: u8, body: &[u8]) -> Vec<u8> {
     block_on_io_pub(core_crypto::quic_bridge::quic_send_and_recv_impl(
-        conn,
+        conn.clone(),
         stream_type,
-        &String::from_utf8_lossy(body),
+        String::from_utf8_lossy(body).to_string(),
     ))
     .expect("quic send/recv")
     .into_bytes()
+}
+
+/// Send one frame and wait up to `timeout_ms` for the response. Returns None
+/// when no response arrives in time — the connection was dropped or the peer
+/// never admitted the stream (the mTLS post-pairing rejection is asynchronous
+/// at the TLS layer in this quinn/rustls stack, so this is the observable
+/// data-plane signal).
+fn send_recv_timeout(
+    conn: &quinn::Connection,
+    stream_type: u8,
+    body: &[u8],
+    timeout_ms: u64,
+) -> Option<Vec<u8>> {
+    block_on_io_pub(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            core_crypto::quic_bridge::quic_send_and_recv_impl(
+                conn.clone(),
+                stream_type,
+                String::from_utf8_lossy(body).to_string(),
+            ),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|r| r.into_bytes())
+    })
 }

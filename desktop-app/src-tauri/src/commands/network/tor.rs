@@ -9,6 +9,11 @@ use tauri::State;
 #[derive(Serialize)]
 pub struct TorOnionInfo {
     pub onion_address: String,
+    /// Tor v3 client-authorization credential (audit finding #11): the x25519
+    /// PRIVATE key, base32-encoded (RFC 4648, no padding). A client must hold
+    /// this to reach the onion at all — without it the service is unreachable.
+    /// Embedded in the pairing QR (`auth_key`) so only the QR holder can pair.
+    pub auth_key: String,
 }
 
 /// Resolve the `tor` binary to a FIXED absolute path only (audit KYP-2026-02
@@ -28,6 +33,35 @@ static TOR_BINARY: std::sync::LazyLock<Option<std::path::PathBuf>> =
 /// (audit KYP-2026-02 #14), so the .onion address is STABLE across runs
 /// instead of a fresh throwaway address per launch (the old DiscardPK flag).
 const TOR_ONION_KEY_KEYRING: (&str, &str) = ("kyberpipe", "tor_onion_key");
+
+/// OS keyring entry that persists the onion service's v3 CLIENT-AUTHORIZATION
+/// x25519 keypair (`priv_hex:pub_hex`) (audit finding #11). Reused across runs
+/// so the QR-embedded credential stays valid for the same service.
+const TOR_ONION_AUTH_KEY_KEYRING: (&str, &str) = ("kyberpipe", "tor_onion_client_auth");
+
+/// RFC 4648 base32 encoding, lowercase, WITHOUT padding — the encoding Tor uses
+/// for v3 onion addresses and client-auth keys. `input` is the raw 32-byte
+/// x25519 key.
+fn base32_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity((input.len() * 8).div_ceil(5));
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for &byte in input {
+        buffer = (buffer << 8) | byte as u32;
+        bits += 8;
+        while bits >= 5 {
+            let idx = ((buffer >> (bits - 5)) & 0x1f) as usize;
+            out.push(ALPHABET[idx] as char);
+            bits -= 5;
+        }
+    }
+    if bits > 0 {
+        let idx = ((buffer << (5 - bits)) & 0x1f) as usize;
+        out.push(ALPHABET[idx] as char);
+    }
+    out
+}
 
 /// Read a FULL Tor control-port reply. The control protocol terminates every
 /// multi-line reply with a bare "250 OK" line (continuation lines use the
@@ -71,8 +105,40 @@ pub fn create_tor_onion(
 ) -> Result<TorOnionInfo, String> {
     // Tier-2 destructive command — uniform user-gesture token gate (audit #20).
     crate::commands::gate_tier2("create_tor_onion", &token)?;
+    // AUDIT FINDING #11: the onion service is created with v3 client
+    // authorization — the service is UNREACHABLE without the x25519 credential
+    // generated here. A public .onion address with an open QUIC port was
+    // exposing the pairing endpoint to the whole Internet; with client auth the
+    // address leaks nothing and pairing is only possible with the QR-embedded
+    // credential. The client-auth keypair is persisted in the OS keyring (as
+    // `priv_hex:pub_hex`) so re-creating the service reuses the same
+    // credential; the public half configures tor's `ClientAuth=`.
+    let stored_auth =
+        keyring::Entry::new(TOR_ONION_AUTH_KEY_KEYRING.0, TOR_ONION_AUTH_KEY_KEYRING.1)
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .and_then(|stored| {
+                let (priv_hex, pub_hex) = stored.split_once(':')?;
+                let priv_bytes = hex::decode(priv_hex).ok()?;
+                let pub_bytes = hex::decode(pub_hex).ok()?;
+                if priv_bytes.len() == 32 && pub_bytes.len() == 32 {
+                    Some((priv_bytes, pub_bytes))
+                } else {
+                    None
+                }
+            });
+    let (client_priv, client_pub): (Vec<u8>, Vec<u8>) = match stored_auth {
+        Some((priv_bytes, pub_bytes)) => (priv_bytes, pub_bytes),
+        None => {
+            let (p, b) = core_crypto::crypto::generate_client_auth_keypair();
+            (p.to_vec(), b.to_vec())
+        }
+    };
+    let client_auth_credential = base32_encode(&client_priv);
+    let client_auth_pub = base32_encode(&client_pub);
     let mut info = TorOnionInfo {
         onion_address: String::new(),
+        auth_key: client_auth_credential.clone(),
     };
 
     // Audit KYP-2026-02 #14: tor must come from a FIXED absolute path — never
@@ -178,13 +244,23 @@ ClientOnly 1
         // private key stored in the OS keyring when present (stable .onion
         // across runs); otherwise ask tor to generate a fresh key with
         // NEW:ED25519-V3 and persist the returned PrivateKey line.
+        //
+        // AUDIT FINDING #11: `ClientAuth=<base32(client-auth x25519 pub)>`
+        // restricts the service to clients holding the matching x25519
+        // PRIVATE key — the service is unreachable without it, so the exposed
+        // .onion address no longer exposes the QUIC pairing endpoint to the
+        // whole Internet.
         let stored_key = keyring::Entry::new(TOR_ONION_KEY_KEYRING.0, TOR_ONION_KEY_KEYRING.1)
             .ok()
             .and_then(|e| e.get_password().ok())
             .filter(|k| !k.is_empty());
         let add_onion_cmd = match stored_key.as_deref() {
-            Some(k) => format!("ADD_ONION ED25519-V3:{k} Port=9876,127.0.0.1:9876\r\n"),
-            None => "ADD_ONION NEW:ED25519-V3 Port=9876,127.0.0.1:9876\r\n".to_string(),
+            Some(k) => format!(
+                "ADD_ONION ED25519-V3:{k} Port=9876,127.0.0.1:9876 ClientAuth={client_auth_pub}\r\n"
+            ),
+            None => format!(
+                "ADD_ONION NEW:ED25519-V3 Port=9876,127.0.0.1:9876 ClientAuth={client_auth_pub}\r\n"
+            ),
         };
         let _ = stream.write_all(add_onion_cmd.as_bytes());
         // Read the FULL reply (line loop until the bare "250 OK" terminator) —
@@ -248,6 +324,17 @@ ClientOnly 1
     // moment it was created. Keep the tor daemon running (the child is
     // stored in AppState) so the advertised address stays reachable.
     state.set_tor_child(tor_child);
+
+    // Persist the client-auth keypair now that the service is confirmed up
+    // (audit finding #11): `priv_hex:pub_hex`, stable across runs.
+    let _ = keyring::Entry::new(TOR_ONION_AUTH_KEY_KEYRING.0, TOR_ONION_AUTH_KEY_KEYRING.1)
+        .and_then(|e| {
+            e.set_password(&format!(
+                "{}:{}",
+                hex::encode(&client_priv),
+                hex::encode(&client_pub)
+            ))
+        });
 
     Ok(info)
 }

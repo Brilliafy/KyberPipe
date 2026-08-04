@@ -67,17 +67,11 @@ impl PinnedCertVerifier {
         }
         // Membership test against the allowlist — constant-time per entry so
         // hash timing does not reveal which authorized peer matched.
-        let match_found = self
-            .pinned_sha256_hex
-            .iter()
-            .any(|pinned| {
-                let pinned_bytes = pinned.as_bytes();
-                pinned_bytes.len() == cert_hash.len()
-                    && bool::from(
-                        pinned_bytes
-                            .ct_eq(cert_hash.as_bytes()),
-                    )
-            });
+        let match_found = self.pinned_sha256_hex.iter().any(|pinned| {
+            let pinned_bytes = pinned.as_bytes();
+            pinned_bytes.len() == cert_hash.len()
+                && bool::from(pinned_bytes.ct_eq(cert_hash.as_bytes()))
+        });
         if match_found {
             Ok(())
         } else {
@@ -148,6 +142,10 @@ impl rustls::server::danger::ClientCertVerifier for PinnedCertVerifier {
     /// Client certs are only mandatory once a pin is configured (post-pairing).
     /// Pre-pairing the server must accept clients that present no certificate —
     /// otherwise the initial KEM handshake can never complete.
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
     fn client_auth_mandatory(&self) -> bool {
         self.required
     }
@@ -313,14 +311,15 @@ pub fn configure_quic_server(
 ) -> Result<quinn::ServerConfig, KyberError> {
     let mut server_crypto = if require_client_auth {
         // Client must present a self-signed cert. When no hash is configured
-        // (P2P bootstrap), accept the presented cert without a pin check.
+        // (pre-pairing bootstrap), accept the presented cert without a pin check.
         // The pairing protocol provides post-quantum authentication out-of-band
         // via SAS, so TLS-level pinning is optional during initial key exchange.
         // Enforce cert pinning against the ALLOWLIST when any hash is provided
         // (post-pairing). During initial pairing (empty), accept any cert — SAS
         // provides OOB auth.
         let required = !pinned_client_cert_hashes.is_empty();
-        let client_verifier = Arc::new(PinnedCertVerifier::new(pinned_client_cert_hashes, required));
+        let client_verifier =
+            Arc::new(PinnedCertVerifier::new(pinned_client_cert_hashes, required));
         rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(certs, key)
@@ -410,8 +409,7 @@ mod tests {
         assert_ne!(hash_a, hash_b, "distinct devices must have distinct certs");
 
         // A verifier backed by BOTH hashes (the multi-device allowlist).
-        let verifier =
-            PinnedCertVerifier::new(vec![hash_a.clone(), hash_b.clone()], true);
+        let verifier = PinnedCertVerifier::new(vec![hash_a.clone(), hash_b.clone()], true);
         let der_a = CertificateDer::from(cert_a.0);
         let der_b = CertificateDer::from(cert_b.0);
         let der_c = CertificateDer::from(generate_client_identity_cert().expect("device C").0);

@@ -11,9 +11,17 @@ pub fn run_boa_inner(script_code: &str, lux: f64, feed_data: &str) -> ScriptExec
     info!("Executing Boa JS (lux={lux}, feed={feed_data})");
     ENGINE_LOGS.with(|l| l.borrow_mut().clear());
     let mut context = Context::default();
-    context
-        .runtime_limits_mut()
-        .set_loop_iteration_limit(100_000);
+    // AUDIT #16: bound EVERY resource a hostile script can exhaust. The loop
+    // iteration limit catches `while(true){}`; the recursion and VM-stack
+    // limits stop deeply-recursive code (`new Array(1e9)` / unbounded
+    // recursion) from exhausting native memory/stack in the sandbox process.
+    // (Boa 0.19 has no wall-clock time limit API; the subprocess worker's
+    // RLIMIT_CPU + RLIMIT_AS from `apply_worker_rlimits` bound wall time and
+    // address space at the OS level.)
+    let limits = context.runtime_limits_mut();
+    limits.set_loop_iteration_limit(100_000);
+    limits.set_recursion_limit(512);
+    limits.set_stack_size_limit(1 << 20); // ~1 MiB VM value stack
     let _ = context.register_global_property(
         js_string!("ambientLight"),
         JsValue::from(lux),

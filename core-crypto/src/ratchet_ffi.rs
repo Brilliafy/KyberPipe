@@ -129,6 +129,27 @@ mod registry_tests {
         assert_eq!(pt, b"after-resync");
     }
 
+    /// AUDIT #4 (idempotent consumer): applying the SAME authenticated sync
+    /// packet twice must be a no-op SUCCESS on the second application (the
+    /// poll layer legitimately re-processes a sync whose first application
+    /// realigned the chain). The legacy consumer returned a replay/rate-limit
+    /// error that wasted the per-peer budget and logged noise.
+    #[test]
+    fn duplicate_sync_is_idempotent_noop() {
+        let (alice, bob) = alice_bob_registry("dup-sync");
+        // Alice sends 150 messages; bob misses them all.
+        for _ in 0..150 {
+            let _ = ratchet_encrypt_message_impl(&alice, b"p").expect("encrypt");
+        }
+        let sync = ratchet_synchronize_packet_binary_impl(&alice).expect("sync");
+        let skipped = ratchet_process_synchronize_impl(&bob, &sync).expect("first apply");
+        assert_eq!(skipped, 150);
+        // Second application of the same packet: already aligned → Ok(0), no error.
+        let again = ratchet_process_synchronize_impl(&bob, &sync).expect("second apply");
+        assert_eq!(again, 0, "already-aligned sync must be a no-op success");
+        assert_eq!(ratchet_recv_count_impl(&bob).expect("recv"), 151);
+    }
+
     /// Audit finding #4: a forged/injected Synchronize whose AEAD does not
     /// verify must NOT advance the chain (the tentative clone is discarded).
     #[test]
@@ -569,8 +590,7 @@ mod registry_tests {
             None,
         )
         .expect("fresh re-pair init");
-        ratchet_bump_pairing_epoch_impl(&alice)
-            .expect("bump: live session exists");
+        ratchet_bump_pairing_epoch_impl(&alice).expect("bump: live session exists");
         assert_eq!(
             with_ratchet_session(&alice, |r| Ok(r.pairing_epoch)).expect("epoch"),
             1,
@@ -602,11 +622,7 @@ mod registry_tests {
                 let shared = b"fresh-repair-master-secret-0123456789abcdef";
                 let p = generate_hybrid_keypair();
                 let probe = crate::crypto::DoubleRatchetState::new_with_keypair(
-                    shared,
-                    true,
-                    p,
-                    None,
-                    None,
+                    shared, true, p, None, None,
                 )
                 .expect("probe init");
                 probe.root_key
@@ -665,6 +681,67 @@ mod registry_tests {
             ratchet_send_count_impl(&alice).expect("send count"),
             wm_live.send_message_count,
             "send-chain rollback must be refused: the live send count must stay ahead"
+        );
+    }
+
+    /// AUDIT #1 (HIGH, one-sided rollback): the watermark guard must be
+    /// COMPONENT-WISE, not lexicographic. The legacy lexicographic order let
+    /// the send chain's lead mask a recv-chain regression: live send=0/recv=100
+    /// with snapshot send=50/recv=0 was judged "not a rollback" (send 0 < 50
+    /// ⇒ live not ahead) and imported — replacing the live receiving chain at
+    /// seq 100 with the snapshot's at seq 0 (silent desync + an authenticated
+    /// replay window for messages 0..=99). The component-wise guard refuses
+    /// because the snapshot regresses the recv chain, even though it leads the
+    /// send chain.
+    #[test]
+    fn mixed_send_recv_snapshot_is_refused_componentwise() {
+        let (alice, bob) = alice_bob_registry("mixedwm");
+        // Bob sends 100 messages; Alice receives all of them → live (0,0,0,100).
+        for _ in 0..100 {
+            let m = ratchet_encrypt_message_impl(&bob, b"p").expect("bob encrypt");
+            ratchet_decrypt_message_impl(&alice, &m.nonce, &m.ciphertext).expect("alice decrypt");
+        }
+        let live_wm = ratchet_session_watermark_impl(&alice)
+            .expect("live wm")
+            .expect("some");
+        assert_eq!(live_wm.send_message_count, 0, "precondition: nothing sent");
+        assert_eq!(live_wm.recv_message_count, 100, "precondition: all received");
+
+        // A same-user snapshot from a device with the OPPOSITE traffic pattern:
+        // ahead in send (50) but behind in recv (0). Patch the exported JSON's
+        // two counters to build the hostile watermark.
+        let snap = ratchet_export_session_impl(&alice)
+            .expect("export")
+            .expect("session exists");
+        let mut v: serde_json::Value = serde_json::from_slice(&snap).expect("snap json");
+        v["send_message_count"] = serde_json::json!(50u64);
+        v["recv_message_count"] = serde_json::json!(0u64);
+        let hostile = serde_json::to_vec(&v).expect("hostile snap");
+        let snap_wm = ratchet_snapshot_watermark_impl(&hostile)
+            .expect("snap wm")
+            .expect("some");
+        assert!(snap_wm.send_message_count > live_wm.send_message_count);
+        assert!(snap_wm.recv_message_count < live_wm.recv_message_count);
+        // Under the OLD lexicographic guard this import would have been ALLOWED
+        // (live send 0 < snapshot send 50 ⇒ live not ahead).
+        assert!(
+            !live_wm.is_ahead_of(&snap_wm),
+            "precondition: incomparable watermarks — the exact case lexicographic order got wrong"
+        );
+
+        // The component-wise guard must REFUSE: the snapshot regresses recv.
+        ratchet_import_session_impl(&alice, &hostile).expect("import call");
+        let after = ratchet_session_watermark_impl(&alice)
+            .expect("after wm")
+            .expect("some");
+        assert_eq!(
+            after, live_wm,
+            "the recv-chain rollback must be refused — live session untouched"
+        );
+        assert_eq!(
+            ratchet_recv_count_impl(&alice).expect("recv count"),
+            100,
+            "live receiving chain must stay positioned at seq 100"
         );
     }
 }

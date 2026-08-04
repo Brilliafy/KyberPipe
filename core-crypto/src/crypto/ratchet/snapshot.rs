@@ -236,9 +236,8 @@ impl DoubleRatchetState {
         // "fresh" on restart. When the parallel unix array is absent (a
         // snapshot written by an older build) fall back to the current wall
         // clock — the legacy behavior.
-        let mut confirm_attach_unix: Vec<u64> = snap
-            .rekey_pending_confirm_queue_attached_at_unix
-            .clone();
+        let mut confirm_attach_unix: Vec<u64> =
+            snap.rekey_pending_confirm_queue_attached_at_unix.clone();
         if confirm_attach_unix.len() < queue_len {
             confirm_attach_unix.resize(queue_len, now_unix);
         }
@@ -248,17 +247,33 @@ impl DoubleRatchetState {
             .enumerate()
             .map(|(idx, s)| RekeyCarrier {
                 carrier_seq: *s,
+                // Monotonic stamp starts at "now" (Instant cannot be restored);
+                // the persisted wall-clock `attached_at_unix` below is what
+                // keeps the carrier aging across restarts (audit finding #8).
                 attached_at: now,
-                attached_at_mono: now,
-                attached_at_unix: confirm_attach_unix
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(now_unix),
+                attached_at_unix: confirm_attach_unix.get(idx).copied().unwrap_or(now_unix),
                 rekey_x25519_pk: vec![],
                 rekey_mlkem_pk: vec![],
                 rekey_ciphertext: vec![],
             })
             .collect();
+        // AUDIT #2 (stale-carrier poison): a snapshot written by a build with
+        // the old `len() < 2` staging could persist MULTIPLE carriers for one
+        // proposal. A restored multi-entry queue is the stale-carrier
+        // precondition (one entry survives the peer's ACK and is re-sent with
+        // the committed payload under the new generation). Heal it here: keep
+        // only the LAST carrier (the most recent re-send, matching the resend
+        // semantics) so the restored queue obeys "at most one carrier per
+        // pending proposal".
+        if rekey_pending_confirm_queue.len() > 1 {
+            tracing::warn!(
+                "[Ratchet] Snapshot restore: trimming {} stale confirm-queue entries to 1 (audit #2)",
+                rekey_pending_confirm_queue.len() - 1
+            );
+            let last = rekey_pending_confirm_queue.pop_back().expect("non-empty");
+            rekey_pending_confirm_queue.clear();
+            rekey_pending_confirm_queue.push_back(last);
+        }
         // Re-attach the persisted rekey payload to the (single) pending entry,
         // if one was stored. Timestamps are reset to now so the retry TTL
         // starts fresh after a restart.

@@ -19,8 +19,12 @@ import uniffi.core_crypto.RatchetWatermark
  *    closing the snapshot-to-snapshot regression the live-session registry
  *    guard cannot see (on a cold start the registry is empty).
  *
- * Comparing two watermarks is lexicographic over the 4-tuple, matching the
- * Rust registry guard.
+ * AUDIT #1 (HIGH, one-sided rollback): comparisons are COMPONENT-WISE, never
+ * lexicographic — the legacy lexicographic order let the send chain's lead
+ * mask a recv-chain regression (live send=0/recv=100 vs snapshot
+ * send=50/recv=0 was accepted, rolling the receiving chain back). The Rust
+ * registry guard, this store and the desktop store all share the same
+ * partial order, so no caller can re-derive a divergent interpretation.
  */
 object RatchetWatermarkStore {
 
@@ -49,31 +53,54 @@ object RatchetWatermarkStore {
         }
     }
 
-    /** True when `a` is strictly ahead of `b` in lexicographic 4-tuple order. */
-    fun isAhead(a: RatchetWatermark, b: RatchetWatermark): Boolean {
-        val av = listOf(
-            a.pairingEpoch, a.ratchetGeneration.toULong(), a.sendMessageCount, a.recvMessageCount
-        )
-        val bv = listOf(
-            b.pairingEpoch, b.ratchetGeneration.toULong(), b.sendMessageCount, b.recvMessageCount
-        )
-        for (i in 0 until 4) {
-            if (av[i] > bv[i]) return true
-            if (av[i] < bv[i]) return false
-        }
-        return false
-    }
+    /**
+     * True when `a` strictly DOMINATES `b` component-wise: at least as
+     * advanced in every component (epoch, generation, send, recv) and
+     * strictly more advanced in at least one. This is a PARTIAL order — a
+     * watermark ahead in send but behind in recv is INCOMPARABLE with one
+     * ahead in recv but behind in send, and the rollback guard refuses that
+     * situation too (audit #1).
+     */
+    fun isAhead(a: RatchetWatermark, b: RatchetWatermark): Boolean =
+        a.pairingEpoch >= b.pairingEpoch &&
+            a.ratchetGeneration >= b.ratchetGeneration &&
+            a.sendMessageCount >= b.sendMessageCount &&
+            a.recvMessageCount >= b.recvMessageCount &&
+            a != b
+
+    /** Same-epoch component-wise dominance or equality (audit #1). */
+    private fun dominates(a: RatchetWatermark, b: RatchetWatermark): Boolean =
+        a.ratchetGeneration >= b.ratchetGeneration &&
+            a.sendMessageCount >= b.sendMessageCount &&
+            a.recvMessageCount >= b.recvMessageCount
 
     /**
-     * Merge a fresh watermark into the persisted high-water mark (only ever
-     * moves forward). Returns the newly stored watermark for the peer, or null
-     * when `fresh` is null.
+     * Merge a fresh watermark into the persisted high-water mark. Only ever
+     * moves the mark forward. A snapshot from a NEWER pairing epoch (re-pair:
+     * counters reset) supersedes the old epoch wholesale; within one epoch the
+     * mark is the component-wise MAX so a send-chain lead can never mask a
+     * recv-chain regression (or vice versa — audit #1). Returns the newly
+     * stored watermark for the peer, or null when `fresh` is null.
      */
     fun update(settings: SettingsManager, peer: String, fresh: RatchetWatermark?): RatchetWatermark? {
         if (peer.isEmpty() || fresh == null) return null
         val map = parseMap(settings.ratchetWatermarkJson)
         val stored = read(settings, peer)
-        val effective = if (stored != null && isAhead(stored, fresh)) stored else fresh
+        val effective = when {
+            stored == null -> fresh
+            fresh.pairingEpoch > stored.pairingEpoch -> fresh
+            fresh.pairingEpoch < stored.pairingEpoch -> stored
+            dominates(fresh, stored) -> fresh
+            dominates(stored, fresh) -> stored
+            // Incomparable within one epoch (send vs recv divergence): merge to
+            // the component-wise envelope so neither chain's lead is lost.
+            else -> RatchetWatermark(
+                pairingEpoch = stored.pairingEpoch,
+                ratchetGeneration = maxOf(stored.ratchetGeneration, fresh.ratchetGeneration),
+                sendMessageCount = maxOf(stored.sendMessageCount, fresh.sendMessageCount),
+                recvMessageCount = maxOf(stored.recvMessageCount, fresh.recvMessageCount),
+            )
+        }
         map.put(peer, org.json.JSONArray().apply {
             put(effective.pairingEpoch.toString())
             put(effective.ratchetGeneration.toString())
@@ -85,13 +112,19 @@ object RatchetWatermarkStore {
     }
 
     /**
-     * Rollback guard for the cold-start restore path (audit #2 follow-up):
-     * a snapshot whose watermark is STRICTLY below the recorded high-water mark
-     * is a rollback (an older blob restored from backup, or a same-user
-     * tamper) and must be refused. Equal = the current snapshot, accepted.
+     * Rollback guard for the cold-start restore path (audit #2 follow-up +
+     * AUDIT #1). A snapshot is refused when it would regress the recorded
+     * high-water mark in ANY component: a snapshot from an OLDER pairing
+     * epoch is stale (refuse); a SAME-epoch snapshot that is behind in
+     * generation, send OR recv is a rollback (refuse). A snapshot from a
+     * NEWER epoch (re-pair, counters reset) is accepted. Equal = the current
+     * snapshot, accepted.
      */
     fun refuseRollback(snapshotWm: RatchetWatermark, recorded: RatchetWatermark?): Boolean {
         if (recorded == null) return false
-        return isAhead(recorded, snapshotWm)
+        if (snapshotWm.pairingEpoch != recorded.pairingEpoch) {
+            return snapshotWm.pairingEpoch < recorded.pairingEpoch
+        }
+        return !dominates(snapshotWm, recorded) && snapshotWm != recorded
     }
 }

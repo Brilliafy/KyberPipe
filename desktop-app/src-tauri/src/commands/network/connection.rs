@@ -27,15 +27,18 @@ pub fn perform_stun_hole_punch(
     Ok(addr)
 }
 
+/// Evaluate the connection path. The Wi-Fi Direct (P2P) argument was removed
+/// from the product (audit finding #1 — the group was never actually secured
+/// and the Android join path was dead), so `wifi_direct_active` is always
+/// false; the parameter is kept only for the UniFFI signature and is ignored.
 #[tauri::command]
 pub fn evaluate_connection_status(
-    wifi_direct_active: bool,
+    _wifi_direct_active: bool,
     lan_active: bool,
     public_endpoint: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::ConnectionInfo, String> {
-    let info =
-        core_crypto::evaluate_connection_hierarchy(wifi_direct_active, lan_active, public_endpoint);
+    let info = core_crypto::evaluate_connection_hierarchy(false, lan_active, public_endpoint);
     state.add_log(format!(
         "[Connection Manager] Active path: {} (Tier {}, Latency {}ms)",
         info.active_path_description, info.active_tier, info.latency_ms

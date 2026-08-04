@@ -1,6 +1,12 @@
 mod clipboard;
 mod media;
 mod pairing;
+/// AUDIT #20 (structural decomposition): the former `handlers/pairing.rs`
+/// monolith is split into the wire codec (`pairing_wire`), the rate policy
+/// (`pairing_policy`) and the remaining KEM/phase machine (`pairing`) — each
+/// changes in isolation and can be tested/reused independently.
+mod pairing_policy;
+mod pairing_wire;
 mod poll;
 mod sms;
 mod unpair;

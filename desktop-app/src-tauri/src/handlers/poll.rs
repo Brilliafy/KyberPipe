@@ -186,27 +186,30 @@ static LAST_PERSISTED_STATE: LazyLock<Mutex<LastPersistedState>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Whether the ratchet for `peer` mutated past what was last persisted. Reads
-/// the live counters WITHOUT advancing anything. `recv` is the receiver's own
-/// inbound chain (advanced by processing the peer's sync/ack above), `send`
-/// the outbound chain.
+/// the live watermark WITHOUT advancing anything and WITHOUT serializing the
+/// session. `recv` is the receiver's own inbound chain (advanced by processing
+/// the peer's sync/ack above), `send` the outbound chain.
+///
+/// AUDIT #9: the legacy dirty-check called `ratchet_export_session` — a FULL
+/// serde_json serialization of the root key, chain keys, ML-KEM/X25519 secret
+/// halves and skip keys — every 2.5s on every poll, then re-parsed the JSON
+/// for `ratchet_generation`, leaving the complete secret material in a plain
+/// (non-Zeroizing) heap Vec ~34,560 times/day. The watermark accessor
+/// (`ratchet_session_watermark`) reads the same four counters under the
+/// session lock with no serialization at all.
 fn ratchet_dirty_since_last_persist(peer: &str) -> bool {
-    let peer_owned = peer.to_string();
-    let (_, send, recv) = match (
-        core_crypto::ratchet_send_count(peer_owned.clone()),
-        core_crypto::ratchet_recv_count(peer_owned.clone()),
-    ) {
-        (Ok(s), Ok(r)) => (0u32, s, r),
+    let wm = match core_crypto::ratchet_session_watermark(peer.to_string()) {
+        Ok(Some(w)) => w,
         _ => return false,
     };
-    // Generation is not exposed directly; detect it via the exported snapshot
-    // watermark instead (cheap serde parse, no crypto).
-    let gen = core_crypto::ratchet_export_session(peer_owned)
-        .ok()
-        .flatten()
-        .and_then(|snap| serde_json::from_slice::<serde_json::Value>(&snap).ok())
-        .and_then(|v| v.get("ratchet_generation").and_then(|g| g.as_u64()))
-        .unwrap_or(0) as u32;
-    let mut guard = LAST_PERSISTED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let (gen, send, recv) = (
+        wm.ratchet_generation,
+        wm.send_message_count,
+        wm.recv_message_count,
+    );
+    let mut guard = LAST_PERSISTED_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let last = guard.get(peer).copied().unwrap_or((0, 0, 0));
     let dirty = (gen, send, recv) != last;
     if dirty {
@@ -215,23 +218,73 @@ fn ratchet_dirty_since_last_persist(peer: &str) -> bool {
     dirty
 }
 
-/// Split of `handle_poll`: encrypt the clipboard and attach the rekey-ack and
-/// synchronize payloads. Runs the blocking clipboard read + ratchet persistence
-/// on a spawn_blocking thread so the accept-loop workers are never wedged
-/// (audit finding #9). `need_sync` gates the Synchronize carrier (audit
-/// finding #16): the desktop only advances its own send chain to attach a sync
-/// packet when the phone asked for one.
+/// Split of `handle_poll`: consume the peer's poll-REQUEST ratchet fields
+/// (Synchronize + RekeyAck), encrypt the clipboard, persist, and produce the
+/// response's ratchet-encrypted payloads (clip, ack, sync).
+///
+/// AUDIT #8: EVERY ratchet-mutating call — processing the peer's Synchronize
+/// and RekeyAck, generating our ack peek and our Synchronize carrier — runs
+/// inside the SAME spawn_blocking closure as the clipboard read + persistence,
+/// so the 2-worker IO accept-loop async task only marshals JSON. The legacy
+/// code left ack generation and sync processing inline on the accept-loop
+/// task, where `ratchet_encrypt`/`ratchet_decrypt_with_rekey` can run ML-KEM
+/// encapsulate/decapsulate inside the per-session mutex (tens of ms) at a
+/// rekey boundary — blocking a second peer's stream and the clipboard push.
+/// `need_sync` gates the Synchronize carrier (audit finding #16): the desktop
+/// only advances its own send chain to attach a sync packet when the phone
+/// asked for one.
 async fn build_poll_response(
     peer_id: &str,
     base: serde_json::Value,
     need_sync: bool,
+    body: Vec<u8>,
 ) -> serde_json::Value {
     let peer = peer_id.to_string();
 
-    // Blocking I/O (OS clipboard read + keyring + full-file persistence) is
-    // delegated to the tokio blocking pool, sized independently of the
-    // 2-worker IO accept-loop runtime.
-    let latest_clip_encrypted = tokio::task::spawn_blocking(move || {
+    // All blocking I/O (OS clipboard read + keyring + full-file persistence)
+    // AND all ratchet-mutating work is delegated to the tokio blocking pool,
+    // sized independently of the 2-worker IO accept-loop runtime (audit #8).
+    let (latest_clip_encrypted, ack_bin, sync_bin) = tokio::task::spawn_blocking(move || {
+        // 1. Consumer for the Synchronize recovery path (audit finding #4):
+        // the peer sends its send counter as a RATCHET-ENCRYPTED Synchronize
+        // packet. Only an authenticated, verified Synchronize can trigger a
+        // resync; the plaintext counter is never acted on. The core
+        // additionally refuses resync across an unconsumed pending rekey,
+        // enforces a persisted cumulative budget, and rate-limits per peer.
+        if !peer.is_empty() {
+            if let Some(data) = peer_sync_packet(&body) {
+                match core_crypto::ratchet_process_synchronize(peer.clone(), data) {
+                    Ok(skipped) => {
+                        if skipped > 0 {
+                            tracing::info!(
+                                "[Sync] Authenticated Synchronize from {peer} advanced receive chain by {skipped}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::info!("[Sync] Synchronize from {peer} not applied: {e}");
+                    }
+                }
+            }
+            // 2. Consumer for the phone's outbound RekeyAck (audit finding
+            // #1): the phone attaches its encrypted ack of OUR outgoing
+            // proposal to the poll request. Processing it commits our outgoing
+            // rekey; without this channel the desktop's
+            // rekey_pending_confirm_queue would stay occupied forever.
+            if let Some(data) = peer_rekey_ack_packet(&body) {
+                match core_crypto::ratchet_process_rekey_ack_binary(peer.clone(), data) {
+                    Ok(true) => tracing::info!(
+                        "[RekeyAck] Phone acked our outgoing rekey — committed (peer {peer})"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::info!("[RekeyAck] Phone RekeyAck not applied: {e}");
+                    }
+                }
+            }
+        }
+
+        // 3. Clipboard read + encrypt + persistence (blocking).
         let latest_clip = cached_clipboard_read();
         let latest_clip_encrypted = if latest_clip.is_empty() {
             serde_json::Value::Null
@@ -269,10 +322,48 @@ async fn build_poll_response(
                 }
             }
         }
-        latest_clip_encrypted
+
+        // 4. Generate OUR ratchet-encrypted response payloads (ratchet-
+        // mutating, same blocking closure — audit #8).
+        //
+        // AUDIT FINDING #6: the ack is generated NON-CONSUMING (peek). The
+        // pending carrier is cleared only after the dispatch loop successfully
+        // writes the response — if the response is lost on the wire, the ack
+        // is re-derived on the next poll instead of being silently dropped.
+        let ack_bin = if !peer.is_empty() {
+            core_crypto::ratchet_generate_rekey_ack_binary_peek(peer.clone())
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        // Producer for the Synchronize recovery path (audit finding #4): our
+        // send counter is sent as a RATCHET-ENCRYPTED Synchronize packet so the
+        // peer can authenticate the resync target. The packet is encoded as a
+        // full BINARY TLV (audit finding #12): a ratchet message may carry a
+        // rekey payload at seq 100/200, and dropping those fields would make
+        // the ciphertext undecryptable (AEAD binds the rekey params).
+        //
+        // AUDIT FINDING #16: the carrier is now CONDITIONAL — it is only
+        // generated when the phone asked for a sync (`need_sync`). Generating
+        // it unconditionally advanced the desktop's send chain on every poll
+        // AND collided with the per-peer 15s sync rate limit (5 of every 6
+        // phone-requested syncs were rejected before decryption, so the
+        // desktop's receive chain lagged the phone's send chain by up to ~6
+        // positions every window). With the conditional carrier, the desktop
+        // only advances its chain to answer an actual recovery need.
+        let sync_bin = if need_sync && !peer.is_empty() {
+            core_crypto::ratchet_synchronize_packet(peer.clone())
+                .ok()
+                .and_then(|m| m.to_binary().ok())
+        } else {
+            None
+        };
+
+        (latest_clip_encrypted, ack_bin, sync_bin)
     })
     .await
-    .unwrap_or(serde_json::Value::Null);
+    .unwrap_or((serde_json::Value::Null, None, None));
 
     let mut resp = base;
     // AUDIT FINDING #18 (implicit cross-repo ordering contract): the poll
@@ -289,65 +380,32 @@ async fn build_poll_response(
     }
     manifest.push("latest_clip_encrypted");
 
-    // If this side received a rekey from the peer, build the encrypted RekeyAck
-    // (carrying the rekey carrier's seq in the SENDER's space) and attach it to
-    // the poll response so the peer can commit its outgoing proposal.
-    //
-    // AUDIT FINDING #6: the ack is generated NON-CONSUMING (peek). The pending
-    // carrier is cleared only after the dispatch loop successfully writes the
-    // response — if the response is lost on the wire, the ack is re-derived on
-    // the next poll instead of being silently dropped.
-    if !peer_id.is_empty() {
-        if let Ok(Some(bin)) =
-            core_crypto::ratchet_generate_rekey_ack_binary_peek(peer_id.to_string())
-        {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
-                    "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
-                }));
-                manifest.push("rekey_ack_encrypted");
-            }
-        }
-        // Producer for the Synchronize recovery path (audit finding #4): our
-        // send counter is sent as a RATCHET-ENCRYPTED Synchronize packet so the
-        // peer can authenticate the resync target. The packet is encoded as a
-        // full BINARY TLV (audit finding #12): a ratchet message may carry a
-        // rekey payload at seq 100/200, and dropping those fields would make the
-        // ciphertext undecryptable (AEAD binds the rekey params).
-        //
-        // AUDIT FINDING #16: the carrier is now CONDITIONAL — it is only
-        // generated when the phone asked for a sync (`need_sync`). Generating
-        // it unconditionally advanced the desktop's send chain on every poll
-        // AND collided with the per-peer 15s sync rate limit (5 of every 6
-        // phone-requested syncs were rejected before decryption, so the
-        // desktop's receive chain lagged the phone's send chain by up to ~6
-        // positions every window). With the conditional carrier, the desktop
-        // only advances its chain to answer an actual recovery need.
-        if need_sync {
-            if let Ok(sync_msg) = core_crypto::ratchet_synchronize_packet(peer_id.to_string()) {
-                if let Ok(bin) = sync_msg.to_binary() {
-                    if let Some(obj) = resp.as_object_mut() {
-                        obj.insert("sync".to_string(), serde_json::json!({
-                            "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin),
-                        }));
-                        manifest.push("sync");
-                    }
-                }
-            }
-        }
-        // AUDIT FINDING #18: attach the manifest last so the phone can process
-        // the ratchet-encrypted fields strictly in the listed order.
+    if let Some(bin) = ack_bin {
         if let Some(obj) = resp.as_object_mut() {
-            obj.insert(
-                "manifest".to_string(),
-                serde_json::json!(manifest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
-            );
+            obj.insert("rekey_ack_encrypted".to_string(), serde_json::json!({
+                "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin)
+            }));
+            manifest.push("rekey_ack_encrypted");
         }
-        // AUDIT FINDING #4/#19: the plaintext `ratchet_send_count` field is
-        // REMOVED. The only resync trigger is the authenticated Synchronize
-        // packet above; a plaintext counter would be an unauthenticated
-        // forward-advance oracle (the legacy Android loop acted on it).
     }
+    if let Some(bin) = sync_bin {
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert("sync".to_string(), serde_json::json!({
+                "tlv_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bin),
+            }));
+            manifest.push("sync");
+        }
+    }
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert(
+            "manifest".to_string(),
+            serde_json::json!(manifest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+        );
+    }
+    // AUDIT FINDING #4/#19: the plaintext `ratchet_send_count` field is
+    // REMOVED. The only resync trigger is the authenticated Synchronize packet
+    // above; a plaintext counter would be an unauthenticated forward-advance
+    // oracle (the legacy Android loop acted on it).
 
     resp
 }
@@ -359,52 +417,17 @@ pub(crate) async fn handle_poll(body: Vec<u8>, peer_id: String, s: Arc<AppState>
     // against (and corrupts) the first device's ratchet session.
     let (_legacy_peer, _is_paired, base, _conn) = read_local_state(&s);
 
-    // Consumer for the Synchronize recovery path (audit finding #4): the peer
-    // sends its send counter as a RATCHET-ENCRYPTED Synchronize packet. Only an
-    // authenticated, verified Synchronize can trigger a resync; the plaintext
-    // counter is never acted on. The core additionally refuses resync across an
-    // unconsumed pending rekey, enforces a persisted cumulative budget, and
-    // rate-limits per peer.
-    if !peer_id.is_empty() {
-        if let Some(data) = peer_sync_packet(&body) {
-            match core_crypto::ratchet_process_synchronize(peer_id.clone(), data) {
-                Ok(skipped) => {
-                    if skipped > 0 {
-                        tracing::info!(
-                            "[Sync] Authenticated Synchronize from {peer_id} advanced receive chain by {skipped}"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::info!("[Sync] Synchronize from {peer_id} not applied: {e}");
-                }
-            }
-        }
-        // Consumer for the phone's outbound RekeyAck (audit finding #1): the
-        // phone attaches its encrypted ack of OUR outgoing proposal to the poll
-        // request. Processing it commits our outgoing rekey; without this
-        // channel the desktop's rekey_pending_confirm_queue would stay occupied
-        // forever (permanent deadlock).
-        if let Some(data) = peer_rekey_ack_packet(&body) {
-            match core_crypto::ratchet_process_rekey_ack_binary(peer_id.clone(), data) {
-                Ok(true) => tracing::info!(
-                    "[RekeyAck] Phone acked our outgoing rekey — committed (peer {peer_id})"
-                ),
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::info!("[RekeyAck] Phone RekeyAck not applied: {e}");
-                }
-            }
-        }
-    }
-
     // AUDIT FINDING #16: the phone sets `need_sync` only when its receive
     // chain genuinely needs realignment (decrypt gap or slow heartbeat). The
     // desktop then attaches its Synchronize carrier ONLY in that case — never
     // unconditionally — decoupling the sync HEARTBEAT from sync RECOVERY and
     // removing the per-poll send-chain advance + the rate-limit collisions.
     let need_sync = peer_requested_sync(&body);
-    let resp = build_poll_response(&peer_id, base, need_sync).await;
+    // AUDIT #8: ALL ratchet-mutating work (consuming the peer's sync/ack and
+    // generating our ack/sync payloads) happens inside the single
+    // spawn_blocking closure in build_poll_response — never on this accept-loop
+    // async task.
+    let resp = build_poll_response(&peer_id, base, need_sync, body).await;
     serde_json::to_string(&resp)
         .unwrap_or_default()
         .into_bytes()

@@ -107,10 +107,7 @@ pub fn session_key_create(key_bytes: Vec<u8>) -> Result<u64, KyberError> {
     // pinned and the registry is full, fail loudly instead of silently
     // destroying a pinned key the caller still references.
     if reg.keys.len() >= MAX_SESSION_KEYS {
-        let evictable = reg
-            .lru
-            .iter()
-            .any(|h| !reg.pinned.contains(h));
+        let evictable = reg.lru.iter().any(|h| !reg.pinned.contains(h));
         if !evictable {
             return Err(KyberError::CryptoError(
                 "Session key registry full and every handle is pinned — destroy an unused handle first (audit finding #23)"

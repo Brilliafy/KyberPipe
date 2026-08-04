@@ -237,6 +237,10 @@ fn binary_pairing_frame_nonce_roundtrip() {
         decoded.4, nonce,
         "the nonce must round-trip through the binary frame (audit finding #12)"
     );
+    assert!(
+        decoded.5.is_empty(),
+        "a frame without an embedded SAS echo must surface an empty sas_hex (audit finding #10)"
+    );
 
     // A frame WITHOUT the trailing nonce still decodes (legacy shape) but with
     // an EMPTY nonce — which the handler rejects identically to a nonce-less
@@ -253,6 +257,10 @@ fn binary_pairing_frame_nonce_roundtrip() {
     assert!(
         decoded_legacy.4.is_empty(),
         "a frame without an embedded nonce must surface an empty nonce"
+    );
+    assert!(
+        decoded_legacy.5.is_empty(),
+        "a legacy frame surfaces an empty sas_hex, rejected by the mandatory SAS-echo check"
     );
 }
 
@@ -345,4 +353,50 @@ fn poll_response_manifest_prescribes_field_order() {
     }
 
     core_crypto::ratchet_remove_session(peer_id.to_string());
+}
+
+/// AUDIT #12 (wire-format conformance): the ratchet wire fields must round-trip
+/// through the SAME codecs both platforms use — the Android side builds
+/// `tlv_b64` (Base64 of the binary ratchet TLV) and the pairing KEM ciphertext
+/// via the shared `core_crypto::hex_encode`; the desktop decodes both. A
+/// hand-rolled encoder on one side (the pre-#12 `joinToString { "%02x" }`) is
+/// a drift surface — this test pins the exact codec round-trips so any future
+/// encoding divergence fails here rather than silently corrupting the wire.
+#[test]
+fn shared_codec_roundtrips_ratchet_wire_fields() {
+    // 1. The Android-produced ratchet TLV (binary) must round-trip through
+    //    Base64 (the poll wire shape) and decode to the same bytes the desktop
+    //    then hands to `ratchet_process_synchronize` / the decrypt dispatcher.
+    let tlv = android_produced_ratchet_tlv("codec-peer", b"codec-conformance");
+    assert!(!tlv.is_empty());
+    let tlv_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tlv);
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tlv_b64).expect("b64");
+    assert_eq!(decoded, tlv, "base64 round-trip must be lossless");
+
+    // 2. The pairing KEM ciphertext travels as hex produced by the SHARED
+    //    UniFFI codec (`core_crypto::hex_encode`) and is decoded on the desktop
+    //    with the same `hex` implementation that codec wraps. Round-trip it
+    //    through both entry points and assert byte equality.
+    let raw: Vec<u8> = (0u8..=255u8).collect();
+    let via_uniffi = core_crypto::hex_encode(raw.clone());
+    let decoded_via_hex_crate = hex::decode(&via_uniffi).expect("hex::decode");
+    assert_eq!(decoded_via_hex_crate, raw, "shared hex codec must round-trip");
+    // The shared codec output must be canonical lowercase hex — the exact shape
+    // the desktop's `hex::decode` (and the QR-bound fields) expect.
+    assert_eq!(
+        via_uniffi,
+        raw.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        "hex_encode must produce canonical lowercase hex"
+    );
+
+    // 3. The Android phone's decoded ciphertext bytes are what the KEM handler
+    //    consumes — verify the full chain: raw bytes → hexEncode (Android) →
+    //    hex::decode (desktop) → identical bytes.
+    let kem_ct: Vec<u8> = (0u8..16u8).chain(250..=255u8).collect();
+    let android_hex = core_crypto::hex_encode(kem_ct.clone());
+    let desktop_bytes = hex::decode(android_hex).expect("desktop decode");
+    assert_eq!(desktop_bytes, kem_ct, "cross-platform hex chain must be lossless");
+
+    core_crypto::ratchet_remove_session("codec-peer".to_string());
 }

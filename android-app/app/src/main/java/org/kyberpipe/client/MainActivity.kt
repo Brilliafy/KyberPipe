@@ -36,7 +36,12 @@ class MainActivity : FragmentActivity() {
     ) { uri ->
         uri?.let {
             val base64 = UriUtils.toBase64(contentResolver, it)
-            settingsManager.devicePicture = base64
+            // AUDIT #11: the avatar is a potentially LARGE base64 blob and
+            // EncryptedSharedPreferences performs AES-GCM on the caller thread —
+            // write it off the main thread so the UI never blocks on Keystore.
+            mainScope.launch(Dispatchers.IO) {
+                settingsManager.devicePicture = base64
+            }
         }
     }
 
@@ -110,6 +115,28 @@ class MainActivity : FragmentActivity() {
      * registry is non-empty and the restore is skipped.
      */
     private fun restorePersistedCryptoState() {
+        // AUDIT #11: the snapshot restore decodes Base64, AES-GCM-decrypts with
+        // the Keystore-backed wrap key, parses the watermark JSON + the full
+        // snapshot, then `ratchetImportSession` re-parses the whole snapshot —
+        // all of it used to run on the UI thread in onCreate (cold-start jank /
+        // ANR risk on low-end hardware with large snapshots + slow Keystore).
+        // Run it on the IO dispatcher; the UI stays responsive and shows
+        // pairing state immediately.
+        mainScope.launch(Dispatchers.IO) {
+            restorePersistedCryptoStateBlocking()
+        }
+    }
+
+    /**
+     * The blocking half of [restorePersistedCryptoState], executed off the main
+     * thread (audit #11).
+     *
+     * Single-flight gate: never restore over a live session. On a process
+     * cold start the Rust registry is empty (nothing survives a kill), so
+     * this is the exact signal that distinguishes "cold start, restore the
+     * snapshot" from "warm recreation, keep the live session" (audit #2).
+     */
+    private fun restorePersistedCryptoStateBlocking() {
         // Single-flight gate: never restore over a live session. On a process
         // cold start the Rust registry is empty (nothing survives a kill), so
         // this is the exact signal that distinguishes "cold start, restore the
@@ -148,35 +175,15 @@ class MainActivity : FragmentActivity() {
                                 val bytes = uniffi.core_crypto.decryptWithRawKey32(
                                     wrapKey, nonce, ct
                                 )
-                                // AUDIT #2 (follow-up): enforce the same monotonic
-                                // rollback bound the desktop store enforces. A
-                                // snapshot whose watermark is STRICTLY below the
-                                // recorded high-water mark (an older blob restored
-                                // from a device backup, or same-user tampering) is
-                                // refused — otherwise the send chain rolls back and
-                                // derived message keys + nonces are reused for new
-                                // plaintext. Equal = the current snapshot, accepted.
-                                val snapWm = try {
-                                    uniffi.core_crypto.ratchetSnapshotWatermark(bytes)
-                                } catch (e: Exception) {
-                                    null
-                                }
-                                if (snapWm != null && org.kyberpipe.client.utils.RatchetWatermarkStore.refuseRollback(
-                                        snapWm,
-                                        org.kyberpipe.client.utils.RatchetWatermarkStore.read(settingsManager, peer)
-                                    )
-                                ) {
-                                    android.util.Log.w(
-                                        "KyberpipeRestore",
-                                        "Ratchet restore refused: snapshot watermark is below the recorded high-water mark (rollback) — audit finding #2"
-                                    )
-                                } else {
-                                    uniffi.core_crypto.ratchetImportSession(peer, bytes)
-                                    // Record the imported watermark (max with stored)
-                                    // so the monotonic bound survives restarts.
-                                    snapWm?.let { wm ->
-                                        org.kyberpipe.client.utils.RatchetWatermarkStore.update(settingsManager, peer, wm)
-                                    }
+                                try {
+                                    restoreSnapshotFromBytes(bytes, peer)
+                                } finally {
+                                    // AUDIT #14: `bytes` is the decrypted
+                                    // snapshot — full session key material —
+                                    // wiped the moment the import (or its
+                                    // rollback refusal) completes.
+                                    bytes.fill(0)
+                                    wrapKey.fill(0)
                                 }
                             }
                         }
@@ -184,6 +191,42 @@ class MainActivity : FragmentActivity() {
                 } catch (e: Exception) {
                     android.util.Log.w("KyberpipeRestore", "Ratchet restore failed: ${e.message}")
                 }
+            }
+        }
+    }
+
+    /**
+     * Import a decrypted snapshot (rollback-checked, audit #2/#1) into the Rust
+     * registry. Split from the decode path so the caller can zeroize the
+     * decrypted bytes after the import (audit #14).
+     */
+    private fun restoreSnapshotFromBytes(bytes: ByteArray, peer: String) {
+        // AUDIT #2 (follow-up): enforce the same monotonic rollback bound the
+        // desktop store enforces. A snapshot whose watermark is STRICTLY below
+        // the recorded high-water mark (an older blob restored from a device
+        // backup, or same-user tampering) is refused — otherwise the send chain
+        // rolls back and derived message keys + nonces are reused for new
+        // plaintext. Equal = the current snapshot, accepted.
+        val snapWm = try {
+            uniffi.core_crypto.ratchetSnapshotWatermark(bytes)
+        } catch (e: Exception) {
+            null
+        }
+        if (snapWm != null && org.kyberpipe.client.utils.RatchetWatermarkStore.refuseRollback(
+                snapWm,
+                org.kyberpipe.client.utils.RatchetWatermarkStore.read(settingsManager, peer)
+            )
+        ) {
+            android.util.Log.w(
+                "KyberpipeRestore",
+                "Ratchet restore refused: snapshot watermark is below the recorded high-water mark (rollback) — audit finding #2"
+            )
+        } else {
+            uniffi.core_crypto.ratchetImportSession(peer, bytes)
+            // Record the imported watermark (max with stored) so the monotonic
+            // bound survives restarts.
+            snapWm?.let { wm ->
+                org.kyberpipe.client.utils.RatchetWatermarkStore.update(settingsManager, peer, wm)
             }
         }
     }

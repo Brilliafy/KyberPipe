@@ -1,5 +1,9 @@
 pub mod crypto;
 pub mod error;
+/// App-level utilities (clipboard dedup, cover traffic) — audit #21 moved
+/// these out of `crypto/mod.rs` so the crypto module is a pure re-export of
+/// primitives.
+pub mod utils;
 pub mod network;
 pub mod packets;
 pub mod qr_scanner;
@@ -10,7 +14,6 @@ pub mod crypto_api;
 pub mod ffi;
 pub mod kem_handle;
 pub mod network_api;
-pub mod p2p_group;
 pub mod pairing_api;
 pub mod quic_bridge;
 pub mod ratchet_ffi;
@@ -136,7 +139,9 @@ pub fn ratchet_peer_ids() -> Vec<String> {
 /// snapshot exactly like the desktop store does. Returns None when no session
 /// exists for the peer.
 #[uniffi::export]
-pub fn ratchet_session_watermark(peer_identity: String) -> Result<Option<RatchetWatermark>, KyberError> {
+pub fn ratchet_session_watermark(
+    peer_identity: String,
+) -> Result<Option<RatchetWatermark>, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_session_watermark_impl(&peer_identity)
 }
@@ -211,20 +216,17 @@ pub fn ratchet_decrypt_message_binary(
     }
 }
 
-#[uniffi::export]
-pub fn ratchet_decrypt_message(
-    peer_identity: String,
-    nonce: Vec<u8>,
-    ciphertext: Vec<u8>,
-) -> Result<Vec<u8>, KyberError> {
-    ensure_panic_hook_installed();
-    if nonce.len() != 12 {
-        return Err(KyberError::DecryptionFailed(
-            "Nonce must be 12 bytes".into(),
-        ));
-    }
-    ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &nonce, &ciphertext)
-}
+/// AUDIT #13: the NON-rekey-aware decrypt surface is REMOVED from the UniFFI
+/// surface entirely (previously `ratchet_decrypt_message`). It was a footgun —
+/// it accepted only (nonce, ciphertext), so a message carrying a rekey payload
+/// (every `rekey_interval`-th message) is AEAD-bound to that payload and
+/// CANNOT be decrypted with an empty AAD; a misrouting caller silently dropped
+/// every carrier, never derived the peer's proposal, never ACKed, and stalled
+/// the peer's rekey. The rekey-aware binary dispatcher
+/// [`ratchet_decrypt_message_binary`] is now the ONLY inbound decrypt path —
+/// the footgun cannot be re-introduced by a future caller, because the type-
+/// level surface no longer exists. (The internal `ratchet_decrypt_message_impl`
+/// remains for tests/back-compat inside the crate.)
 
 #[uniffi::export]
 pub fn ratchet_decrypt_with_rekey_message(
@@ -351,12 +353,10 @@ pub fn ratchet_export_session_wrapped(
     wrap_key: Vec<u8>,
 ) -> Result<Option<EncryptedPayload>, KyberError> {
     ensure_panic_hook_installed();
-    Ok(ratchet_ffi::ratchet_export_session_wrapped_impl(&peer_identity, &wrap_key)?.map(
-        |(nonce, ciphertext)| EncryptedPayload {
-            nonce,
-            ciphertext,
-        },
-    ))
+    Ok(
+        ratchet_ffi::ratchet_export_session_wrapped_impl(&peer_identity, &wrap_key)?
+            .map(|(nonce, ciphertext)| EncryptedPayload { nonce, ciphertext }),
+    )
 }
 
 /// Restore a ratchet session from a previously exported (and decrypted)
@@ -418,6 +418,28 @@ pub fn ratchet_recv_count(peer_identity: String) -> Result<u64, KyberError> {
 pub fn ratchet_send_count(peer_identity: String) -> Result<u64, KyberError> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_send_count_impl(&peer_identity)
+}
+
+/// THE shared byte→hex codec (AUDIT #12). One encode/decode pair, exposed via
+/// UniFFI so BOTH platforms serialize wire fields identically. The Android app
+/// previously hand-rolled `joinToString { "%02x".format(it) }` for the pairing
+/// KEM ciphertext while the desktop used the Rust `hex` crate — two
+/// independent implementations of the same serialization is exactly the drift
+/// surface the binary-TLV mandate was meant to eliminate (a future contributor
+/// "fixing" one side's encoding silently corrupts the other). Round-tripping
+/// every wire field through this codec (see the desktop wire-format conformance
+/// test) makes the encoding a single source of truth.
+#[uniffi::export]
+pub fn hex_encode(data: Vec<u8>) -> String {
+    ensure_panic_hook_installed();
+    hex::encode(data)
+}
+
+/// THE shared hex→bytes codec (AUDIT #12). Mirrors [`hex_encode`].
+#[uniffi::export]
+pub fn hex_decode(encoded: String) -> Result<Vec<u8>, KyberError> {
+    ensure_panic_hook_installed();
+    hex::decode(&encoded).map_err(|e| KyberError::SerializationError(e.to_string()))
 }
 
 #[cfg(test)]

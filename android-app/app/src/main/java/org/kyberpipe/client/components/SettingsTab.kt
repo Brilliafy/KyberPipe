@@ -20,10 +20,8 @@ fun SettingsTab(
     onTriggerHandshake: () -> Unit,
     onAvatarPickerClick: () -> Unit,
     onSaveSettings: () -> Unit,
-    wifiDirectActive: Boolean,
     lanActive: Boolean,
     wireguardActive: Boolean,
-    onWifiDirectToggled: (Boolean) -> Unit,
     onLanToggled: (Boolean) -> Unit,
     onWireguardToggled: (Boolean) -> Unit,
     localLogs: List<String> = emptyList(),
@@ -51,10 +49,8 @@ fun SettingsTab(
         )
         SettingsConnectivitySection(
             settings = settings,
-            wifiDirectActive = wifiDirectActive,
             lanActive = lanActive,
             wireguardActive = wireguardActive,
-            onWifiDirectToggled = onWifiDirectToggled,
             onLanToggled = onLanToggled,
             onWireguardToggled = onWireguardToggled,
             onSaveSettings = onSaveSettings

@@ -52,7 +52,8 @@ pub(crate) async fn handle_clipboard(body: Vec<u8>, peer_id: String, s: Arc<AppS
         let inbound_enabled = { s.settings.lock().inbound_clipboard_enabled };
         // Hermetic test mode: record but do not write to the OS clipboard.
         #[cfg(test)]
-        let hermetic = crate::handlers::FORCE_EMPTY_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire);
+        let hermetic =
+            crate::handlers::FORCE_EMPTY_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire);
         #[cfg(not(test))]
         let hermetic = false;
         if hermetic {
