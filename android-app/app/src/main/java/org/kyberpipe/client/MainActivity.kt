@@ -145,7 +145,36 @@ class MainActivity : ComponentActivity() {
                                 val bytes = uniffi.core_crypto.decryptWithRawKey32(
                                     wrapKey, nonce, ct
                                 )
-                                uniffi.core_crypto.ratchetImportSession(peer, bytes)
+                                // AUDIT #2 (follow-up): enforce the same monotonic
+                                // rollback bound the desktop store enforces. A
+                                // snapshot whose watermark is STRICTLY below the
+                                // recorded high-water mark (an older blob restored
+                                // from a device backup, or same-user tampering) is
+                                // refused — otherwise the send chain rolls back and
+                                // derived message keys + nonces are reused for new
+                                // plaintext. Equal = the current snapshot, accepted.
+                                val snapWm = try {
+                                    uniffi.core_crypto.ratchetSnapshotWatermark(bytes)
+                                } catch (e: Exception) {
+                                    null
+                                }
+                                if (snapWm != null && org.kyberpipe.client.utils.RatchetWatermarkStore.refuseRollback(
+                                        snapWm,
+                                        org.kyberpipe.client.utils.RatchetWatermarkStore.read(settingsManager, peer)
+                                    )
+                                ) {
+                                    android.util.Log.w(
+                                        "KyberpipeRestore",
+                                        "Ratchet restore refused: snapshot watermark is below the recorded high-water mark (rollback) — audit finding #2"
+                                    )
+                                } else {
+                                    uniffi.core_crypto.ratchetImportSession(peer, bytes)
+                                    // Record the imported watermark (max with stored)
+                                    // so the monotonic bound survives restarts.
+                                    snapWm?.let { wm ->
+                                        org.kyberpipe.client.utils.RatchetWatermarkStore.update(settingsManager, peer, wm)
+                                    }
+                                }
                             }
                         }
                     }

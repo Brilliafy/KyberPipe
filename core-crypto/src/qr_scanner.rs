@@ -68,6 +68,31 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
         let h = height as usize;
         let stride = if stride <= 0 { w } else { stride as usize };
 
+        // AUDIT #2 (follow-up, LOW): the dimensions come from the untrusted
+        // JNI boundary. A panic from OOB indexing is contained by catch_unwind,
+        // but a huge allocation (e.g. 46341x46341 ~ 2 GiB) triggers an
+        // ALLOCATION failure which is NOT unwindable — it ABORTS the whole
+        // app (memory-pressure DoS). Validate every dimension against
+        // stride/overflow/cap and the actual buffer length BEFORE any
+        // allocation or indexing.
+        if w == 0 || h == 0 {
+            debug("decodeQrCode: zero dimensions");
+            return None;
+        }
+        if stride < w {
+            debug("decodeQrCode: stride < width");
+            return None;
+        }
+        // Overflow check + per-frame pixel cap (4 MP). Keeps every rotation
+        // allocation bounded regardless of caller-supplied dimensions.
+        let pixels = match w.checked_mul(h) {
+            Some(p) if p <= 4_000_000 => p,
+            _ => {
+                debug("decodeQrCode: dimension overflow / over 4 MP cap");
+                return None;
+            }
+        };
+
         debug(&format!(
             "decodeQrCode: {}x{} stride={} rot={}",
             w, h, stride, rotation
@@ -83,11 +108,25 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
 
         debug(&format!("y_bytes len={}", bytes.len()));
 
+        // The framed buffer must actually be large enough for every row
+        // (`stride*(h-1) + w`, overflow-checked). Else the row extraction below
+        // silently drops rows — a sign the caller passed inconsistent dims.
+        let needed = stride
+            .checked_mul(h.saturating_sub(1))
+            .and_then(|n| n.checked_add(w));
+        match needed {
+            Some(n) if n <= bytes.len() => {}
+            _ => {
+                debug("decodeQrCode: y_bytes too small for stride+width");
+                return None;
+            }
+        }
+
         // strip stride padding
         let luma: Vec<u8> = if stride == w {
             bytes
         } else {
-            let mut clean = Vec::with_capacity(w * h);
+            let mut clean = Vec::with_capacity(pixels);
             for row in 0..h {
                 let start = row * stride;
                 if start + w <= bytes.len() {

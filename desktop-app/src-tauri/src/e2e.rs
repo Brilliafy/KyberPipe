@@ -21,8 +21,30 @@ fn hex_encode(b: &[u8]) -> String {
     hex::encode(b)
 }
 
+/// Make the server TLS identity hermetic for the test. `load_or_generate_cert`
+/// (audit #4 follow-up) REFUSES to serve when a persisted `server_cert.der`
+/// exists but its private key is unaccounted for (no keyring entry, no legacy
+/// key file) — the correct security posture. Across test runs the keyring is
+/// process-local (not persisted) while the cert FILE survives, so a stale
+/// keyless cert can linger and trip the refusal. Remove that stale state so the
+/// test always takes the clean first-run generate path.
+fn reset_server_tls_identity() {
+    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|p| p.data_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::remove_file(dir.join("server_cert.der"));
+    let _ = std::fs::remove_file(dir.join("server_key.der"));
+    if let Ok(entry) = keyring::Entry::new("kyberpipe", "server_tls_key") {
+        let _ = entry.delete_password();
+    }
+}
+
 #[test]
 fn pairing_poll_clipboard_roundtrip() {
+    // A stale keyless server cert from a previous run would make the audit-#4
+    // identity guard refuse to serve REGARDLESS of THIS test's own setup — make
+    // the server identity hermetic so the assertion below is meaningful.
+    reset_server_tls_identity();
     // Hermetic clipboard: the wire-level rekey crossing below must be
     // deterministic. If the real OS clipboard has content, the desktop's own
     // send chain crosses seq 100 during the test and, as the initiator,
@@ -211,9 +233,9 @@ fn pairing_poll_clipboard_roundtrip() {
         false, // client is the responder
         Some((
             client_pair.x25519_pk.clone(),
-            client_pair.x25519_sk.clone(),
+            zeroize::Zeroizing::new(client_pair.x25519_sk.clone()),
             client_pair.mlkem_pk.clone(),
-            client_pair.mlkem_sk.clone(),
+            zeroize::Zeroizing::new(client_pair.mlkem_sk.clone()),
         )),
         Some(&server_pair.x25519_pk),
         Some(&server_pair.mlkem_pk),

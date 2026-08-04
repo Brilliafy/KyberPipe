@@ -13,7 +13,17 @@ import java.net.InetAddress
 data class BeaconHost(
     val hostPkHex: String,
     val localIp: String,
-    val deviceName: String
+    val deviceName: String,
+    /**
+     * ALWAYS false during discovery (audit #3). The beacon's ML-DSA signature
+     * verifies only that the sender owns the signing key it EMBEDDED in the
+     * beacon — any LAN host can mint its own keypair — so a discovered host is
+     * an unauthenticated hint, never a trusted identity. The phone does not
+     * hold the desktop's beacon signing key until pairing completes, so
+     * callers must treat `verified == false` as "pairing-phishing bait" and
+     * never auto-fill pairing or drive connections from it.
+     */
+    val verified: Boolean = false,
 )
 
 class MdnsBeaconListener(
@@ -90,6 +100,11 @@ class MdnsBeaconListener(
                             // this check, any LAN host could mint its own keypair,
                             // sign its own `pk:ip:ts:nonce`, and pass every
                             // shape/timestamp/IP check — pairing-phishing bait.
+                            //
+                            // AUDIT #3: this proves ONLY self-ownership. The host
+                            // stays UNVERIFIED for discovery purposes (see
+                            // [BeaconHost.verified]) and is never a trusted identity
+                            // until pairing pins the desktop's real signing key.
                             val signedRegion = "${parts[0]}:${parts[1]}:${parts[2]}:${parts[3]}"
                             val sigOk = try {
                                 uniffi.core_crypto.verifyMldsaSignature(
@@ -129,9 +144,12 @@ class MdnsBeaconListener(
                                 localIp = declIp,
                                 // Name is intentionally absent from the beacon
                                 // payload — show a neutral default.
-                                deviceName = "Desktop"
+                                deviceName = "Desktop",
+                                // AUDIT #3: unauthenticated discovery — the
+                                // self-embedded key is not a trusted identity.
+                                verified = false,
                             )
-                            Log.d(tag, "Beacon from ${packet.address.hostAddress}: ${host.deviceName} @ ${host.localIp}")
+                            Log.d(tag, "Beacon from ${packet.address.hostAddress}: UNVERIFIED host @ ${host.localIp}")
                             onHostDiscovered?.invoke(host)
                         }
                     } catch (_: java.net.SocketTimeoutException) {

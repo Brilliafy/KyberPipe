@@ -67,16 +67,22 @@ pub async fn perform_sas_confirmation(
     }
     state.increment_sas_attempt_count();
 
-    // Atomically read both sas_code and pending_session_key in one critical section
-    let (stored_sas, pending_key) = {
-        let (sas, pending) = state.get_pairing_read();
-        (sas, pending.to_string())
-    };
+    // Atomically read both sas_code and pending_session_key in one critical section.
+    // AUDIT #2 (follow-up): the pending session key is held in a `Zeroizing`
+    // wrapper so the heap String (and the decoded byte vector below) is wiped on
+    // drop — the legacy plain String/`Vec<u8>` materialization left session-key
+    // bytes lingering in GC/heap memory during every SAS confirmation.
+    let (stored_sas, pending_key) = state.get_pairing_read();
+    let pending_key = zeroize::Zeroizing::new(pending_key);
 
     if stored_sas.is_empty() {
         return Err("No pending pairing SAS code found. Initiate pairing first.".into());
     }
-    if stored_sas != verified_sas {
+    // AUDIT (LOW): constant-time SAS comparison — no early exit on a prefix
+    // mismatch, so a future machine-authenticated SAS channel gains no timing
+    // oracle. (The human-typed single-shot path is negligible, but this is
+    // cheap and removes the class outright.)
+    if !constant_time_str_eq(&stored_sas, &verified_sas) {
         return Err("SAS code mismatch. Pairing rejected.".into());
     }
     if pending_key.is_empty() {
@@ -84,7 +90,10 @@ pub async fn perform_sas_confirmation(
     }
 
     state.set_pending_session_key(SecureString::new(String::new()));
-    state.set_session_key(SecureString::new(pending_key.clone()));
+    // `to_string()` on the Zeroizing<String> derefs to a plain String clone
+    // which is immediately re-wrapped in a (drop-zeroizing) SecureString — the
+    // original Zeroizing buffer is wiped when it drops.
+    state.set_session_key(SecureString::new(pending_key.to_string()));
     // Persist the session key in the OS keyring so ratchet snapshots can be
     // encrypted/restored across restarts.
     crate::ratchet_store::store_session_key_to_keyring(&pending_key);
@@ -132,9 +141,9 @@ pub async fn perform_sas_confirmation(
                     true,
                     Some((
                         our_pair.x25519_pk.clone(),
-                        our_pair.x25519_sk.clone(),
+                        zeroize::Zeroizing::new(our_pair.x25519_sk.clone()),
                         our_pair.mlkem_pk.clone(),
-                        our_pair.mlkem_sk.clone(),
+                        zeroize::Zeroizing::new(our_pair.mlkem_sk.clone()),
                     )),
                     if peer_x25519.is_empty() {
                         None
@@ -161,7 +170,10 @@ pub async fn perform_sas_confirmation(
             }
         }
 
-        let pending_sk = hex::decode(&pending_key).unwrap_or_default();
+        // AUDIT #2 (follow-up): the decoded key bytes are also wrapped in
+        // `Zeroizing` so they are wiped after `session_key_create` regardless of
+        // whether it succeeds or errors.
+        let pending_sk = zeroize::Zeroizing::new(hex::decode(&pending_key).unwrap_or_default());
         if !pending_sk.is_empty() {
             // Audit finding #13: `session_key_create` can fail (duplicate key
             // bytes, registry cap). `unwrap_or(0)` previously turned the failure
@@ -170,7 +182,7 @@ pub async fn perform_sas_confirmation(
             // broken. Handle the error explicitly instead: abort the SAS
             // confirmation (the user can re-pair) rather than commit to a
             // session that cannot encrypt.
-            let handle = match core_crypto::session_key_create(pending_sk) {
+            let handle = match core_crypto::session_key_create(pending_sk.to_vec()) {
                 Ok(h) if h != 0 => h,
                 Ok(_) => {
                     return Err(
@@ -249,6 +261,25 @@ pub async fn perform_sas_confirmation(
     crate::handlers::emit_app_event("pairing::complete", serde_json::json!({"is_paired": true}));
 
     Ok("Paired successfully".to_string())
+}
+
+/// Constant-time string equality for the SAS comparison (audit LOW finding —
+/// defensive; the SAS may one day be consumed by a machine channel where a
+/// timing oracle matters). No early exit on a prefix mismatch: every byte is
+/// folded into the accumulator, so the timing depends only on the (public,
+/// fixed-length) SAS length, never on which byte differs.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    // SAS codes are fixed-size (7 chars) and public — length is not secret.
+    if a.len() != b.len() {
+        return false;
+    }
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut acc: u8 = 0;
+    for i in 0..ab.len() {
+        acc |= ab[i] ^ bb[i];
+    }
+    acc == 0
 }
 
 /// Current pairing state, exposed to the webview so the SAS modal can be

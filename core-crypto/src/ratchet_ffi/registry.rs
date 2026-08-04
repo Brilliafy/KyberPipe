@@ -5,6 +5,7 @@
 use crate::crypto::DoubleRatchetState;
 use crate::error::KyberError;
 use std::collections::HashMap;
+use zeroize::Zeroizing;
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// Ratchet session registry keyed by peer identity fingerprint.
@@ -25,7 +26,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// Alias keeps the (complex) registry type readable (clippy::type_complexity).
 pub(crate) type RatchetSessionMap = HashMap<String, Arc<Mutex<DoubleRatchetState>>>;
 /// (x25519_pk, x25519_sk, mlkem_pk, mlkem_sk) caller-owned pairing keypair.
-pub(crate) type CallerKeypair = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+/// The private halves are `Zeroizing<Vec<u8>>` (audit #2 follow-up): passing
+/// them through plain `Vec<u8>` let the raw secret bytes survive in freed heap
+/// after the init consumed them into the (ZeroizeOnDrop) session keypair. As
+/// `Zeroizing<Vec<u8>>` the buffers are wiped on drop — even on the error path
+/// — so no raw private half ever lingers after this boundary.
+pub(crate) type CallerKeypair = (Vec<u8>, Zeroizing<Vec<u8>>, Vec<u8>, Zeroizing<Vec<u8>>);
 
 pub(crate) static RATCHET_SESSIONS: LazyLock<Mutex<RatchetSessionMap>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -72,12 +78,15 @@ pub fn ratchet_init_session_with_keypair_impl(
                 });
             }
             x25519_pk.copy_from_slice(&xpk);
-            x25519_sk.copy_from_slice(&xsk);
+            x25519_sk.copy_from_slice(&xsk); // &xsk derefs the Zeroizing buffer
             crate::crypto::HybridKeyPair {
                 x25519_pk,
                 x25519_sk,
                 mlkem_pk: mpk,
-                mlkem_sk: msk,
+                // `msk` is Zeroizing — a transient plain Vec copy is moved
+                // straight into the (ZeroizeOnDrop) session keypair, and the
+                // source Zeroizing buffer itself is wiped when it drops.
+                mlkem_sk: msk.to_vec(),
             }
         }
         None => crate::crypto::generate_hybrid_keypair(),
@@ -233,63 +242,178 @@ pub fn ratchet_export_session_wrapped_impl(
     Ok(Some((nonce.to_vec(), ct)))
 }
 
-pub fn ratchet_import_session_impl(peer_identity: &str, data: &[u8]) -> Result<(), KyberError> {
-    let snap: crate::crypto::ratchet::RatchetSnapshot =
-        serde_json::from_slice(data).map_err(|e| KyberError::SerializationError(e.to_string()))?;
+/// Full rollback watermark of a ratchet session (audit finding #2 follow-up).
+/// `(pairing_epoch, ratchet_generation, send_message_count,
+/// recv_message_count)` — lexicographically comparable. The send chain is
+/// exactly as stateful as the recv chain (chain key + counter advance on every
+/// `ratchet_encrypt`), so a live session that has sent MORE than a snapshot
+/// contains must never be replaced by it: the send chain would roll back and
+/// the derived message keys + (generation, seq) nonces would be reused for NEW
+/// plaintext — the exact IV-reuse class the nonce-generation redesign
+/// eliminates elsewhere. This record is the SINGLE watermark representation
+/// shared by the UniFFI import guard, the UniFFI export surface and the store
+/// restore paths, so the comparisons cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RatchetWatermark {
+    pub pairing_epoch: u64,
+    pub ratchet_generation: u32,
+    pub send_message_count: u64,
+    pub recv_message_count: u64,
+}
 
+impl RatchetWatermark {
+    pub(crate) fn from_snapshot(snap: &crate::crypto::ratchet::RatchetSnapshot) -> Self {
+        Self {
+            pairing_epoch: snap.pairing_epoch,
+            ratchet_generation: snap.ratchet_generation,
+            send_message_count: snap.send_message_count,
+            recv_message_count: snap.recv_message_count,
+        }
+    }
+
+    pub(crate) fn from_live(state: &DoubleRatchetState) -> Self {
+        Self {
+            pairing_epoch: state.pairing_epoch,
+            ratchet_generation: state.ratchet_generation,
+            send_message_count: state.send.message_count,
+            recv_message_count: state.recv.message_count,
+        }
+    }
+
+    /// True when `self` is strictly ahead of `other` in lexicographic order.
+    pub fn is_ahead_of(&self, other: &Self) -> bool {
+        (
+            self.pairing_epoch,
+            self.ratchet_generation,
+            self.send_message_count,
+            self.recv_message_count,
+        ) > (
+            other.pairing_epoch,
+            other.ratchet_generation,
+            other.send_message_count,
+            other.recv_message_count,
+        )
+    }
+}
+
+/// Live-session watermark export (audit finding #2 follow-up). Lets callers
+/// (Android snapshot persistence) record the monotonic high-water mark of the
+/// LIVE session without importing anything, so a later restore can enforce the
+/// same rollback bound the desktop's store enforces. Returns None when no
+/// session exists for the peer.
+pub fn ratchet_session_watermark_impl(
+    peer_identity: &str,
+) -> Result<Option<RatchetWatermark>, KyberError> {
+    let session_arc = {
+        let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(peer_identity) {
+            Some(s) => s.clone(),
+            None => return Ok(None),
+        }
+    };
+    let guard = session_arc
+        .lock()
+        .map_err(|_| KyberError::CryptoError("Ratchet session mutex poisoned".into()))?;
+    Ok(Some(RatchetWatermark::from_live(&guard)))
+}
+
+/// Parse the full 4-tuple watermark out of a serialized ratchet snapshot
+/// (audit finding #2 follow-up). Centralizes the snapshot field mapping in ONE
+/// place so the registry import guard, the desktop store's restore check and
+/// the Android restore check all read the same fields. Parses tolerantly via
+/// `serde_json::Value` — only the four watermark fields are required, so both
+/// a full `RatchetSnapshot` JSON (as persisted/exported) and a minimal
+/// watermark-only JSON (as used by the store restore test) yield a watermark.
+/// `pairing_epoch` defaults to 0 when absent (legacy snapshots). Returns None
+/// when the blob is not valid JSON or lacks the send/recv/generation fields.
+pub fn ratchet_snapshot_watermark_impl(
+    data: &[u8],
+) -> Result<Option<RatchetWatermark>, KyberError> {
+    let v: serde_json::Value = serde_json::from_slice(data)
+        .map_err(|e| KyberError::SerializationError(e.to_string()))?;
+    let Some(gen) = v.get("ratchet_generation").and_then(|g| g.as_u64()) else {
+        return Ok(None);
+    };
+    let Some(send) = v.get("send_message_count").and_then(|g| g.as_u64()) else {
+        return Ok(None);
+    };
+    let Some(recv) = v.get("recv_message_count").and_then(|g| g.as_u64()) else {
+        return Ok(None);
+    };
+    let epoch = v
+        .get("pairing_epoch")
+        .and_then(|g| g.as_u64())
+        .unwrap_or(0);
+    Ok(Some(RatchetWatermark {
+        pairing_epoch: epoch,
+        ratchet_generation: gen as u32,
+        send_message_count: send,
+        recv_message_count: recv,
+    }))
+}
+
+/// THE single rollback guard for snapshot import (audit finding #2
+/// follow-up). A snapshot may be imported only when no live session exists OR
+/// the live session is not strictly ahead of the snapshot in the lexicographic
+/// `(pairing_epoch, ratchet_generation, send_message_count,
+/// recv_message_count)` order. Returns `Ok(true)` when the import must be
+/// REFUSED. This is the only comparison the import surface performs — the
+/// store layers either call this (via `ratchet_import_session`) or mirror the
+/// same `RatchetWatermark` ordering, so the guard and the watermark checks
+/// cannot drift.
+fn import_watermark_guard(
+    peer_identity: &str,
+    snap_wm: &RatchetWatermark,
+) -> Result<bool, KyberError> {
     // AUDIT #2 (HIGH, pairing-epoch watermark): a snapshot from a DIFFERENT
     // pairing epoch must never be imported over a live session. After a re-pair
     // the live session is fresh (gen 0, new master secret) while the persisted
-    // snapshot is from the OLD pairing (gen > 0, old key material). The
-    // high-water guard below evaluates live.gen (0) > snap.gen (G) → false, so
-    // WITHOUT the epoch check the import would proceed and revert the session
-    // to pre-pair key material — silent state rollback that presents as
-    // "paired but nothing syncs". An epoch mismatch is therefore a hard refusal
-    // REGARDLESS of relative advancement: the snapshot belongs to a different
-    // (now-dead) pairing and must never overlay this session.
-    let epoch_mismatch = {
+    // snapshot is from the OLD pairing (gen > 0, old key material). An epoch
+    // mismatch is a hard refusal REGARDLESS of relative advancement: the
+    // snapshot belongs to a different (now-dead) pairing and must never overlay
+    // this session.
+    let live_wm = {
         let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(peer_identity).cloned() {
-            None => false,
+            None => return Ok(false), // no live session — nothing to protect
             Some(session_arc) => {
                 drop(map);
                 match session_arc.lock() {
-                    Ok(live) => live.pairing_epoch != snap.pairing_epoch,
-                    Err(_) => false, // corrupted live session — allow re-import
+                    Ok(live) => RatchetWatermark::from_live(&live),
+                    Err(_) => return Ok(false), // corrupted live session — allow re-import
                 }
             }
         }
     };
-    if epoch_mismatch {
+    if live_wm.pairing_epoch != snap_wm.pairing_epoch {
         tracing::warn!(
             "[Import] Refusing snapshot for {peer_identity}: pairing epoch mismatch (snapshot epoch {}) — stale pre-re-pair snapshot refused (audit finding #2)",
-            snap.pairing_epoch,
+            snap_wm.pairing_epoch,
         );
-        return Ok(());
+        return Ok(true);
     }
+    if live_wm.is_ahead_of(snap_wm) {
+        tracing::warn!(
+            "[Import] Refusing snapshot for {peer_identity}: live watermark {:?} is ahead of snapshot watermark {:?} — refusing chain rollback (audit finding #2)",
+            live_wm, snap_wm,
+        );
+        return Ok(true);
+    }
+    Ok(false)
+}
 
-    // High-water-mark guard: if a live session exists and is at least as
-    // advanced as the snapshot, refuse to regress it. Comparison is
-    // lexicographic over (ratchet_generation, recv_message_count) because a
-    // rekey commit resets the per-generation counters.
-    let live_ahead = {
-        let map = RATCHET_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(peer_identity).cloned() {
-            None => false,
-            Some(session_arc) => {
-                drop(map);
-                match session_arc.lock() {
-                    Ok(live) => {
-                        live.ratchet_generation > snap.ratchet_generation
-                            || (live.ratchet_generation == snap.ratchet_generation
-                                && live.recv.message_count >= snap.recv_message_count)
-                    }
-                    Err(_) => false, // corrupted live session — allow re-import
-                }
-            }
-        }
-    };
-    if live_ahead {
+pub fn ratchet_import_session_impl(peer_identity: &str, data: &[u8]) -> Result<(), KyberError> {
+    let snap: crate::crypto::ratchet::RatchetSnapshot =
+        serde_json::from_slice(data).map_err(|e| KyberError::SerializationError(e.to_string()))?;
+    let snap_wm = RatchetWatermark::from_snapshot(&snap);
+
+    // Centralized lexicographic watermark guard (epoch, generation, SEND count,
+    // recv count). The former guard compared only (generation, recv count) and
+    // was send-chain-blind: a live session that had sent MORE than the snapshot
+    // was judged "not ahead" and the import rolled the send chain back — the
+    // (key, nonce) reuse hazard. The store-level watermark already included
+    // send; this guard is now the single source of truth for the FFI surface.
+    if import_watermark_guard(peer_identity, &snap_wm)? {
         return Ok(());
     }
 

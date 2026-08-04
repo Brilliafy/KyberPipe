@@ -722,8 +722,12 @@ mod tests {
         let shares = split_secret_shamir(master_key, 2, 3).unwrap();
         assert_eq!(shares.len(), 3);
 
+        // AUDIT #5 (follow-up): the recovered bytes must EQUAL the secret, not
+        // just match in length. The legacy assertion only checked length, which
+        // masked a broken GF(2^8) LOG table that produced garbage shares.
         let recovered = reconstruct_secret_shamir(&shares[0..2], 2).unwrap();
         assert_eq!(recovered.len(), master_key.len());
+        assert_eq!(recovered.as_slice(), master_key, "recovered secret must equal the original");
     }
 
     #[test]

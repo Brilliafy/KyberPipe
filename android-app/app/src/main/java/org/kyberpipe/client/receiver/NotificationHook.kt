@@ -56,6 +56,14 @@ class NotificationHook : NotificationListenerService() {
             } catch (e: Exception) {
                 Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
             }
+            // AUDIT #7 (LOW, follow-up): the companion statically retained other
+            // apps' PendingIntents until `onNotificationRemoved`. If a removal
+            // event is missed (listener restart), the reference persisted — a
+            // stale-PendingIntent invocation risk. Release them after the trigger
+            // (the desktop's pending_media_action is one-shot; a fresh media
+            // notification re-populates the set).
+            activeMediaActions = null
+            activeMediaPackage = null
         }
 
         /// Send media payload over QUIC via UniFFI bindings instead of HTTP/TCP.
@@ -157,28 +165,25 @@ class NotificationHook : NotificationListenerService() {
         val timestamp = System.currentTimeMillis()
         Log.i("KyberpipeNotifHook", "Intercepted notification from $packageName: $title")
 
-        try {
-            // Create the UniFFI serialized packet for transmission logs
-            val jsonPacket = uniffi.core_crypto.createNotificationPacket(
-                title,
-                formattedText,
-                packageName,
-                timestamp.toULong()
+        // AUDIT #8 (MEDIUM, follow-up): NON-MEDIA notifications were serialized
+        // via `createNotificationPacket` but NEVER transmitted to the desktop —
+        // there is no Android producer for the desktop `push_notification_packet`
+        // command over QUIC, so the serialization was dead code that created the
+        // false impression that notification forwarding works. The desktop-side
+        // NotificationCenter therefore cannot receive these until a dedicated
+        // ratchet-wrapped QUIC stream + consent gate is implemented (out of
+        // scope here). Per the audit's allowed option, the dead serialization
+        // path is REMOVED; the phone continues to mirror the event locally so
+        // the in-app NotificationsTab (the current consumer) still works.
+        _notificationEvents.tryEmit(
+            NotificationEvent(
+                title = title,
+                text = formattedText,
+                packageName = packageName,
+                timestamp = timestamp
             )
-            Log.d("KyberpipeNotifHook", "Serialized notification packet: $jsonPacket")
-
-            // Emit to SharedFlow instead of broadcast — no exported receiver needed
-            _notificationEvents.tryEmit(
-                NotificationEvent(
-                    title = title,
-                    text = formattedText,
-                    packageName = packageName,
-                    timestamp = timestamp
-                )
-            )
-        } catch (e: Exception) {
-            Log.e("KyberpipeNotifHook", "Failed to format notification packet: ${e.message}")
-        }
+        )
+        Log.d("KyberpipeNotifHook", "Intercepted (local mirror) notification from $packageName: $title")
     }
 
     private fun handleMediaNotification(sbn: StatusBarNotification) {

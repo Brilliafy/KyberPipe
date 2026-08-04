@@ -261,31 +261,67 @@ fn load_or_generate_cert() -> Result<
                 }
             }
         }
-        // 3) Keyring unavailable AND no key file (e.g. a headless box with no
-        //    secret-service backend and a migrated-away key file). Generate a
-        //    fresh key; prefer the keyring, but if THAT also fails, use the
-        //    key in memory for this process (the identity rotates on the next
-        //    start — acceptable for a broken-keyring environment, and strictly
-        //    better than refusing to serve).
-        let (certs, key) = network::generate_self_signed_cert()?;
-        if let rustls::pki_types::PrivateKeyDer::Pkcs8(doc) = &key {
-            if keyring_store_server_key(doc.secret_pkcs8_der()).is_err() {
-                warn!(
-                    "[TLS] Keyring store failed on first run; server identity is process-local only"
-                );
-            }
-        }
-        let _ = std::fs::write(&cert_path, cert.as_ref());
-        return Ok((certs, key));
+        // 3) Keyring unavailable AND no key file: the persisted certificate's
+        //    private key is UNACCOUNTED FOR. AUDIT #4 (MEDIUM, identity
+        //    rotation): the legacy path regenerated a fresh key here and
+        //    OVERWROTE the persisted cert — silently rotating the server
+        //    identity every start. Every paired phone pins the ORIGINAL
+        //    cert hash from the pairing QR, so a rotation breaks every
+        //    pinned peer ("paired but nothing syncs", silent, until the user
+        //    re-pairs) and a same-user attacker who can read the data dir can
+        //    trigger it to force a re-pair window. NEVER overwrite a
+        //    persisted cert whose key is unaccounted for: fail LOUDLY and
+        //    leave the cert untouched so the operator can restore the
+        //    keyring entry or explicitly delete the cert to regenerate a
+        //    fresh identity.
+        return Err(KyberError::NetworkError(format!(
+            "Server TLS identity unavailable: {} exists but its private key is \
+             neither in the OS keyring nor in a legacy {} file. Refusing to \
+             rotate the identity silently (every paired device pins this \
+             certificate — audit finding #4). Restore the keyring entry, or \
+             delete the certificate file to explicitly regenerate a fresh \
+             identity.",
+            cert_path.display(),
+            key_path.display(),
+        )));
     }
 
-    // Generate new cert; persist the cert on disk and the key in the keyring.
+    // Generate new cert. AUDIT #4: persist the key in the keyring FIRST — only
+    // after the key is durably stored is the cert file written, so a keyring
+    // failure can never leave a cert on disk whose key is unaccounted for
+    // (which would put the NEXT start into branch 3 above).
+    //
+    // AUDIT #4 (follow-up): the keyring write is VERIFIED by reading it back.
+    // Some OS keyring backends accept `set_password` but fail to make the entry
+    // readable (or durable) in a later session — if the write does not round-
+    // trip, fall back to the 0600 plaintext key FILE (the same fallback the
+    // legacy migration in branch 2 uses when the keyring is unavailable) so the
+    // identity stays consistent and durable instead of being silently rotated.
+    // The identity is COMMITTED only after a verifiable key copy exists.
     let (certs, key) = network::generate_self_signed_cert()?;
+    let key_der: Vec<u8> = match &key {
+        rustls::pki_types::PrivateKeyDer::Pkcs8(doc) => doc.secret_pkcs8_der().to_vec(),
+        other => other.secret_der().to_vec(),
+    };
+    let keyring_durable = keyring_store_server_key(&key_der).is_ok()
+        && keyring_server_key().is_ok_and(|k| k == key_der);
+    if !keyring_durable {
+        // Keyring unavailable or non-durable — persist a 0600 key file (the
+        // same fallback branch 2 uses for a legacy key file), so the cert is
+        // never committed with an unaccounted-for key.
+        if let Err(e) = std::fs::write(&key_path, &key_der) {
+            return Err(KyberError::NetworkError(format!(
+                "Failed to persist server TLS key (keyring unusable and key file write failed): {e}"
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
     if let Some(cert) = certs.first() {
         let _ = std::fs::write(&cert_path, cert.as_ref());
-    }
-    if let rustls::pki_types::PrivateKeyDer::Pkcs8(doc) = &key {
-        keyring_store_server_key(doc.secret_pkcs8_der())?;
     }
     #[cfg(unix)]
     {

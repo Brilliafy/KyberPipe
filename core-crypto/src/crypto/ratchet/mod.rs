@@ -1,6 +1,7 @@
 pub mod decrypt;
 pub mod derive;
 pub mod encrypt;
+pub(crate) mod policy;
 pub(crate) mod previous_generation;
 pub(crate) mod resync;
 pub mod snapshot;

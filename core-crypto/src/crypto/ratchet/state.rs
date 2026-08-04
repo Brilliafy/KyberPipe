@@ -7,23 +7,13 @@ use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Wall-clock lifetime of an unconsumed INCOMING rekey proposal (audit
-/// KYP-2026-02 #3). A proposal the peer has not completed within this window —
-/// i.e. no authenticated new-generation message arrived to consume it — is
-/// considered STALE: the peer is cut off (the very condition that triggers a
-/// Synchronize), so it can never send the messages that would consume the
-/// proposal. A stale proposal is EVICTED by the Synchronize recovery path
-/// instead of deadlocking it. Persisted across restarts via the snapshot
-/// (`pending_proposal_attached_at_unix`) so the bound survives process death.
-pub(crate) const INCOMING_REKEY_TTL_SECS: u64 = 60;
-
-/// Current wall-clock time in unix seconds.
-pub(crate) fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+/// Policy constants (rekey TTLs, replay-window cap) and the staleness/eviction
+/// predicates now live in `super::policy` (audit #2 follow-up — structural
+/// decomposition). `state.rs` stays data + invariants; the tunable budget
+/// surface owns a single module. Re-exported here so existing
+/// `super::state::now_unix_secs()` / `INCOMING_REKEY_TTL_SECS` call sites keep
+/// resolving unchanged.
+pub(crate) use super::policy::{INCOMING_REKEY_TTL_SECS, SEEN_SET_MAX, now_unix_secs};
 
 /// A pending outgoing rekey confirmation. Retains the full rekey payload so an
 /// unacknowledged proposal can be RE-SENT on a later message (never
@@ -166,9 +156,8 @@ pub struct ReplayWindow {
 /// local bound — and every entry is persisted in the snapshot, so unbounded
 /// growth is both a memory leak and a snapshot-size leak. The cap is generous
 /// (replay detection stays correct for any realistic delivery window) while
-/// guaranteeing the set can never grow without bound.
-pub(crate) const SEEN_SET_MAX: usize = 4096;
-
+/// guaranteeing the set can never grow without bound. (`SEEN_SET_MAX` itself
+/// is defined in `policy.rs` and re-exported here.)
 impl ReplayWindow {
     /// Insert a seen (generation, seq) pair and enforce the absolute size cap
     /// (audit finding #29): when the set exceeds `SEEN_SET_MAX`, evict the
@@ -671,17 +660,7 @@ impl DoubleRatchetState {
     /// wall-clock rollback cannot stretch the proposal's life indefinitely and a
     /// forward jump cannot instantly evict a live proposal.
     pub(crate) fn incoming_proposal_is_stale(&self) -> bool {
-        let wall_elapsed = match self.incoming_proposal.attached_at_unix {
-            Some(at) => now_unix_secs().saturating_sub(at),
-            None => 0,
-        };
-        let mono_elapsed = match self.incoming_proposal.attached_at_mono {
-            Some(at) => at.elapsed().as_secs(),
-            // None after a snapshot restore — the persisted wall-clock bound
-            // stands alone (monotonic time cannot survive a restart).
-            None => 0,
-        };
-        wall_elapsed.max(mono_elapsed) >= INCOMING_REKEY_TTL_SECS
+        super::policy::incoming_proposal_is_stale(&self.incoming_proposal)
     }
 
     /// Whether the OUTGOING proposal has exceeded its bounded lifetime. The
@@ -697,19 +676,7 @@ impl DoubleRatchetState {
     /// and the monotonic clock is used only as a floor: the effective age is
     /// the max of both, exactly like the incoming TTL (audit finding #10).
     pub(crate) fn outgoing_proposal_is_stale(&self) -> bool {
-        if self.rekey_pending_confirm_queue.is_empty() {
-            // No live carrier — nothing to evict (a half-committed proposal
-            // whose queue was lost is re-staged by encrypt.rs, never evicted
-            // here).
-            return false;
-        }
-        let now_unix = now_unix_secs();
-        self.rekey_pending_confirm_queue.iter().all(|c| {
-            let wall_elapsed = now_unix.saturating_sub(c.attached_at_unix);
-            let mono_elapsed = c.attached_at.elapsed().as_secs();
-            wall_elapsed.max(mono_elapsed)
-                >= std::time::Duration::from_secs(INCOMING_REKEY_TTL_SECS).as_secs()
-        })
+        super::policy::outgoing_proposal_is_stale(&self.rekey_pending_confirm_queue)
     }
 
     /// Record the attach time of a freshly derived INCOMING proposal (audit

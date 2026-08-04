@@ -37,9 +37,9 @@ fn android_produced_ratchet_tlv(peer_id: &str, plaintext: &[u8]) -> Vec<u8> {
     let caller_keypair = |p: &core_crypto::PqKeyPair| {
         (
             p.x25519_pk.clone(),
-            p.x25519_sk.clone(),
+            zeroize::Zeroizing::new(p.x25519_sk.clone()),
             p.mlkem_pk.clone(),
-            p.mlkem_sk.clone(),
+            zeroize::Zeroizing::new(p.mlkem_sk.clone()),
         )
     };
 
@@ -272,9 +272,9 @@ fn poll_response_manifest_prescribes_field_order() {
     let caller_keypair = |p: &core_crypto::PqKeyPair| {
         (
             p.x25519_pk.clone(),
-            p.x25519_sk.clone(),
+            zeroize::Zeroizing::new(p.x25519_sk.clone()),
             p.mlkem_pk.clone(),
-            p.mlkem_sk.clone(),
+            zeroize::Zeroizing::new(p.mlkem_sk.clone()),
         )
     };
     // Server (initiator) — the poll responder.
