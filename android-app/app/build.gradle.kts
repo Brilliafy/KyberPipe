@@ -40,6 +40,14 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests {
+            // JVM tests exercise the poll wire logic + watermark with fakes;
+            // any Android framework call they hit returns defaults instead of
+            // throwing "not mocked".
+            isReturnDefaultValues = true
+        }
+    }
     sourceSets {
         getByName("main") {
             jniLibs.srcDir("src/main/jniLibs")
@@ -95,5 +103,11 @@ dependencies {
     
     // Security Crypto
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // JVM unit tests (verification-gap remediation: the poll wire logic and
+    // the ratchet rollback watermark are exercised on the JVM with fakes).
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }
 

@@ -134,7 +134,6 @@ object KyberPipePollEngine {
         // restart never orphans buffered updates nor mints a new flow.
         if (transport == null) {
             transport = PollTransport(
-                context = appCtx,
                 settings = currentSettings!!,
                 updates = _updates,
                 requestSync = { needSync = true },

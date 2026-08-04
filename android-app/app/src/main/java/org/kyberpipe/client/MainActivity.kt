@@ -4,10 +4,10 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.*
 import org.kyberpipe.client.components.*
 import org.kyberpipe.client.crash.CrashLogger
@@ -17,7 +17,10 @@ import org.kyberpipe.client.utils.PermissionHelper
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.UriUtils
 
-class MainActivity : ComponentActivity() {
+// FragmentActivity (a ComponentActivity subclass) so the biometric step-up
+// prompt (androidx.biometric) can run for the sensitive forwarding opt-ins
+// (audit #14 follow-up).
+class MainActivity : FragmentActivity() {
 
     private lateinit var settingsManager: SettingsManager
     private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())

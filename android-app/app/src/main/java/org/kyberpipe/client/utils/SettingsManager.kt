@@ -9,7 +9,7 @@ import androidx.security.crypto.MasterKey
  * Split settings storage: security-critical values use EncryptedSharedPreferences
  * (Android Keystore-backed AES-256-GCM), while non-sensitive UI prefs use plain storage.
  */
-class SettingsManager(context: Context) {
+class SettingsManager(context: Context) : org.kyberpipe.client.service.PollSettings {
     // Encrypted prefs for security-critical data (session key, paired state)
     private val securePrefs: SharedPreferences = run {
         val masterKey = MasterKey.Builder(context)
@@ -50,7 +50,7 @@ class SettingsManager(context: Context) {
         get() = securePrefs.getLong("kem_handle_id", 0L)
         set(value) = securePrefs.edit().putLong("kem_handle_id", value).apply()
 
-    var isPaired: Boolean
+    override var isPaired: Boolean
         get() = securePrefs.getBoolean("is_paired", false)
         set(value) = securePrefs.edit().putBoolean("is_paired", value).apply()
 
@@ -124,7 +124,7 @@ class SettingsManager(context: Context) {
     /// committing `isPaired`. Gates the two-phase pairing commit (audit finding
     /// #6): the phone must not claim "paired" while the desktop may still reject
     /// the SAS code or time out.
-    var pendingPairingConfirmation: Boolean
+    override var pendingPairingConfirmation: Boolean
         get() = securePrefs.getBoolean("pending_pairing_confirmation", false)
         set(value) = securePrefs.edit().putBoolean("pending_pairing_confirmation", value).apply()
 
@@ -169,7 +169,7 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("device_picture", "") ?: ""
         set(value) = prefs.edit().putString("device_picture", value).apply()
 
-    var pairedDeviceName: String
+    override var pairedDeviceName: String
         get() = prefs.getString("paired_device_name", "") ?: ""
         set(value) = prefs.edit().putString("paired_device_name", value).apply()
 

@@ -1,10 +1,8 @@
 package org.kyberpipe.client.service
 
-import android.content.Context
 import android.util.Base64
 import android.util.Log
 import org.json.JSONObject
-import org.kyberpipe.client.utils.SettingsManager
 import kotlinx.coroutines.flow.MutableSharedFlow
 
 /**
@@ -30,10 +28,13 @@ import kotlinx.coroutines.flow.MutableSharedFlow
  * the UI never subscribed to.
  */
 class PollTransport(
-    private val context: Context,
-    private val settings: SettingsManager,
+    private val settings: PollSettings,
     private val updates: MutableSharedFlow<KyberPipePollEngine.PollUpdate>,
     private val requestSync: () -> Unit,
+    /// Injected ratchet FFI (verification-gap remediation): the real impl
+    /// delegates to UniFFI; tests inject a fake so the wire logic — including
+    /// the AUDIT #1 flow-forwarding — runs hermetically on the JVM.
+    private val ffi: PollFfi = RealPollFfi(),
 ) {
     private val TAG = "PollTransport"
 
@@ -65,7 +66,7 @@ class PollTransport(
             // when recovery is genuinely needed (audit finding #16).
             if (needSync) {
                 try {
-                    val syncTlv = uniffi.core_crypto.ratchetSynchronizePacketBinary(peer)
+                    val syncTlv = ffi.synchronizePacketBinary(peer)
                     body.put("sync", JSONObject().put(
                         "tlv_b64", Base64.encodeToString(syncTlv, Base64.NO_WRAP)
                     ))
@@ -78,7 +79,7 @@ class PollTransport(
             // outgoing proposal is acked here. Peek (non-consuming) so a lost
             // request retains the ack for the next poll (audit finding #6).
             try {
-                val ackTlv = uniffi.core_crypto.ratchetGenerateRekeyAckBinaryPeek(peer)
+                val ackTlv = ffi.generateRekeyAckBinaryPeek(peer)
                 if (ackTlv != null) {
                     body.put("rekey_ack_encrypted", JSONObject().put(
                         "tlv_b64", Base64.encodeToString(ackTlv, Base64.NO_WRAP)
@@ -167,7 +168,7 @@ class PollTransport(
                     if (ack != null && peer.isNotEmpty()) {
                         try {
                             val tlv = Base64.decode(ack.getString("tlv_b64"), Base64.NO_WRAP)
-                            uniffi.core_crypto.ratchetProcessRekeyAckBinary(peer, tlv)
+                            ffi.processRekeyAckBinary(peer, tlv)
                         } catch (e: Exception) {
                             Log.e(TAG, "Desktop RekeyAck processing failed: ${e.message}")
                         }
@@ -181,7 +182,7 @@ class PollTransport(
                     if (sync != null && peer.isNotEmpty()) {
                         try {
                             val tlv = Base64.decode(sync.getString("tlv_b64"), Base64.NO_WRAP)
-                            uniffi.core_crypto.ratchetProcessSynchronize(peer, tlv)
+                            ffi.processSynchronize(peer, tlv)
                         } catch (e: Exception) {
                             Log.d(TAG, "Synchronize not applied: ${e.message}")
                         }
@@ -232,7 +233,7 @@ class PollTransport(
             }
             try {
                 return String(
-                    uniffi.core_crypto.ratchetDecryptMessageBinary(peer, tlv),
+                    ffi.decryptMessageBinary(peer, tlv),
                     Charsets.UTF_8
                 )
             } catch (e: Exception) {
