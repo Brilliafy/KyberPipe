@@ -120,6 +120,31 @@ class MdnsBeaconListener(
                                 Log.w(tag, "Beacon signature verification failed for $srcIp — dropped (audit F13)")
                                 continue
                             }
+                            // AUDIT FINDING #5: when the phone is PAIRED, the
+                            // beacon's embedded signing key must EQUAL the paired
+                            // desktop's signing key (persisted from the QR at
+                            // pairing). A self-consistent signature proves only
+                            // that the sender owns the key it embedded — any LAN
+                            // host can mint its own keypair — so a key mismatch
+                            // means an impostor beacon and is dropped. This is
+                            // the same `listen_for_beacons_with_expected_key`
+                            // check the Rust side performs. Empty expected key
+                            // (legacy QR without the field) = hint only, never
+                            // applied downstream.
+                            val expectedSigningKey =
+                                appContext?.let {
+                                    org.kyberpipe.client.utils.SettingsManager(it)
+                                        .pairedBeaconSigningKey
+                                } ?: ""
+                            if (expectedSigningKey.isNotEmpty() &&
+                                !expectedSigningKey.equals(parts[4], ignoreCase = true)
+                            ) {
+                                Log.w(
+                                    tag,
+                                    "Beacon signing key does not match the paired device key — dropped (audit finding #5)"
+                                )
+                                continue
+                            }
                             // AUDIT F3: register the beacon IP as a LAST-KNOWN-GOOD
                             // candidate address for the paired peer, so the reconnect
                             // path is never pinned to a stale stored IP (DHCP

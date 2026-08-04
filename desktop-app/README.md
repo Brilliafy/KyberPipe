@@ -4,7 +4,7 @@ The desktop application for KyberPipe serves as the primary coordination portal.
 
 ## 🖥️ Core Interfaces
 
-*   **Dashboard**: Shows system metrics, connection paths (Wi-Fi Direct, LAN, WAN), and active key metrics.
+*   **Dashboard**: Shows system metrics, connection paths (LAN, WAN), and active key metrics.
 *   **Connectivity Manager**: Handles network connections, STUN hole punching, dynamic IP addresses, and has a Network Diagnostics Drawer with live latency charting.
 *   **Local System Log Stream**: Renders active diagnostic entries, and contains buttons to copy anonymized crash stacktraces or export logs as text files.
 *   **Sandbox Automation**: Configures JavaScript script triggers executing inside a lightweight Boa interpreter based on ambient sensor events.

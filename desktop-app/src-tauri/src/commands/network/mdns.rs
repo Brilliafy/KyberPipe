@@ -2,6 +2,17 @@
 //!
 //! Local service advertisement for peer discovery.
 
+/// The desktop's ML-DSA beacon signing public key (hex). Embedded in the
+/// pairing QR (`beacon_signing_pk`) so the phone can, AFTER pairing, reject
+/// LAN beacons whose embedded signing key is not the paired desktop's — the
+/// exact `listen_for_beacons_with_expected_key` check the Rust side performs
+/// (audit finding #5). A plain Tauri command (NOT UniFFI), so it does not
+/// disturb the FFI surface.
+#[tauri::command]
+pub fn get_beacon_signing_key() -> String {
+    core_crypto::network::device_signing_public_key_hex()
+}
+
 #[tauri::command]
 pub fn register_mdns_service(service_name: String, port: u16, txt_data: String) -> bool {
     let eg_path = std::process::Command::new("busctl")

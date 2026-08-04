@@ -631,7 +631,7 @@ onUnmounted(() => {
         <h3>🛡️ Allow Android to connect?</h3>
         <p class="card-desc" style="margin: 0.75rem 0;">KyberPipe needs to open port <strong>9876/tcp</strong> on your firewall so your Android device can pair and sync with this desktop.</p>
         <p class="card-desc" style="margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-secondary);">
-          If you skip this, Android won't be able to discover or connect to this desktop over the local network. Wi-Fi Direct and USB tethering will still work.
+          If you skip this, Android won't be able to discover or connect to this desktop over the local network.
         </p>
         <div v-if="firewallResult" style="margin: 0.75rem 0; padding: 0.5rem; background: #1e293b; border-radius: 6px; font-size: 0.8rem;">
           {{ firewallResult }}

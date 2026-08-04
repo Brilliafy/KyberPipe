@@ -102,6 +102,16 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
     let first_addr = *socket_addrs
         .first()
         .ok_or_else(|| "No address resolved".to_string())?;
+    // AUDIT #18: re-verify the address IMMEDIATELY before connect. The connect
+    // targets the validated IP (never a re-resolution of the hostname), so a
+    // DNS rebinding after this point cannot redirect the socket to a
+    // private/link-local/metadata target.
+    if is_private_or_restricted(&first_addr.ip()) {
+        return Err(format!(
+            "SSRF guard: refusing connect to {} (private/link-local/loopback)",
+            first_addr.ip()
+        ));
+    }
     let mut stream = TcpStream::connect_timeout(&first_addr, Duration::from_secs(5))
         .map_err(|e| format!("Connect failed: {e}"))?;
     stream
@@ -153,7 +163,19 @@ pub async fn execute_boa_script(
             state.add_log(format!("[Automation] Feed fetch failed: {e}"));
             String::new()
         });
-        state.add_log(format!("[Automation] Resolved feed data: {}", feed_value));
+        // AUDIT #18: NEVER log the feed BODY — a user pointing a feed at an
+        // authenticated endpoint could leak credentials/tokens into the in-app
+        // log pane. Log only the URL host and the body length.
+        let feed_host = feed_source_command
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split('/')
+            .next()
+            .unwrap_or("<unknown>");
+        state.add_log(format!(
+            "[Automation] Resolved feed data from host {feed_host} ({} bytes)",
+            feed_value.len()
+        ));
     }
 
     state.add_log(format!(

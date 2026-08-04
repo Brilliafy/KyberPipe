@@ -2,9 +2,15 @@ use crate::state::AppState;
 use crate::state::PairingPhase;
 use crate::state::SecureString;
 use serde::Deserialize;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+
+// AUDIT #20 (structural decomposition): the wire codec and the rate policy now
+// live in their own modules (`pairing_wire`, `pairing_policy`) so the frame
+// decoder and the rate limiter change independently of the KEM/phase logic.
+pub(crate) use crate::handlers::pairing_policy::check_pairing_rate_limit;
+pub(crate) use crate::handlers::pairing_wire::decode_binary_pairing_frame;
 
 /// Typed pairing request — supports both raw binary payload bytes and JSON fallback
 #[derive(Deserialize)]
@@ -28,6 +34,14 @@ struct PairingRequest {
     client_x25519_pk_bytes: Vec<u8>,
     #[serde(default)]
     pairing_nonce_hex: String,
+    /// The PHONE's independently computed SAS code (audit finding #10): the
+    /// phone derives the same KEM shared secret and computes the same SAS. By
+    /// requiring this echo to match the server's SAS BEFORE the desktop accepts
+    /// a human-typed SAS, a compromised renderer cannot auto-complete the OOB
+    /// verification — it would need the PHONE's echo, which only a device that
+    /// completed the KEM with the matching secret can produce.
+    #[serde(default)]
+    sas_hex: String,
     #[serde(default = "default_device_name")]
     #[allow(dead_code)]
     name: String,
@@ -37,159 +51,9 @@ fn default_device_name() -> String {
     "Android Phone".to_string()
 }
 
-use std::collections::HashMap;
-use std::net::IpAddr;
-
-/// Per-IP attempt budget per sliding window — defeats spoofed-source-IP
-/// spraying of pairing requests (audit finding #20).
-const PAIRING_PER_IP_MAX: u32 = 10;
-const PAIRING_WINDOW_SECS: u64 = 60;
-/// Global attempt budget across ALL sources per window.
-const PAIRING_GLOBAL_MAX: u32 = 200;
-
-struct RateEntry {
-    last_attempt: Instant,
-    attempts: u32,
-    window_start: Instant,
-}
-
-/// (global-floor instant, per-IP entries, global budget, window start).
-type RateLimiterState = (Instant, HashMap<IpAddr, RateEntry>, u32, Instant);
-
-static PAIRING_RATE_LIMITER: std::sync::LazyLock<std::sync::Mutex<RateLimiterState>> =
-    std::sync::LazyLock::new(|| {
-        std::sync::Mutex::new((
-            Instant::now() - std::time::Duration::from_secs(5),
-            HashMap::new(),
-            0,
-            Instant::now(),
-        ))
-    });
-
-/// Per-IP + global rate limiting with a shared counter. Returns false when the
-/// request must be dropped (global throttle, per-IP budget exhausted, or the
-/// 2s per-IP cooldown).
-fn check_pairing_rate_limit(peer_ip: Option<IpAddr>) -> bool {
-    let now = Instant::now();
-    let mut guard = PAIRING_RATE_LIMITER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    // Global floor: at most one pairing attempt per 200ms process-wide.
-    if now.duration_since(guard.0).as_millis() < 200 {
-        return false;
-    }
-    guard.0 = now;
-
-    // Global budget: reset the window every PAIRING_WINDOW_SECS.
-    if now.duration_since(guard.3).as_secs() >= PAIRING_WINDOW_SECS {
-        guard.2 = 0;
-        guard.3 = now;
-        guard.1.clear();
-    }
-    if guard.2 >= PAIRING_GLOBAL_MAX {
-        return false;
-    }
-    guard.2 += 1;
-
-    if let Some(ip) = peer_ip {
-        if guard.1.len() > 1000 {
-            guard
-                .1
-                .retain(|_, e| now.duration_since(e.last_attempt).as_secs() < PAIRING_WINDOW_SECS);
-        }
-        let is_new = !guard.1.contains_key(&ip);
-        let entry = guard.1.entry(ip).or_insert(RateEntry {
-            last_attempt: now,
-            attempts: 0,
-            window_start: now,
-        });
-        if now.duration_since(entry.window_start).as_secs() >= PAIRING_WINDOW_SECS {
-            entry.attempts = 0;
-            entry.window_start = now;
-        }
-        // First request from an IP is always allowed; afterwards a 2s cooldown
-        // applies between requests.
-        if !is_new && now.duration_since(entry.last_attempt).as_secs() < 2 {
-            return false;
-        }
-        if entry.attempts >= PAIRING_PER_IP_MAX {
-            return false;
-        }
-        entry.last_attempt = now;
-        entry.attempts += 1;
-    }
-    true
-}
-
 /// Opaque session key handle for the desktop side. Created during pairing,
 /// used for decrypt/encrypt instead of passing raw key bytes.
 pub(crate) static DESKTOP_SESSION_KEY_HANDLE: AtomicU64 = AtomicU64::new(0);
-
-/// (ciphertext, mlkem_pk, x25519_pk, cert_hash, nonce_hex) of a binary pairing
-/// frame. The nonce field was added (audit finding #12): the legacy binary
-/// frame carried no nonce, so a binary pairing body could never satisfy the
-/// QR-nonce check (which parsed the body as JSON first) and the binary
-/// transport was unreachable dead code with a latent nonce-bypass. Both
-/// formats now carry and validate the SAME QR-bound nonce.
-type PairingFrame = (Vec<u8>, Vec<u8>, Vec<u8>, String, String);
-
-/// Decode a binary pairing frame (audit finding #12: carries the QR nonce).
-/// `pub(crate)` so the wire-format tests can pin the decoder contract.
-pub(crate) fn decode_binary_pairing_frame(payload: &[u8]) -> Option<PairingFrame> {
-    let mut cursor = 0;
-    if payload.len() < 4 {
-        return None;
-    }
-    let ct_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
-    cursor += 4;
-    if payload.len() < cursor + ct_len + 4 {
-        return None;
-    }
-    let ct = payload[cursor..cursor + ct_len].to_vec();
-    cursor += ct_len;
-
-    let pk_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
-    cursor += 4;
-    if payload.len() < cursor + pk_len + 4 {
-        return None;
-    }
-    let pk = payload[cursor..cursor + pk_len].to_vec();
-    cursor += pk_len;
-
-    let x25519_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
-    cursor += 4;
-    if payload.len() < cursor + x25519_len + 4 {
-        return None;
-    }
-    let x25519_pk = payload[cursor..cursor + x25519_len].to_vec();
-    cursor += x25519_len;
-
-    let ch_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
-    cursor += 4;
-    if payload.len() < cursor + ch_len {
-        return None;
-    }
-    let cert_hash = String::from_utf8(payload[cursor..cursor + ch_len].to_vec()).ok()?;
-    cursor += ch_len;
-
-    // Optional trailing nonce (audit finding #12): length-prefixed so a frame
-    // written by a legacy client that never embedded the nonce still decodes
-    // (with an empty nonce — which is then REJECTED by the per-format nonce
-    // validation, exactly as a JSON body without a nonce is).
-    let nonce_hex = if payload.len() >= cursor + 4 {
-        let n_len = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().ok()?) as usize;
-        cursor += 4;
-        if payload.len() < cursor + n_len {
-            return None;
-        }
-        String::from_utf8(payload[cursor..cursor + n_len].to_vec()).ok()?
-    } else {
-        String::new()
-    };
-
-    Some((ct, pk, x25519_pk, cert_hash, nonce_hex))
-}
 
 pub(crate) async fn handle_pairing(
     body: Vec<u8>,
@@ -344,10 +208,10 @@ pub(crate) async fn handle_pairing(
     // (ciphertext, client_pk, client_x25519_pk, cert_hash, supplied_nonce).
     let parsed = if body.len() > 3 && body[0] == 0x4B && body[1] == 0x50 && body[2] == 0x00 {
         // Direct zero-copy binary frame transport (No JSON parsing)
-        if let Some((ct, pk, x25519_pk, cert_hash, nonce_hex)) =
+        if let Some((ct, pk, x25519_pk, cert_hash, nonce_hex, sas_hex)) =
             decode_binary_pairing_frame(&body[3..])
         {
-            (ct, pk, x25519_pk, cert_hash, nonce_hex)
+            (ct, pk, x25519_pk, cert_hash, nonce_hex, sas_hex)
         } else {
             s.fail_pairing();
             return r#"{"status":"error","reason":"Invalid binary frame payload"}"#
@@ -388,9 +252,11 @@ pub(crate) async fn handle_pairing(
                 req.cert_hash_hex_alias
             },
             req.pairing_nonce_hex,
+            req.sas_hex,
         )
     };
-    let (ciphertext, client_pk, client_x25519_pk, cert_hash, supplied_nonce) = parsed;
+    let (ciphertext, client_pk, client_x25519_pk, cert_hash, supplied_nonce, supplied_sas_hex) =
+        parsed;
     // Per-format nonce validation (audit finding #12): BOTH the JSON and the
     // binary path land here with their format's nonce, and both must satisfy
     // the identical QR-bound check. A missing or mismatched nonce is rejected
@@ -451,6 +317,29 @@ pub(crate) async fn handle_pairing(
         if let Some((sk_hex, ss_hex, sas_code)) = kem_outcome {
             s.set_pending_session_key(SecureString::new(sk_hex));
             s.set_pending_shared_secret(SecureString::new(ss_hex));
+            // AUDIT FINDING #10 (phone-side SAS echo): the phone must have
+            // echoed the SAS IT computed from the same KEM shared secret. This
+            // is verified BEFORE any human-typed SAS is ever accepted, so a
+            // compromised renderer (webview XSS) can no longer auto-complete
+            // the out-of-band verification by reading `get_pairing_status` and
+            // calling `confirm_pairing_sas` — it would need the phone's echo,
+            // which only a device that completed the KEM with the matching
+            // secret can produce. A missing or mismatched echo is a protocol
+            // violation and the pairing is rejected.
+            if !client_pk.is_empty()
+                && !sas_code.is_empty()
+                && (supplied_sas_hex.is_empty() || supplied_sas_hex != sas_code)
+            {
+                s.add_log(
+                    "[Pairing] Rejected: phone SAS echo missing or does not match the server-computed SAS (audit finding #10)"
+                        .to_string(),
+                );
+                s.fail_pairing();
+                return r#"{"status":"error","reason":"SAS echo mismatch"}"#
+                    .to_string()
+                    .into_bytes();
+            }
+
             // Audit finding #11: the pinned client identity is the
             // TLS-OBSERVED certificate hash captured at handshake time
             // (already stored above) — never the client-claimed hash

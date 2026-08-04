@@ -15,10 +15,8 @@ import org.kyberpipe.client.utils.SettingsManager
 @Composable
 internal fun SettingsConnectivitySection(
     settings: SettingsManager,
-    wifiDirectActive: Boolean,
     lanActive: Boolean,
     wireguardActive: Boolean,
-    onWifiDirectToggled: (Boolean) -> Unit,
     onLanToggled: (Boolean) -> Unit,
     onWireguardToggled: (Boolean) -> Unit,
     onSaveSettings: () -> Unit
@@ -51,24 +49,21 @@ internal fun SettingsConnectivitySection(
             }
 
             val pathwayNames = mapOf(
-                "wifi_direct" to "Wi-Fi Direct P2P Radio",
                 "mdns_lan" to "Local Network (mDNS LAN)",
                 "wireguard_wan" to "WireGuard WAN Tunnel Overlay"
             )
 
             val pathwayToggles = mapOf(
-                "wifi_direct" to wifiDirectActive,
                 "mdns_lan" to lanActive,
                 "wireguard_wan" to wireguardActive
             )
 
             fun togglePathway(key: String, checked: Boolean) {
-                val activeCount = listOf(wifiDirectActive, lanActive, wireguardActive).count { it }
+                val activeCount = listOf(lanActive, wireguardActive).count { it }
                 if (!checked && activeCount <= 1) {
                     return
                 }
                 when (key) {
-                    "wifi_direct" -> onWifiDirectToggled(checked)
                     "mdns_lan" -> onLanToggled(checked)
                     "wireguard_wan" -> onWireguardToggled(checked)
                 }

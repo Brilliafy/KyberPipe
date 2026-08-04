@@ -10,6 +10,11 @@ pub mod shamir;
 pub mod signing;
 
 // Re-export everything at crate::crypto::* for backward compatibility
+//
+// AUDIT #21: this module is now a PURE re-export surface for the primitive
+// submodules. The app-level helpers (ClipboardDeduplicator, cover traffic,
+// clipboard text normalization) moved to `crate::utils` — they are NOT
+// cryptographic primitives and no longer pollute the crypto namespace.
 #[allow(unused_imports)]
 pub use aead::*;
 #[allow(unused_imports)]
@@ -31,10 +36,7 @@ pub use signing::*;
 
 use crate::error::KyberError;
 use hkdf::Hkdf;
-use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use sha2::Sha256;
 
 pub const CHUNKS_SIZE: usize = 64 * 1024;
 pub const RATCHET_REKEY_INTERVAL: u64 = 100;
@@ -59,122 +61,6 @@ pub fn derive_session_key(
     Ok(okm)
 }
 
-/// Normalize text to prevent OS line-ending and whitespace hash mismatches (\r\n -> \n, trim end)
-pub fn normalize_clipboard_text(text: &str) -> String {
-    text.replace("\r\n", "\n").trim_end().to_string()
-}
-
-/// Compute SHA-256 hash of normalized text
-pub fn hash_clipboard_text(text: &str) -> String {
-    let normalized = normalize_clipboard_text(text);
-    let mut hasher = Sha256::new();
-    hasher.update(normalized.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Generate jittered dummy cover traffic heartbeat payload
-pub fn generate_cover_traffic_packet() -> Vec<u8> {
-    let mut dummy = vec![0u8; 256];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut dummy);
-    dummy
-}
-
-/// Thread-safe clipboard deduplicator ring buffer with AtomicBool state flag
-/// Uses RAII Drop guard to prevent permanent lock on panic
-#[derive(Clone)]
-pub struct ClipboardDeduplicator {
-    history: Arc<Mutex<VecDeque<String>>>,
-    is_processing_remote_update: Arc<AtomicBool>,
-    max_history: usize,
-}
-
-/// RAII guard that releases the remote update lock on Drop
-pub struct RemoteUpdateGuard {
-    flag: Arc<AtomicBool>,
-}
-
-impl Drop for RemoteUpdateGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
-    }
-}
-
-impl ClipboardDeduplicator {
-    pub fn new() -> Self {
-        Self {
-            history: Arc::new(Mutex::new(VecDeque::with_capacity(5))),
-            is_processing_remote_update: Arc::new(AtomicBool::new(false)),
-            max_history: 5,
-        }
-    }
-
-    /// Execute a closure within a remote update scope.
-    /// The AtomicBool flag is set before the closure and released after (even on panic via Drop).
-    pub fn with_remote_update<F, T>(&self, f: F) -> Option<T>
-    where
-        F: FnOnce() -> T,
-    {
-        let acquired = self
-            .is_processing_remote_update
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if !acquired {
-            return None;
-        }
-        let _guard = RemoteUpdateGuard {
-            flag: self.is_processing_remote_update.clone(),
-        };
-        Some(f())
-    }
-
-    pub fn is_suppressed(&self, text: &str) -> bool {
-        if self.is_processing_remote_update.load(Ordering::SeqCst) {
-            return true;
-        }
-        let hash = hash_clipboard_text(text);
-        let guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
-        // Use constant-time comparison to prevent timing oracle on hash lookup
-        guard
-            .iter()
-            .any(|h| subtle::ConstantTimeEq::ct_eq(h.as_bytes(), hash.as_bytes()).into())
-    }
-
-    pub fn record_text(&self, text: &str) {
-        let hash = hash_clipboard_text(text);
-        let mut guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.contains(&hash) {
-            return;
-        }
-        if guard.len() >= self.max_history {
-            guard.pop_front();
-        }
-        guard.push_back(hash);
-    }
-    /// Atomic check-and-record: holds the Mutex for both operations.
-    /// Returns true if the text was newly recorded (was not a duplicate).
-    pub fn check_and_record(&self, text: &str) -> bool {
-        let hash = hash_clipboard_text(text);
-        let mut guard = self.history.lock().unwrap_or_else(|e| e.into_inner());
-        // Use constant-time comparison to prevent timing oracle on hash lookup
-        if guard
-            .iter()
-            .any(|h| subtle::ConstantTimeEq::ct_eq(h.as_bytes(), hash.as_bytes()).into())
-        {
-            return false;
-        }
-        if guard.len() >= self.max_history {
-            guard.pop_front();
-        }
-        guard.push_back(hash);
-        true
-    }
-}
-
-impl Default for ClipboardDeduplicator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -461,9 +347,11 @@ mod tests {
         assert_eq!(pt, b"bob-response");
     }
 
-    /// Audit #5: two-sided rekey race. Both peers propose simultaneously; the
-    /// deterministic tie-break (initiator wins) must make both sides converge
-    /// on the initiator's new generation — no double-bump, no divergence.
+    /// Audit #5 + FINDING #3: two-sided rekey race. Both peers propose
+    /// simultaneously; the PAYLOAD-ANCHORED tie-break (winner = proposal with
+    /// the lexicographically larger rekey (x25519 pk, mlkem pk) tuple) must
+    /// make both sides converge on the SAME winner — no double-bump, no
+    /// divergence, regardless of which side's random key is larger.
     #[test]
     fn test_double_ratchet_two_sided_rekey_race() {
         let probe = generate_hybrid_keypair();
@@ -488,8 +376,24 @@ mod tests {
         assert!(alice.outgoing_proposal.root_key.is_some());
         assert!(bob.outgoing_proposal.root_key.is_some());
 
-        // Deliver Bob's rekey-carrying message to Alice FIRST (Alice sees Bob's
-        // proposal while her own is still unacked → initiator discards Bob's).
+        // Derive the EXPECTED winner from the payloads (audit finding #3): the
+        // winner is the proposal with the lexicographically larger
+        // (x25519 pk, mlkem pk) tuple.
+        let alice_rekey = &alice_msgs[100];
+        let bob_rekey = &bob_msgs[100];
+        let alice_wins = {
+            let a_x = alice_rekey.rekey_x25519_pk.as_deref().unwrap();
+            let b_x = bob_rekey.rekey_x25519_pk.as_deref().unwrap();
+            let a_m = alice_rekey.rekey_mlkem_pk.as_deref().unwrap();
+            let b_m = bob_rekey.rekey_mlkem_pk.as_deref().unwrap();
+            (a_x, a_m) > (b_x, b_m)
+        };
+        assert_ne!(
+            alice_rekey.rekey_x25519_pk, bob_rekey.rekey_x25519_pk,
+            "the two random proposals must differ"
+        );
+
+        // Deliver Bob's rekey-carrying message to Alice FIRST.
         let bob_rekey = &bob_msgs[100];
         let nonce: [u8; 12] = bob_rekey.nonce.clone().try_into().unwrap();
         let xpk: [u8; 32] = bob_rekey
@@ -509,23 +413,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(String::from_utf8(pt).unwrap(), "b100");
-        // Alice keeps her own proposal; Bob's tentative proposal is discarded,
-        // and NO RekeyAck for Bob's proposal is recorded.
-        assert!(
-            alice.outgoing_proposal.root_key.is_some(),
-            "initiator keeps its own proposal"
-        );
-        assert!(
-            alice.incoming_proposal.root_key.is_none(),
-            "initiator discards responder proposal"
-        );
-        assert!(
-            alice.take_pending_rekey_ack_seq().is_none(),
-            "initiator must not ACK the loser"
-        );
+        if alice_wins {
+            // Alice keeps her own proposal; Bob's tentative proposal is
+            // discarded, and NO RekeyAck for Bob's proposal is recorded.
+            assert!(
+                alice.outgoing_proposal.root_key.is_some(),
+                "alice keeps her own proposal (she won)"
+            );
+            assert!(
+                alice.incoming_proposal.root_key.is_none(),
+                "alice discards the losing proposal"
+            );
+            assert!(
+                alice.take_pending_rekey_ack_seq().is_none(),
+                "the winner must not ACK the loser"
+            );
+        } else {
+            // Alice lost: she cancels her own proposal and adopts Bob's, then
+            // ACKs his carrier.
+            assert!(
+                alice.outgoing_proposal.root_key.is_none(),
+                "alice cancels her own proposal (she lost)"
+            );
+            assert!(
+                alice.incoming_proposal.root_key.is_some(),
+                "alice adopts the winner's proposal"
+            );
+            assert_eq!(
+                alice.take_pending_rekey_ack_seq(),
+                Some(100),
+                "the loser ACKs the winner's carrier"
+            );
+        }
 
         // Deliver Alice's rekey-carrying message to Bob (responder): Bob must
-        // CANCEL its own outgoing proposal and adopt Alice's, then ACK it.
+        // arrive at the SAME winner.
         let alice_rekey = &alice_msgs[100];
         let nonce: [u8; 12] = alice_rekey.nonce.clone().try_into().unwrap();
         let xpk: [u8; 32] = alice_rekey
@@ -545,32 +467,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(String::from_utf8(pt).unwrap(), "a100");
-        assert!(
-            bob.outgoing_proposal.root_key.is_none(),
-            "responder must cancel its own proposal"
-        );
-        assert!(
-            bob.incoming_proposal.root_key.is_some(),
-            "responder adopts the initiator's proposal"
-        );
-        let ack_seq = bob.take_pending_rekey_ack_seq();
-        assert_eq!(ack_seq, Some(100), "responder ACKs the initiator's carrier");
+        if alice_wins {
+            // Bob (loser) cancels his own proposal and adopts Alice's.
+            assert!(
+                bob.outgoing_proposal.root_key.is_none(),
+                "bob must cancel his own proposal (he lost)"
+            );
+            assert!(
+                bob.incoming_proposal.root_key.is_some(),
+                "bob adopts the winner's proposal"
+            );
+            assert_eq!(
+                bob.take_pending_rekey_ack_seq(),
+                Some(100),
+                "the loser ACKs the winner's carrier"
+            );
+            // Alice processes Bob's RekeyAck → commits her outgoing proposal.
+            assert!(alice.process_rekey_ack(100));
+        } else {
+            // Bob (winner) keeps his own proposal and discards Alice's.
+            assert!(
+                bob.outgoing_proposal.root_key.is_some(),
+                "bob keeps his own proposal (he won)"
+            );
+            assert!(
+                bob.incoming_proposal.root_key.is_none(),
+                "bob discards the losing proposal"
+            );
+            assert!(
+                bob.take_pending_rekey_ack_seq().is_none(),
+                "the winner must not ACK the loser"
+            );
+            // Alice already ACKed Bob's carrier (recorded in her first decrypt).
+            assert!(bob.process_rekey_ack(100));
+        }
+        // The WINNER's generation advanced on commit; the loser's bumps only
+        // when it commits the adopted proposal via the first new-generation
+        // message below.
+        if alice_wins {
+            assert_eq!(alice.ratchet_generation, 1, "the winner commits to gen 1");
+        } else {
+            assert_eq!(bob.ratchet_generation, 1, "the winner commits to gen 1");
+        }
 
-        // Alice processes Bob's RekeyAck → commits her outgoing proposal.
-        assert!(alice.process_rekey_ack(ack_seq.unwrap()));
-        assert_eq!(alice.ratchet_generation, 1);
-
-        // Alice sends the first new-generation message; Bob's fallback commits
-        // the adopted proposal. Both converge on generation 1 with matching chains.
-        let new_msg = alice.ratchet_encrypt(b"post-race").unwrap();
+        // The winner sends the first new-generation message; the loser commits
+        // the adopted proposal. Both converge on generation 1 with matching
+        // chains.
+        let (winner, loser) = if alice_wins {
+            (0usize, 1usize) // 0 = alice, 1 = bob
+        } else {
+            (1usize, 0usize)
+        };
+        let new_msg = if winner == 0 {
+            alice.ratchet_encrypt(b"post-race").unwrap()
+        } else {
+            bob.ratchet_encrypt(b"post-race").unwrap()
+        };
         let nonce: [u8; 12] = new_msg.nonce.clone().try_into().unwrap();
-        let pt = bob.ratchet_decrypt(&nonce, &new_msg.ciphertext).unwrap();
+        let pt = if loser == 1 {
+            bob.ratchet_decrypt(&nonce, &new_msg.ciphertext).unwrap()
+        } else {
+            alice.ratchet_decrypt(&nonce, &new_msg.ciphertext).unwrap()
+        };
         assert_eq!(pt, b"post-race");
-        assert_eq!(
-            bob.ratchet_generation, 1,
-            "receiver must land on generation 1"
-        );
-        assert_eq!(alice.ratchet_generation, 1);
+        assert_eq!(alice.ratchet_generation, 1, "both converge on generation 1");
+        assert_eq!(bob.ratchet_generation, 1, "both converge on generation 1");
 
         // Bidirectional continuity after the race.
         let bm = bob.ratchet_encrypt(b"bob-live").unwrap();
@@ -727,7 +688,11 @@ mod tests {
         // masked a broken GF(2^8) LOG table that produced garbage shares.
         let recovered = reconstruct_secret_shamir(&shares[0..2], 2).unwrap();
         assert_eq!(recovered.len(), master_key.len());
-        assert_eq!(recovered.as_slice(), master_key, "recovered secret must equal the original");
+        assert_eq!(
+            recovered.as_slice(),
+            master_key,
+            "recovered secret must equal the original"
+        );
     }
 
     #[test]

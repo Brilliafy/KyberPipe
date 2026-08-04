@@ -13,7 +13,7 @@ export function useSettings() {
   const isPaired = ref(false);
   const fileAccessGrantedDesktop = ref(false);
   const fileAccessGrantedPhone = ref(false);
-  const pathwayOrder = ref<string[]>(["wifi_direct", "mdns_lan", "wireguard_wan"]);
+  const pathwayOrder = ref<string[]>(["mdns_lan", "wireguard_wan"]);
   const themeMode = ref("auto");
   // Audit finding #20 (opt-in discovery): LAN beacons default OFF and are only
   // emitted when the user explicitly enables this toggle.
@@ -61,7 +61,7 @@ export function useSettings() {
       fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
       fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
       themeMode.value = settings.theme_mode || "auto";
-      pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
+      pathwayOrder.value = settings.pathway_order || ["mdns_lan", "wireguard_wan"];
       beaconDiscoveryEnabled.value = settings.beacon_discovery_enabled || false;
     } catch (e) {
       console.error("Load settings error:", e);

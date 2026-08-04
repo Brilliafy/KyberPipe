@@ -62,7 +62,7 @@ export function useConnection() {
   const enableDdns = ref(false);
   const fileAccessGrantedDesktop = ref(false);
   const fileAccessGrantedPhone = ref(false);
-  const pathwayOrder = ref<string[]>(["wifi_direct", "mdns_lan", "wireguard_wan"]);
+  const pathwayOrder = ref<string[]>(["mdns_lan", "wireguard_wan"]);
   const themeMode = ref("auto");
 
   const mediaState = ref<MediaState | null>(null);
@@ -110,7 +110,7 @@ export function useConnection() {
       fileAccessGrantedDesktop.value = s.file_access_granted_desktop || false;
       fileAccessGrantedPhone.value = s.file_access_granted_phone || false;
       themeMode.value = s.theme_mode || "auto";
-      pathwayOrder.value = s.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
+      pathwayOrder.value = s.pathway_order || ["mdns_lan", "wireguard_wan"];
       beaconDiscoveryEnabled.value = s.beacon_discovery_enabled || false;
     } catch (e) {
       console.error("Load settings error:", e);

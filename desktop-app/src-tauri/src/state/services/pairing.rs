@@ -93,16 +93,6 @@ impl PairingService {
     pub fn get_pairing_generation(&self) -> u64 {
         lock_state(&self.inner).attempt_generation
     }
-    /// Clear STALE per-attempt pairing state — now an alias of the single
-    /// `begin_pairing_attempt` transition (audit finding #24). The mandatory QR
-    /// nonce (audit finding #20) is preserved. Retained as API surface for
-    /// external callers; the pairing HANDLER no longer calls it before the
-    /// in-progress guard (audit finding #6 — calling it there made the guard
-    /// dead code).
-    #[allow(dead_code)] // API-surface alias of begin_pairing_attempt
-    pub fn clear_pairing_stale(&self) {
-        self.begin_pairing_attempt();
-    }
     pub fn get_sas_code(&self) -> String {
         lock_state(&self.inner).sas_code.clone()
     }

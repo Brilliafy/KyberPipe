@@ -38,11 +38,6 @@ class PairingState(
     private val addLog: (String) -> Unit,
     private val setConnection: (status: String, method: String, color: androidx.compose.ui.graphics.Color) -> Unit,
     private val setCurrentTab: (org.kyberpipe.client.components.TabItem) -> Unit,
-    /// Shared p2p IP coordination with ConnectionState: MainScreen owns the
-    /// single source of truth; pairing WRITES it (QR p2p_ip), connection READS
-    /// it (evaluateConnection).
-    private val p2pIp: () -> String,
-    private val setP2pIp: (String) -> Unit,
     initialPairingConfig: String?,
     initialPairingConfigWarning: String?,
 ) {
@@ -127,8 +122,7 @@ class PairingState(
             return
         }
         tempHostPk = hostPkHex
-        tempHostIp = json.optString("local_ip", json.optString("p2p_ip", ""))
-        setP2pIp(json.optString("p2p_ip", ""))
+        tempHostIp = json.optString("local_ip", "")
         // Remember the QR pairing nonce so it can be echoed back to the desktop
         // — the QR-nonce binding defeats blind pairing races (audit finding #20).
         val qrNonce = json.optString("pairing_nonce_hex", "")
@@ -137,35 +131,9 @@ class PairingState(
         }
         // QR-bound server cert hash (audit finding #5/#15).
         qrServerCertHash = json.optString("server_cert_hash", "")
-        val method = json.optString("method", "")
-        if (method == "p2p") {
-            val ssid = json.optString("ssid", "")
-            val pass = json.optString("pass", "")
-            if (ssid.isNotEmpty()) {
-                try {
-                    val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                    @Suppress("DEPRECATION")
-                    val wifiConfig = android.net.wifi.WifiConfiguration().apply {
-                        SSID = "\"$ssid\""
-                        preSharedKey = "\"$pass\""
-                        allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
-                    }
-                    @Suppress("DEPRECATION")
-                    val netId = wifiManager.addNetwork(wifiConfig)
-                    if (netId != -1) {
-                        @Suppress("DEPRECATION")
-                        wifiManager.disconnect()
-                        @Suppress("DEPRECATION")
-                        wifiManager.enableNetwork(netId, true)
-                        @Suppress("DEPRECATION")
-                        wifiManager.reconnect()
-                        addLog("[P2P] Connecting to P2P network: $ssid")
-                    }
-                } catch (e: Exception) {
-                    addLog("[P2P] Failed to connect to P2P: ${e.message}")
-                }
-            }
-        }
+        // Wi-Fi Direct (P2P) was removed from the product (audit finding #1):
+        // there is no `method == "p2p"` radio join path anymore. The QR's
+        // `method` field, if present, is ignored.
 
         val result = org.kyberpipe.client.PairingManager.performKemHandshake(
             json, keyPairHandle, context
@@ -180,47 +148,26 @@ class PairingState(
         val clientX25519PkHex = result.clientX25519PkHex
 
         // Do NOT set isPaired yet — the host must first receive the ciphertext.
+        // AUDIT #19: the transport + two-phase response parsing lives in the
+        // plain [PairingController] (testable without Compose); this composable
+        // state only renders the decision.
         var hostAccepted = false
         if (tempHostIp.isNotEmpty()) {
-            try {
-                // AUDIT FINDING #1 (CRITICAL): the bootstrap connection MUST
-                // present the per-install client identity certificate.
-                val certHash = org.kyberpipe.client.PairingManager.ensureClientIdentityCert(context)
-                val certDer = android.util.Base64.decode(
-                    settings.clientIdentityCert, android.util.Base64.NO_WRAP
-                )
-                val keyDer = android.util.Base64.decode(
-                    settings.clientIdentityKey, android.util.Base64.NO_WRAP
-                )
-                try {
-                    uniffi.core_crypto.quicConnectWithClientCert(
-                        tempHostIp, 9876.toUShort(), qrServerCertHash, certDer, keyDer
-                    )
-                    addLog("[Pairing] QUIC bridge connected to $tempHostIp:9876 (mTLS identity presented)")
-                } catch (connectErr: Exception) {
-                    addLog("[Pairing] QUIC connect: ${connectErr.message}")
-                }
-                val nonceHex = settings.pendingPairingNonce
-                val jsonBody = JSONObject()
-                    .put("name", settings.deviceName)
-                    .put("ciphertext_hex", kemCiphertext)
-                    .put("client_pk_hex", clientMlkemPkHex)
-                    .put("client_x25519_pk_hex", clientX25519PkHex)
-                    .put("cert_hash_hex", certHash)
-                if (nonceHex.isNotEmpty()) {
-                    jsonBody.put("pairing_nonce_hex", nonceHex)
-                }
-                val response = uniffi.core_crypto.quicSendAndRecv(0x01.toUByte(), jsonBody.toString())
-                val respJson = try { JSONObject(response) } catch (_: Exception) { null }
-                val status = respJson?.optString("status", "")
-                if (status == "pairing_pending_sas") {
-                    addLog("[Pairing] Host received ciphertext — waiting for user to verify SAS")
-                    hostAccepted = true
-                } else {
-                    addLog("[Pairing] Host rejected handshake: $response")
-                }
-            } catch (e: Exception) {
-                addLog("[Pairing] QUIC send failed: ${e.message}")
+            val status = PairingController.sendCiphertextAndGetStatus(
+                context = context,
+                settings = settings,
+                hostIp = tempHostIp,
+                deviceName = settings.deviceName,
+                kemCiphertext = kemCiphertext,
+                clientMlkemPkHex = clientMlkemPkHex,
+                clientX25519PkHex = clientX25519PkHex,
+                sasCode = result.sasCode,
+                qrServerCertHash = qrServerCertHash,
+                addLog = addLog,
+            )
+            if (status == "pairing_pending_sas") {
+                addLog("[Pairing] Host received ciphertext — waiting for user to verify SAS")
+                hostAccepted = true
             }
         }
         if (hostAccepted) {
@@ -303,8 +250,7 @@ class PairingState(
     fun confirmSasAndCommit(coroutineScope: CoroutineScope) {
         coroutineScope.launch {
             withContext(Dispatchers.IO) {
-                val realIp = p2pIp().takeIf { it.isNotEmpty() }
-                    ?: tempHostIp.takeIf { it.isNotEmpty() }
+                val realIp = tempHostIp.takeIf { it.isNotEmpty() }
                     ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }
                 if (realIp != null) {
                     val handle = keyPairHandle
@@ -382,15 +328,13 @@ fun rememberPairingState(
     addLog: (String) -> Unit,
     setConnection: (status: String, method: String, androidx.compose.ui.graphics.Color) -> Unit,
     setCurrentTab: (org.kyberpipe.client.components.TabItem) -> Unit,
-    p2pIp: () -> String,
-    setP2pIp: (String) -> Unit,
     initialPairingConfig: String?,
     initialPairingConfigWarning: String?,
 ): PairingState {
     return remember(settings, context) {
         PairingState(
             settings, context, addLog, setConnection, setCurrentTab,
-            p2pIp, setP2pIp, initialPairingConfig, initialPairingConfigWarning,
+            initialPairingConfig, initialPairingConfigWarning,
         )
     }
 }

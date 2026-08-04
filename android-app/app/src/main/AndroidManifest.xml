@@ -5,14 +5,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
-    <!-- No ACCESS_FINE/COARSE_LOCATION: nothing in the codebase uses location
-         (WifiDirectManager never references it; NEARBY_WIFI_DEVICES with
-         neverForLocation covers Wi-Fi Direct) — audit finding F16. -->
+    <!-- No ACCESS_FINE/COARSE_LOCATION and no Wi-Fi Direct permissions: the
+         Wi-Fi Direct (P2P) feature was REMOVED (audit finding #1 — the group
+         was never actually WPA2-secured and the join path was a dead stub),
+         so NEARBY_WIFI_DEVICES / ACCESS_WIFI_STATE / CHANGE_WIFI_STATE /
+         FOREGROUND_SERVICE_CONNECTED_DEVICE are no longer declared. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Reboot recovery (audit finding #25): without a BOOT_COMPLETED path the
@@ -80,11 +78,11 @@
 
         <service
             android:name=".service.PipeService"
-            android:foregroundServiceType="connectedDevice|specialUse"
+            android:foregroundServiceType="specialUse"
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="KyberPipe P2P post-quantum network synchronization engine" />
+                android:value="KyberPipe post-quantum network synchronization engine" />
         </service>
 
         <service

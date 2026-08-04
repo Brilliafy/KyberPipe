@@ -101,9 +101,21 @@ pub fn quic_send_and_recv_to(
     body_json: String,
 ) -> Result<String, KyberError> {
     ensure_panic_hook_installed();
+    // AUDIT #6 (a): per-peer in-flight gate — at most ONE send/recv round-trip
+    // per peer at a time. The SMS forwarder and media pushes are otherwise
+    // free to stack concurrent round-trips (each a potential leaked task on
+    // timeout) against a blackholed network; a bounded wait serializes them
+    // behind the in-flight call instead.
+    let _gate = quic_bridge::acquire_in_flight(&peer_key, std::time::Duration::from_secs(10))?;
     let conn = quic_bridge::get_or_reconnect_for(&peer_key)?;
-    match crate::block_on_sync_timeout(
-        quic_bridge::quic_send_and_recv_impl(&conn, stream_type, &body_json),
+    // AUDIT #6 (b): abortable timeout — the round-trip future is spawned as a
+    // task and ABORTED on deadline, so a blackholed path cannot leak a live
+    // task that keeps running past the timeout (the legacy `timeout` dropped
+    // the future but the in-flight async op survived). The wedged connection is
+    // closed so the reconnect state machine re-establishes against the
+    // candidate address set (audit F3).
+    match crate::block_on_sync_timeout_abortable(
+        quic_bridge::quic_send_and_recv_impl(conn.clone(), stream_type, body_json.clone()),
         std::time::Duration::from_secs(QUIC_IO_TIMEOUT_SECS),
     ) {
         Some(Ok(s)) => Ok(s),
@@ -257,19 +269,18 @@ pub fn listen_for_beacons(timeout_secs: u64) -> Result<Vec<String>, KyberError> 
 
 #[uniffi::export]
 pub fn evaluate_connection_hierarchy(
-    wifi_direct_active: bool,
+    _wifi_direct_active: bool,
     lan_active: bool,
     public_endpoint: String,
 ) -> ConnectionInfo {
     ensure_panic_hook_installed();
-    if wifi_direct_active {
-        ConnectionInfo {
-            active_tier: 1,
-            active_path_description: "Wi-Fi Direct (P2P)".to_string(),
-            latency_ms: 1.0,
-            public_endpoint: public_endpoint.clone(),
-        }
-    } else if lan_active {
+    // AUDIT FINDING #1: the Wi-Fi Direct (P2P) transport tier is REMOVED — the
+    // group was never actually WPA2-secured, the passphrase was never applied,
+    // and the Android join path was a dead stub. The parameter is retained in
+    // the FFI signature only for binding/checksum stability and is always
+    // ignored; callers pass `false`. The LAN tier (mDNS beacon discovery) is
+    // the first-class local transport.
+    if lan_active {
         ConnectionInfo {
             active_tier: 2,
             active_path_description: "Local Network (LAN)".to_string(),

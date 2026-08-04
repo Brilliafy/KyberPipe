@@ -62,7 +62,99 @@ struct ReconnectGuard {
 /// of reconnect storms when a network handoff fails.
 const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Per-candidate connect timeout inside the reconnect worker (AUDIT #6): a
+/// blackholed path cannot hang the connect forever — each candidate attempt is
+/// dropped (the handshake future is cancelled) after this window, so the whole
+/// reconnect is bounded by candidates × candidate-timeout even when the FFI
+/// caller has already given up waiting.
+const RECONNECT_CANDIDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Total wall-clock budget the FFI caller waits for a reconnect to finish
+/// (AUDIT #6). The worker self-terminates within its bounded candidate loop
+/// regardless of whether the caller gives up first.
+const RECONNECT_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 type ReconnectStateHandle = Arc<(Mutex<ReconnectGuard>, Condvar)>;
+
+/// Per-peer in-flight gate (AUDIT #6): at most ONE QUIC round-trip per peer at
+/// a time. The poll loop is single-flight, but the SMS forwarder, media pushes
+/// and a second peer's round-trip can otherwise stack concurrent send/recv
+/// futures against a blackholed network — each one a potential leaked task on
+/// timeout (the pre-#6 code leaked every timed-out future until it completed
+/// on its own, progressively exhausting the FFI blocking pool). A bounded wait
+/// serializes additional callers behind the in-flight round-trip instead of
+/// letting them pile up.
+struct InFlightGate {
+    busy: Mutex<bool>,
+    cvar: Condvar,
+}
+
+static IN_FLIGHT_GATES: LazyLock<Mutex<HashMap<String, Arc<InFlightGate>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// RAII release of the per-peer in-flight gate (audit #6).
+pub(crate) struct InFlightGuard {
+    gate: Arc<InFlightGate>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        *self.gate.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.gate.cvar.notify_one();
+    }
+}
+
+/// Acquire the per-peer in-flight gate, waiting up to `wait` for the current
+/// round-trip to release it. Returns a guard that releases the gate on drop.
+/// A caller that cannot acquire within `wait` fails fast (the peer is already
+/// in a round-trip; stacking another one is exactly the pile-up the gate
+/// exists to prevent — audit #6).
+pub(crate) fn acquire_in_flight(
+    peer_key: &str,
+    wait: std::time::Duration,
+) -> Result<InFlightGuard, KyberError> {
+    let gate = {
+        let mut map = IN_FLIGHT_GATES.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(peer_key.to_string())
+            .or_insert_with(|| {
+                Arc::new(InFlightGate {
+                    busy: Mutex::new(false),
+                    cvar: Condvar::new(),
+                })
+            })
+            .clone()
+    };
+    let mut busy = gate.busy.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = std::time::Instant::now() + wait;
+    while *busy {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(KyberError::NetworkError(format!(
+                "A QUIC round-trip for peer '{peer_key}' is already in flight (per-peer gate, audit #6) — retry later"
+            )));
+        }
+        let (g, timed_out) = gate
+            .cvar
+            .wait_timeout(busy, deadline - now)
+            .unwrap_or_else(|e| e.into_inner());
+        busy = g;
+        if timed_out.timed_out() {
+            return Err(KyberError::NetworkError(format!(
+                "A QUIC round-trip for peer '{peer_key}' is already in flight (per-peer gate, audit #6) — timed out waiting"
+            )));
+        }
+    }
+    *busy = true;
+    drop(busy); // release the borrow before moving `gate` into the guard
+    Ok(InFlightGuard { gate })
+}
+
+/// Drop the per-peer in-flight gate state (peer teardown).
+pub fn drop_in_flight_state(peer_key: &str) {
+    if let Ok(mut map) = IN_FLIGHT_GATES.lock() {
+        map.remove(peer_key);
+    }
+}
 
 /// Per-PEER reconnect coordination (audit finding #10). Each peer gets its own
 /// (Mutex, Condvar) pair, so a Wi-Fi→cellular handoff that reconnects ONE peer
@@ -197,9 +289,10 @@ pub fn close_peer(peer_key: &str) {
             *active = None;
         }
     }
-    // Drop the peer's reconnect state so a later re-pair starts fresh
-    // (audit finding #10).
+    // Drop the peer's reconnect + in-flight-gate state so a later re-pair
+    // starts fresh (audit finding #10 / audit #6).
     drop_reconnect_state(peer_key);
+    drop_in_flight_state(peer_key);
 }
 
 /// Record that the active connection is still alive (poll handler).
@@ -311,110 +404,45 @@ pub fn get_or_reconnect_for(peer_key: &str) -> Result<Connection, KyberError> {
         guard.last_attempt = std::time::Instant::now();
     } // guard dropped BEFORE the blocking connect
 
-    // Perform the reconnect without holding any shared lock. The blocking
-    // connect is driven through the FFI runtime's BLOCKING POOL (spawn_blocking
-    // → max_blocking_threads=64), NOT on one of the 2 worker threads, so a
-    // handoff reconnect never starves concurrent UniFFI crypto calls (audit
-    // finding #10). AUDIT F3: the connect iterates the peer's LAST-KNOWN-GOOD
-    // candidate address set (primary first). If the stored address is stale
-    // (the desktop's LAN IP changed), the reconnect rotates to the next
-    // candidate instead of hammering a dead address indefinitely; a success on
-    // a non-primary candidate promotes it to primary for future reconnects.
-    let result = crate::block_on_sync(async move {
-        let peer_key = peer_key.to_string();
-        let inner = tokio::task::spawn_blocking(move || -> Result<Connection, KyberError> {
-            let Some((config, addrs)) = ({
-                let map = connections().lock().unwrap_or_else(|e| e.into_inner());
-                map.get(&peer_key).and_then(|mc| {
-                    mc.config.as_ref().map(|c| {
-                        let mut addrs = c.candidates.clone();
-                        // The primary (`c.addr`) is always tried first.
-                        addrs.retain(|a| *a != c.addr);
-                        addrs.insert(0, c.addr);
-                        (
-                            ConnConfig {
-                                addr: c.addr,
-                                pinned_cert_hash: c.pinned_cert_hash.clone(),
-                                client_certs: c.client_certs.clone(),
-                                candidates: c.candidates.clone(),
-                            },
-                            addrs,
-                        )
-                    })
-                })
-            }) else {
-                return Err(KyberError::NetworkError(format!(
-                    "No reconnect info available for peer '{peer_key}'"
-                )));
-            };
-
-            // `PrivateKeyDer` is not Clone, so rebuild the mTLS identity per
-            // candidate from the raw DER bytes.
-            let raw_client_certs = config.client_certs.clone();
-            let mut last_err: Option<KyberError> = None;
-            let mut winning: Option<(SocketAddr, Connection)> = None;
-            // AUDIT FINDING #24 (nested block_on parks the 2-worker FFI
-            // runtime): the OUTER `block_on_sync` below parks one FFI worker
-            // for the whole reconnect, and the inner `block_on_sync` here
-            // parked the OTHER — under concurrent UniFFI load (poll + SMS
-            // encrypt + snapshot persist during a Wi-Fi→cellular handoff) both
-            // crypto workers were consumed by reconnect I/O. The reconnect
-            // connect is now driven on the DEDICATED IO runtime (the network
-            // runtime that also hosts the accept loop), never on the FFI
-            // runtime — so a handoff reconnect cannot starve concurrent
-            // UniFFI crypto calls. The single outer block_on_sync (an
-            // unavoidable synchronous FFI entry) no longer nests a second
-            // block_on on the same runtime.
-            for cand in addrs {
-                let client_certs = raw_client_certs.clone().map(|(cert_der, key_der)| {
-                    (
-                        vec![rustls::pki_types::CertificateDer::from(cert_der)],
-                        rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
-                    )
-                });
-                match crate::block_on_io(crate::quic_app::QuicAppManager::connect(
-                    cand,
-                    config.pinned_cert_hash.clone(),
-                    client_certs,
-                )) {
-                    Ok(conn) => {
-                        winning = Some((cand, conn));
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            // Promote the winning candidate to primary so the next reconnect
-            // starts from the address that actually worked (audit F3).
-            if let Some((addr, _)) = winning.as_ref() {
-                if let Ok(mut map) = connections().lock() {
-                    if let Some(mc) = map.get_mut(&peer_key) {
-                        if let Some(cfg) = mc.config.as_mut() {
-                            cfg.addr = *addr;
-                            if !cfg.candidates.contains(addr) {
-                                cfg.candidates.push(*addr);
-                            }
-                            // Keep primary first.
-                            cfg.candidates.retain(|a| a != addr);
-                            cfg.candidates.insert(0, *addr);
-                            while cfg.candidates.len() > MAX_CANDIDATE_ADDRESSES {
-                                cfg.candidates.remove(1);
-                            }
-                        }
-                    }
-                }
-            }
-            match winning {
-                Some((_addr, conn)) => Ok(conn),
-                None => Err(last_err.unwrap_or_else(|| {
-                    KyberError::NetworkError("Reconnect exhausted all candidate addresses".into())
-                })),
-            }
-        })
-        .await
-        .map_err(|e| KyberError::NetworkError(format!("Reconnect task join failed: {e}")))??;
-        Ok::<Connection, KyberError>(inner)
+    // Perform the reconnect WITHOUT parking any shared runtime worker (AUDIT
+    // #6/#7). The connect is driven on the FFI runtime's BLOCKING POOL
+    // (spawn_blocking → max_blocking_threads=64, sized independently of the 2
+    // crypto workers) via [`crate::spawn_blocking_on_ffi`], and the FFI caller
+    // waits on a PLAIN std channel — no tokio `block_on` — so a handoff
+    // reconnect NEVER parks an FFI worker or an IO worker. Two simultaneous
+    // reconnects (the multi-device mesh case) therefore cannot stall every
+    // concurrent UniFFI crypto call. Each candidate connect is driven on a
+    // LOCAL current-thread runtime inside the blocking closure and is bounded
+    // by [`RECONNECT_CANDIDATE_TIMEOUT`], so the whole reconnect is bounded
+    // and cancellable; if the caller gives up first, the worker still
+    // self-terminates within its bounded candidate loop.
+    //
+    // AUDIT F3: the connect iterates the peer's LAST-KNOWN-GOOD candidate
+    // address set (primary first). If the stored address is stale (the
+    // desktop's LAN IP changed), the reconnect rotates to the next candidate
+    // instead of hammering a dead address indefinitely; a success on a
+    // non-primary candidate promotes it to primary for future reconnects.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Connection, KyberError>>();
+    let worker_key = peer_key.to_string();
+    let handle = crate::spawn_blocking_on_ffi(move || {
+        let result = run_reconnect_blocking(&worker_key);
+        let _ = tx.send(result);
     });
+    let result = match rx.recv_timeout(RECONNECT_TOTAL_TIMEOUT) {
+        Ok(r) => r,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Best-effort abort of the worker (it self-terminates via the
+            // per-candidate timeouts even if the abort races it).
+            handle.abort();
+            Err(KyberError::NetworkError(format!(
+                "QUIC reconnect for peer '{peer_key}' timed out after {}s",
+                RECONNECT_TOTAL_TIMEOUT.as_secs()
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(KyberError::NetworkError(
+            "QUIC reconnect worker exited without a result".into(),
+        )),
+    };
 
     {
         let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,15 +462,112 @@ pub fn get_or_reconnect_for(peer_key: &str) -> Result<Connection, KyberError> {
     }
 }
 
+/// Run one peer's reconnect on a DEDICATED blocking-pool thread (audit #7).
+/// Drives each candidate connect on a LOCAL current-thread tokio runtime so no
+/// shared FFI/IO worker is consumed, and bounds each attempt with
+/// [`RECONNECT_CANDIDATE_TIMEOUT`] so a blackholed path cannot hang the worker.
+fn run_reconnect_blocking(peer_key: &str) -> Result<Connection, KyberError> {
+    let Some((config, addrs)) = ({
+        let map = connections().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(peer_key).and_then(|mc| {
+            mc.config.as_ref().map(|c| {
+                let mut addrs = c.candidates.clone();
+                // The primary (`c.addr`) is always tried first.
+                addrs.retain(|a| *a != c.addr);
+                addrs.insert(0, c.addr);
+                (
+                    ConnConfig {
+                        addr: c.addr,
+                        pinned_cert_hash: c.pinned_cert_hash.clone(),
+                        client_certs: c.client_certs.clone(),
+                        candidates: c.candidates.clone(),
+                    },
+                    addrs,
+                )
+            })
+        })
+    }) else {
+        return Err(KyberError::NetworkError(format!(
+            "No reconnect info available for peer '{peer_key}'"
+        )));
+    };
+
+    // `PrivateKeyDer` is not Clone, so rebuild the mTLS identity per candidate
+    // from the raw DER bytes.
+    let raw_client_certs = config.client_certs.clone();
+    let mut last_err: Option<KyberError> = None;
+    let mut winning: Option<(SocketAddr, Connection)> = None;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| KyberError::NetworkError(format!("Reconnect runtime build failed: {e}")))?;
+    for cand in addrs {
+        let client_certs = raw_client_certs.clone().map(|(cert_der, key_der)| {
+            (
+                vec![rustls::pki_types::CertificateDer::from(cert_der)],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+            )
+        });
+        let fut = crate::quic_app::QuicAppManager::connect(
+            cand,
+            config.pinned_cert_hash.clone(),
+            client_certs,
+        );
+        // AUDIT #6: each candidate attempt is CANCELLED after
+        // RECONNECT_CANDIDATE_TIMEOUT — the handshake future is dropped at its
+        // next await point instead of hanging the worker forever on a
+        // blackholed path.
+        match rt.block_on(tokio::time::timeout(RECONNECT_CANDIDATE_TIMEOUT, fut)) {
+            Ok(Ok(conn)) => {
+                winning = Some((cand, conn));
+                break;
+            }
+            Ok(Err(e)) => last_err = Some(e),
+            Err(_elapsed) => {
+                last_err = Some(KyberError::NetworkError(format!(
+                    "QUIC connect to {cand} timed out after {}s",
+                    RECONNECT_CANDIDATE_TIMEOUT.as_secs()
+                )));
+            }
+        }
+    }
+    // Promote the winning candidate to primary so the next reconnect starts
+    // from the address that actually worked (audit F3).
+    if let Some((addr, _)) = winning.as_ref() {
+        if let Ok(mut map) = connections().lock() {
+            if let Some(mc) = map.get_mut(peer_key) {
+                if let Some(cfg) = mc.config.as_mut() {
+                    cfg.addr = *addr;
+                    if !cfg.candidates.contains(addr) {
+                        cfg.candidates.push(*addr);
+                    }
+                    // Keep primary first.
+                    cfg.candidates.retain(|a| a != addr);
+                    cfg.candidates.insert(0, *addr);
+                    while cfg.candidates.len() > MAX_CANDIDATE_ADDRESSES {
+                        cfg.candidates.remove(1);
+                    }
+                }
+            }
+        }
+    }
+    match winning {
+        Some((_addr, conn)) => Ok(conn),
+        None => Err(last_err.unwrap_or_else(|| {
+            KyberError::NetworkError("Reconnect exhausted all candidate addresses".into())
+        })),
+    }
+}
+
 pub async fn quic_send_and_recv_impl(
-    conn: &Connection,
+    conn: Connection,
     stream_type: u8,
-    body_json: &str,
+    body_json: String,
 ) -> Result<String, KyberError> {
     let (mut send, mut recv) =
-        crate::quic_app::QuicAppManager::open_stream(conn, stream_type).await?;
+        crate::quic_app::QuicAppManager::open_stream(&conn, stream_type).await?;
 
-    let body = body_json.as_bytes().to_vec();
+    let body = body_json.into_bytes();
     let frame = crate::quic_app::QuicFrame { stream_type, body };
     crate::quic_app::QuicAppManager::send_frame(&mut send, &frame).await?;
     send.finish()

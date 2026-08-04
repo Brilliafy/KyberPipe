@@ -32,7 +32,6 @@ pub fn generate_pairing_config(
     let wg_pk = hex::decode(&wireguard_pk_hex)
         .map_err(|e| KyberError::CryptoError(format!("Invalid WireGuard PK hex: {e}")))?;
     let local_ip = system_net::get_system_local_ip();
-    let mac = system_net::get_primary_mac();
     // Fresh out-of-band QR nonce. The phone must echo this in its pairing
     // payload so the server can reject blind races from arbitrary LAN peers
     // (audit finding #20 — pairing-slot hijack/DoS).
@@ -41,8 +40,13 @@ pub fn generate_pairing_config(
     Ok(PairingConfig {
         host_identity_pk_hex: hex::encode(&host_pk),
         local_ip,
-        wifi_direct_mac: mac,
-        p2p_ip: "192.168.49.1".to_string(),
+        // Wi-Fi Direct (P2P) was removed from the product (audit finding #1:
+        // the group was never actually WPA2-secured and the Android join path
+        // was a dead stub). The fields remain in the FFI record only to keep
+        // the binding surface stable; they are always empty now and no
+        // consumer reads them.
+        wifi_direct_mac: String::new(),
+        p2p_ip: String::new(),
         wireguard_pk_hex: hex::encode(&wg_pk),
         stun_endpoint: String::new(),
         pairing_nonce_hex: hex::encode(nonce),

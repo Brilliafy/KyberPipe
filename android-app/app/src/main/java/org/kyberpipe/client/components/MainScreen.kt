@@ -81,8 +81,8 @@ fun KyberpipeTheme(
  * `use*State` hooks below:
  *
  *  - [rememberPairingState]   — KEM/QR/deep-link pairing, SAS modal (PairingModals)
- *  - [rememberConnectionState] — connectivity state machine, Wi-Fi Direct +
- *    beacon listeners, the explicit-unpair signal
+ *  - [rememberConnectionState] — connectivity state machine, beacon listener,
+ *    and the explicit-unpair signal (Wi-Fi Direct support removed — audit #1)
  *  - [rememberClipboardState] — clipboard history + OS clipboard hook
  *  - [rememberMediaState]     — remote media-action trigger
  *  - [rememberNotificationState] — notification mirror + store auto-sync
@@ -119,17 +119,13 @@ fun MainScreen(
     val activity = context as org.kyberpipe.client.MainActivity
 
     // ── Feature state holders (audit #8 follow-up) ──────────────────────────
-    // `p2pIp` is genuinely shared between pairing (WRITER: QR p2p_ip, Wi-Fi
-    // Direct callback) and connection (READER: evaluateConnection), so the
-    // router owns the single source of truth and both holders get a
-    // provider/setter. The unpair signal from ConnectionState clears the
-    // pairing handles exactly once via `clearPairingHandles`, late-bound below
-    // so the two holders need no constructor forward references.
-    var p2pIp by remember { mutableStateOf("") }
+    // The unpair signal from ConnectionState clears the pairing handles
+    // exactly once via `clearPairingHandles`, late-bound below so the two
+    // holders need no constructor forward references. (Wi-Fi Direct / `p2pIp`
+    // coordination was removed with the P2P feature — audit finding #1.)
     var unpairHandler: (() -> Unit)? = null
     val connection = rememberConnectionState(
         settings, context, addLog,
-        p2pIpProvider = { p2pIp },
         onExplicitUnpair = { unpairHandler?.invoke() },
     )
     val pairing = rememberPairingState(
@@ -140,8 +136,6 @@ fun MainScreen(
             connection.setConnection(status, method, color)
         },
         setCurrentTab = { currentTab = it },
-        p2pIp = { p2pIp },
-        setP2pIp = { p2pIp = it },
         initialPairingConfig,
         initialPairingConfigWarning,
     )
@@ -173,20 +167,6 @@ fun MainScreen(
         }
     }
 
-    // Wi-Fi Direct P2P Manager (owned by ConnectionState).
-    DisposableEffect(Unit) {
-        connection.p2pManager.initialize(
-            onState = { state ->
-                p2pIp = state.groupOwnerIp
-                connection.onWifiDirectStateChange(state.groupOwnerIp, state.isConnected)
-            },
-            onPeers = { macs ->
-                addLog("[P2P] Discovered ${macs.size} peers")
-            }
-        )
-        onDispose { connection.p2pManager.destroy() }
-    }
-
     // mDNS/LAN Beacon Listener (unauthenticated hints only — audit #3).
     LaunchedEffect(Unit) {
         connection.beaconListener.start { host ->
@@ -195,20 +175,6 @@ fun MainScreen(
     }
     DisposableEffect(Unit) {
         onDispose { connection.beaconListener.stop() }
-    }
-
-    // When pairing config changes, try Wi-Fi Direct connection if MAC is present.
-    LaunchedEffect(pairing.pairingConfigInput) {
-        if (pairing.pairingConfigInput.isNotEmpty() && pairing.pairingConfigInput.startsWith("{")) {
-            try {
-                val json = JSONObject(pairing.pairingConfigInput)
-                val wifiDirectMac = json.optString("wifi_direct_mac", "")
-                if (wifiDirectMac.isNotEmpty()) {
-                    addLog("[P2P] Attempting Wi-Fi Direct connection to $wifiDirectMac")
-                    connection.p2pManager.findAndConnect(wifiDirectMac)
-                }
-            } catch (_: Exception) {}
-        }
     }
 
     // Load initial deep link config (requires user confirmation — audit #22).
@@ -253,7 +219,7 @@ fun MainScreen(
     }
 
     // Auto failover Connection evaluation.
-    LaunchedEffect(connection.wifiDirectActive, connection.lanActive, settings.isPaired) {
+    LaunchedEffect(connection.lanActive, settings.isPaired) {
         connection.evaluateConnection()
     }
 
@@ -364,10 +330,8 @@ fun MainScreen(
                             onTriggerHandshake = { pairing.handlePairingHandshake(coroutineScope) },
                             onAvatarPickerClick = onAvatarPickerClick,
                             onSaveSettings = { onThemeChanged(settings.themeMode, settings.amoledMode) },
-                            wifiDirectActive = connection.wifiDirectActive,
                             lanActive = connection.lanActive,
                             wireguardActive = connection.wireguardActive,
-                            onWifiDirectToggled = { connection.wifiDirectActive = it },
                             onLanToggled = { connection.lanActive = it },
                             onWireguardToggled = { connection.wireguardActive = it },
                             localLogs = localLogs,

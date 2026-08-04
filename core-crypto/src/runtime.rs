@@ -2,6 +2,7 @@
 //! the former `lib.rs` monolith so the runtime lifecycle lives apart from the
 //! FFI surface and the record types).
 
+use crate::error::KyberError;
 use std::future::Future;
 
 /// IO runtime for long-lived tasks (QUIC accept loop, beacon listeners).
@@ -74,6 +75,59 @@ pub fn block_on_sync_timeout<F: Future>(fut: F, timeout: std::time::Duration) ->
     ffi_runtime()
         .block_on(tokio::time::timeout(timeout, fut))
         .ok()
+}
+
+/// Block on a future with a hard timeout, ABORTING the future when the deadline
+/// fires (AUDIT #6). `tokio::time::timeout` alone drops the future but CANNOT
+/// stop an in-flight async operation, so a timed-out QUIC round-trip previously
+/// leaked a live task (plus any spawned inner tasks) that kept running until it
+/// completed on its own — under a blackholed network every poll leaked a task,
+/// progressively exhausting the FFI blocking pool and stalling ALL UniFFI
+/// crypto. Spawning the future as an abortable task gives real cancellation:
+/// on timeout the task is aborted at its next await point and its JoinHandle
+/// is dropped, so the leak is bounded to the timeout window.
+///
+/// Returns `Some(Ok(out))` / `Some(Err(e))` on completion, `None` on timeout
+/// (the task has been aborted).
+pub fn block_on_sync_timeout_abortable<F, T>(
+    fut: F,
+    timeout: std::time::Duration,
+) -> Option<Result<T, KyberError>>
+where
+    F: Future<Output = Result<T, KyberError>> + Send + 'static,
+    T: Send + 'static,
+{
+    let rt = ffi_runtime();
+    let mut handle = rt.spawn(fut);
+    // Poll the JoinHandle by &mut so the handle survives a timeout for abort().
+    match rt.block_on(tokio::time::timeout(timeout, &mut handle)) {
+        Ok(join_result) => match join_result {
+            Ok(out) => Some(out),
+            Err(e) => Some(Err(KyberError::NetworkError(format!(
+                "FFI task join failed: {e}"
+            )))),
+        },
+        Err(_elapsed) => {
+            // Real cancellation: abort the leaked task at its next await point.
+            handle.abort();
+            None
+        }
+    }
+}
+
+/// Spawn a blocking closure on the FFI runtime's BLOCKING POOL (max 64 threads,
+/// sized independently of the 2 crypto worker threads) and return its
+/// `JoinHandle`. AUDIT #7: used by the QUIC reconnect path so a handoff
+/// reconnect runs on a dedicated blocking thread and NEVER parks one of the two
+/// FFI crypto workers — the caller waits on a plain std channel instead of a
+/// tokio `block_on`, so concurrent reconnects for different peers cannot
+/// starve concurrent UniFFI crypto calls.
+pub fn spawn_blocking_on_ffi<F, T>(f: F) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    ffi_runtime().spawn_blocking(f)
 }
 
 /// Shut down the FFI runtime. TEST/TEARDOWN ONLY: the runtime is a process-wide

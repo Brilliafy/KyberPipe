@@ -34,6 +34,20 @@ pub fn generate_hybrid_keypair() -> HybridKeyPair {
     }
 }
 
+/// Generate a Tor v3 onion client-authorization x25519 keypair (audit finding
+/// #11). The PUBLIC half configures the onion service (`ADD_ONION ...
+/// ClientAuth=<base32(pub)>`); the PRIVATE half is the credential a client
+/// must hold (appended to the .onion URL as
+/// `onion:descriptor:x25519:<base32(priv)>`) to reach the service at all —
+/// without it the service is unreachable, so an exposed .onion address leaks
+/// nothing. Returns (private_key, public_key), each 32 raw bytes.
+pub fn generate_client_auth_keypair() -> ([u8; 32], [u8; 32]) {
+    let mut rng = rand::thread_rng();
+    let secret = X25519StaticSecret::random_from_rng(&mut rng);
+    let public = X25519PublicKey::from(&secret);
+    (secret.to_bytes(), public.to_bytes())
+}
+
 /// Reject the eight canonical low-order X25519 encodings (audit finding #21).
 /// The all-zero shared-secret check below catches the identity point, but
 /// order-2/4/8 points produce a NON-zero low-order shared secret and must be
@@ -50,7 +64,10 @@ fn is_low_order_x25519_point(pk: &[u8; 32]) -> bool {
         // u = 0 (identity)
         &[0u8; 32],
         // u = 1 (order 2)
-        &[1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        &[
+            1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ],
         // 325606250916557431795983626356110631294008115727848805560023387167927233504
         &[
             0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f,

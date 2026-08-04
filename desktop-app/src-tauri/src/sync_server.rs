@@ -25,7 +25,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::info;
 
-/// Maximum concurrent QUIC connections accepted at once. Bounds the number of
+/// Maximum concurrent connections accepted at once. Bounds the number of
 /// per-connection accept-loop tasks and connection buffers an attacker on the
 /// LAN can force the server to hold before any authorization happens (audit
 /// finding #8 — pre-pairing LAN DoS).
@@ -35,6 +35,14 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 const MAX_STREAMS_PER_CONNECTION: usize = 16;
 /// Maximum concurrent streams across ALL connections.
 const MAX_GLOBAL_STREAMS: usize = 256;
+/// AUDIT #17: PRE-NONCE body cap for the PAIRING stream. While the desktop is
+/// unpaired (a pairing QR on screen) the pairing stream is authorized for ANY
+/// LAN host, and the general frame cap is 1 MiB — so a hostile LAN body could
+/// previously force up to 16 conns × 16 streams × 1 MiB ≈ 256 MiB of buffering
+/// before the QR nonce check. The pairing payload (KEM ciphertext + SAS
+/// material + device name) is a few KiB at most, so anything larger is
+/// rejected from the HEADER alone, before a single body byte is read.
+const PAIRING_MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// Authorize a stream from a given peer against the pairing state.
 /// Post-pairing identity is the CLIENT CERTIFICATE hash captured at pairing
@@ -74,11 +82,11 @@ fn authorize_stream(
 }
 
 pub fn start_local_sync_server(state: Arc<AppState>) {
-    // AUDIT FINDING #14: Wi-Fi Direct group creation is OPT-IN and only runs
-    // when the user explicitly enables it (mirroring the beacon opt-in). The
-    // legacy unconditional call created an open P2P AP on every desktop start.
-    let p2p_enabled = { state.settings.lock().p2p_group_enabled };
-    core_crypto::p2p_group::try_start_p2p_group(p2p_enabled);
+    // AUDIT FINDING #1: Wi-Fi Direct (P2P) group creation is REMOVED entirely
+    // — the legacy group was never actually WPA2-secured (the passphrase was
+    // generated and discarded, never applied to wpa_supplicant), the desktop
+    // QR handed out credentials that never matched the real group, and the
+    // Android join path was a dead stub. No P2P group is ever created here.
 
     std::thread::spawn(move || {
         // Use the dedicated IO_RUNTIME from core-crypto for the accept loop.
@@ -109,7 +117,7 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
             // truncated key hash to every LAN host unconditionally. Now it only
             // runs when the user explicitly enables discovery, and the payload
             // never carries the device name (identity disclosure removed); it
-            // is multicast-scoped by the p2p_group layer.
+            // is multicast-scoped to the LAN.
             let beacon_state = state.clone();
             tokio::spawn(async move {
                 loop {
@@ -131,7 +139,7 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
                         // Identity-minimal payload: truncated pk hash + LAN IP
                         // only — no device name on an unauthenticated channel.
                         let payload = format!("{pk_hash}:{local_ip}");
-                        let _ = core_crypto::p2p_group::send_beacon_payload(payload).await;
+                        let _ = core_crypto::network::send_p2p_beacon(&payload, None).await;
                     }
                 }
             });
@@ -149,7 +157,7 @@ pub fn start_local_sync_server(state: Arc<AppState>) {
 /// `stop` (optional) lets callers terminate the dispatch loop cleanly — used
 /// by the integration test so the test process exits; production passes None.
 pub async fn run_server_dispatch(
-    mut endpoint: quinn::Endpoint,
+    endpoint: quinn::Endpoint,
     state: Arc<AppState>,
     stop: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
@@ -209,7 +217,32 @@ pub async fn run_server_dispatch(
     let global_stream_semaphore =
         std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_GLOBAL_STREAMS));
 
+    // First iteration seeds the loop with the caller's endpoint; every later
+    // iteration re-acquires from the process-global static so an mTLS rebind
+    // swap is picked up (audit finding #2). Once the caller's endpoint has been
+    // consumed (or the static is authoritative), this falls back to the static
+    // only.
+    let mut seeded_endpoint: Option<quinn::Endpoint> = Some(endpoint);
     loop {
+        // AUDIT FINDING #2: the CURRENT server endpoint is re-acquired on every
+        // iteration. `rebind_server` closes + removes the OLD endpoint (so its
+        // accept() returns None and THIS loop drops the previous clone) and
+        // stores the NEW endpoint — the next pass picks it up. Holding a fixed
+        // endpoint across iterations would keep the old UDP socket bound and
+        // make the rebind's same-port bind fail with EADDRINUSE.
+        let endpoint =
+            match core_crypto::quic_app::get_server_endpoint().or_else(|| seeded_endpoint.take()) {
+                Some(ep) => ep,
+                None => {
+                    // Endpoint being swapped (rebind window): the static is
+                    // briefly empty between closing the old endpoint and
+                    // storing the new one. Wait and re-acquire — never tear the
+                    // server down on a transient empty.
+                    info!("[QUIC Sync] Server endpoint unavailable (rebind window) — waiting");
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+            };
         let incoming = match stop_rx.as_mut() {
             Some(rx) => {
                 tokio::select! {
@@ -315,6 +348,29 @@ pub async fn run_server_dispatch(
                                         .await;
                                         return;
                                     }
+                                    // AUDIT #17: enforce the pairing body cap from
+                                    // the HEADER, before reading a single body
+                                    // byte — the general 1 MiB frame cap would
+                                    // otherwise let a hostile LAN host force the
+                                    // unpaired server to buffer up to 256 MiB.
+                                    if stream_type == STREAM_PAIRING
+                                        && _body_len > PAIRING_MAX_BODY_BYTES
+                                    {
+                                        info!(
+                                            "[QUIC Auth] Rejected oversized pairing body ({} B > {} B cap) from {} — pre-nonce cap (audit #17)",
+                                            _body_len, PAIRING_MAX_BODY_BYTES, peer_ip
+                                        );
+                                        let _ = core_crypto::quic_app::QuicAppManager::send_frame(
+                                            &mut send,
+                                            &QuicFrame {
+                                                stream_type,
+                                                body: br#"{"status":"error","reason":"Pairing payload too large"}"#
+                                                    .to_vec(),
+                                            },
+                                        )
+                                        .await;
+                                        return;
+                                    }
                                     // Authorized: now read the (bounded) body and
                                     // dispatch to the handler. AUDIT F12: the
                                     // ratchet peer id is resolved PER CONNECTION
@@ -385,20 +441,15 @@ pub async fn run_server_dispatch(
                 });
             }
             None => {
-                // The bound endpoint was dropped — this is how the mTLS rebind
-                // after pairing signals the accept loop (audit finding #8b).
-                // Re-acquire the current endpoint and continue dispatching on
-                // the SAME port instead of tearing the server down.
-                match core_crypto::quic_app::get_server_endpoint() {
-                    Some(new_ep) => {
-                        info!("[QUIC Sync] Accept loop re-acquired rebound endpoint");
-                        endpoint = new_ep;
-                    }
-                    None => {
-                        info!("Server endpoint dropped");
-                        break;
-                    }
-                }
+                // The endpoint was closed — this is how the mTLS rebind after
+                // pairing signals the accept loop (audit finding #8b). Drop this
+                // iteration's clone and re-acquire on the next pass; if the
+                // static is still empty (rebind window), the top-of-loop wait
+                // handles it. Never `break` here — a transient empty static is a
+                // legitimate rebind, not a shutdown signal (audit finding #2).
+                info!("[QUIC Sync] Accept loop observed endpoint close — re-acquiring");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
             }
         }
     }

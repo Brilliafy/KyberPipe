@@ -63,7 +63,7 @@ pub fn reconstruct_key_from_shamir_shares(
         })
         .collect();
     let parsed = shares?;
-    let recovered_bytes = core_crypto::crypto::reconstruct_shamir_with_meta(&parsed, k)
-        .map_err(|e| e.to_string())?;
+    let recovered_bytes =
+        core_crypto::crypto::reconstruct_shamir_with_meta(&parsed, k).map_err(|e| e.to_string())?;
     Ok(hex::encode(&recovered_bytes))
 }

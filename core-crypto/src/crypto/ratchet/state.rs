@@ -13,7 +13,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// surface owns a single module. Re-exported here so existing
 /// `super::state::now_unix_secs()` / `INCOMING_REKEY_TTL_SECS` call sites keep
 /// resolving unchanged.
-pub(crate) use super::policy::{INCOMING_REKEY_TTL_SECS, SEEN_SET_MAX, now_unix_secs};
+pub(crate) use super::policy::{now_unix_secs, INCOMING_REKEY_TTL_SECS, SEEN_SET_MAX};
 
 /// A pending outgoing rekey confirmation. Retains the full rekey payload so an
 /// unacknowledged proposal can be RE-SENT on a later message (never
@@ -24,14 +24,12 @@ pub struct RekeyCarrier {
     /// Send-space sequence number of the message that currently carries the
     /// rekey payload. The peer's RekeyAck carries this value back.
     pub carrier_seq: u64,
-    /// Wall-clock time the payload was attached. An entry older than
-    /// `REKEY_RETRY_TTL` is re-sent (see encrypt.rs).
+    /// Monotonic time the payload was attached. An entry older than
+    /// `REKEY_RETRY_TTL` is re-sent (see encrypt.rs). NOT persisted (Instant
+    /// is not serializable); the effective age is the MAX of this and the
+    /// persisted wall-clock `attached_at_unix` (audit finding #8 — a restored
+    /// carrier ages by its persisted wall-clock stamp, not as "fresh").
     pub attached_at: std::time::Instant,
-    /// Monotonic attach time. NOT persisted (Instant is not serializable);
-    /// restored carriers fall back to [`attached_at_unix`]. Bounds the retry
-    /// TTL by BOTH clocks: a wall-clock rollback cannot stretch the retry
-    /// window (audit finding #10).
-    pub attached_at_mono: std::time::Instant,
     /// Wall-clock unix seconds the payload was attached. PERSISTED in the
     /// snapshot so a restored (never re-sent, never acked) carrier is still
     /// bounded by the TTL instead of resetting to "fresh" on restart (audit
@@ -589,6 +587,17 @@ impl DoubleRatchetState {
     /// Commit the OUTGOING rekey proposal (our own rekey) once the peer has
     /// acknowledged it. Atomic full transition: root + both chain keys + swap
     /// our hybrid keypair + generation bump.
+    ///
+    /// AUDIT #2 (HIGH, stale-carrier poison): the confirm queue is cleared
+    /// HERE — commit is the ONLY queue-clearing authority alongside cancel. The
+    /// legacy code cleared only the proposal slot, so a leftover carrier (a
+    /// re-send that the peer's ACK matched against a sibling entry) survived
+    /// the commit and was re-sent by the next `ratchet_encrypt` with the
+    /// ALREADY-COMMITTED payload under the NEW generation — the peer decapsulated
+    /// it under its new root and staged a garbage proposal that poisoned its
+    /// single incoming slot for up to INCOMING_REKEY_TTL_SECS. Clearing here
+    /// makes the invariant "queue empty ⇔ no pending outgoing proposal"
+    /// structurally enforced.
     pub fn commit_outgoing_rekey(&mut self) {
         if let (Some(ok), Some(osk), Some(ork)) = (
             self.outgoing_proposal.root_key,
@@ -619,6 +628,11 @@ impl DoubleRatchetState {
         self.outgoing_proposal.receiving_chain_key = None;
         self.outgoing_proposal.hybrid_pair = None;
         self.outgoing_proposal.rekey_payload = None;
+        // AUDIT #2: the committed payload must never be re-sent — drop every
+        // residual carrier. This is the only queue-clearing authority besides
+        // `cancel_outgoing_rekey`.
+        self.rekey_pending_confirm_queue.clear();
+        self.assert_confirm_queue_invariant();
     }
 
     /// Cancel an unacknowledged outgoing proposal. Used by the deterministic
@@ -633,6 +647,7 @@ impl DoubleRatchetState {
         self.outgoing_proposal.hybrid_pair = None;
         self.outgoing_proposal.rekey_payload = None;
         self.rekey_pending_confirm_queue.clear();
+        self.assert_confirm_queue_invariant();
     }
 
     /// Cancel an unconsumed INCOMING rekey proposal (audit KYP-2026-02 #3).
@@ -715,7 +730,9 @@ impl DoubleRatchetState {
     /// Process a REKEY_ACK from the peer. `seq` is the send-space sequence
     /// number of the message that carried the rekey (the carrier), matching the
     /// entries pushed into `rekey_pending_confirm_queue` by ratchet_encrypt.
-    /// On match, the OUTGOING proposal is committed atomically.
+    /// On match, the OUTGOING proposal is committed atomically (which also
+    /// clears ANY residual carriers — audit #2, so a second queue entry can
+    /// never survive the commit and be re-sent with the committed payload).
     pub fn process_rekey_ack(&mut self, seq: u64) -> bool {
         let index = self
             .rekey_pending_confirm_queue
@@ -728,6 +745,22 @@ impl DoubleRatchetState {
         } else {
             false
         }
+    }
+
+    /// Debug-only invariant check (audit #2): the confirm queue must be EMPTY
+    /// whenever no outgoing proposal is pending and hold AT MOST ONE carrier
+    /// for the single pending proposal. A multi-carrier queue is the stale-
+    /// carrier poison precondition (one entry survives the peer's ACK and is
+    /// re-sent with committed payload under the new generation).
+    pub(crate) fn assert_confirm_queue_invariant(&self) {
+        debug_assert!(
+            self.outgoing_proposal.is_pending() || self.rekey_pending_confirm_queue.is_empty(),
+            "confirm queue must be empty when no outgoing proposal is pending (audit #2)"
+        );
+        debug_assert!(
+            self.rekey_pending_confirm_queue.len() <= 1,
+            "confirm queue must hold at most one carrier per pending proposal (audit #2)"
+        );
     }
 
     pub fn generate_rekey_ack(&mut self, seq: u64) -> Result<RatchetEncryptedMessage, KyberError> {

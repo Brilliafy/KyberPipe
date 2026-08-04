@@ -290,17 +290,20 @@ pub fn run() {
             evaluate_connection_status,
             generate_sas_pairing_code,
             write_real_clipboard,
-            create_p2p_group,
             register_mdns_service,
-            generate_shamir_recovery_shares,
-            reconstruct_key_from_shamir_shares,
+            get_beacon_signing_key,
             confirm_pairing_sas,
             toggle_neural_anomaly_engine,
         ])
         // Tier 2: privileged/destructive — EVERY command first calls
-        // `gate_tier2(action, token)`, consuming the single-use user-gesture
+        // `gate_tier2(action, token)` (or consumes a user-gesture token
+        // internally via `consume_privilege_token`), consuming the single-use
         // token issued by `request_privilege_token`. Enforcement is per-TIER
-        // (uniform), not ad-hoc per command.
+        // (uniform), not ad-hoc per command. `generate_shamir_recovery_shares`
+        // and `reconstruct_key_from_shamir_shares` are classified here — they
+        // consume tokens internally (they handle the master identity key), so
+        // listing them in Tier 1 would disagree with their internal gate
+        // (audit finding #10).
         .invoke_handler(tauri::generate_handler![
             request_privilege_token,
             check_stepup_authorization,
@@ -314,6 +317,8 @@ pub fn run() {
             create_tor_onion,
             execute_boa_script,
             execute_fallback_script,
+            generate_shamir_recovery_shares,
+            reconstruct_key_from_shamir_shares,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

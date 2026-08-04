@@ -188,22 +188,32 @@ class PipeService : Service() {
         /// Store an already-wrapped (nonce, ciphertext) pair in the standard
         /// on-disk format: Base64("{nonce_hex}:{ct_hex}"). The wrap happened
         /// inside Rust (audit finding #5) — this only persists the ciphertext.
+        /// Returns true when the snapshot was actually written; the caller must
+        /// NOT advance the rollback watermark unless this succeeds (audit
+        /// finding #4 — a watermark strictly ahead of the on-disk snapshot
+        /// makes the next cold-start refuse the snapshot and forces a re-pair).
         @JvmStatic
         fun persistWrappedSnapshot(
             settings: org.kyberpipe.client.utils.SettingsManager,
             nonce: ByteArray,
             ciphertext: ByteArray
-        ) {
-            try {
+        ): Boolean {
+            return try {
                 val nonceHex = nonce.toHexString()
                 val ctHex = ciphertext.toHexString()
-                settings.ratchetSnapshot = android.util.Base64.encodeToString(
+                val encoded = android.util.Base64.encodeToString(
                     "$nonceHex:$ctHex".toByteArray(Charsets.UTF_8),
                     android.util.Base64.NO_WRAP
                 )
+                settings.ratchetSnapshot = encoded
+                // Verify the write round-tripped: a transient Keystore / prefs
+                // failure can silently drop the value. Only a durable write may
+                // advance the watermark.
+                settings.ratchetSnapshot == encoded
             } catch (e: Exception) {
                 // Never store plaintext — skip persistence on failure.
                 Log.w("KyberpipeService", "Ratchet snapshot persist skipped: ${e.message}")
+                false
             }
         }
     }

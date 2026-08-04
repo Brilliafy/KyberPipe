@@ -122,15 +122,15 @@ impl DoubleRatchetState {
         // and `should_rekey` remained blocked by `proposal_pending` forever.
         // Carrier seq 0 is provisional; encrypt.rs overwrites it with the live
         // send position when it re-attaches the payload.
-        self.rekey_pending_confirm_queue.push_back(super::state::RekeyCarrier {
-            carrier_seq: 0,
-            attached_at: std::time::Instant::now(),
-            attached_at_mono: std::time::Instant::now(),
-            attached_at_unix: super::state::now_unix_secs(),
-            rekey_x25519_pk: peer_x25519_pk.to_vec(),
-            rekey_mlkem_pk: peer_mlkem_pk.to_vec(),
-            rekey_ciphertext: kem_res.ciphertext_bytes.clone(),
-        });
+        self.rekey_pending_confirm_queue
+            .push_back(super::state::RekeyCarrier {
+                carrier_seq: 0,
+                attached_at: std::time::Instant::now(),
+                attached_at_unix: super::state::now_unix_secs(),
+                rekey_x25519_pk: peer_x25519_pk.to_vec(),
+                rekey_mlkem_pk: peer_mlkem_pk.to_vec(),
+                rekey_ciphertext: kem_res.ciphertext_bytes.clone(),
+            });
         // AUDIT FINDING #26: peer-key adoption is DEFERRED to commit — do NOT
         // write `self.peer_*` here. The old code eagerly mutated the active
         // peer keys at staging time, so a proposal that was never acked left a

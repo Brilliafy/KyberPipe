@@ -141,11 +141,6 @@ impl AppState {
         self.pairing.get_pairing_read()
     }
 
-    #[allow(dead_code)] // API-surface alias of begin_pairing_attempt (audit #6)
-    pub fn clear_pairing_stale(&self) {
-        self.pairing.clear_pairing_stale();
-    }
-
     pub fn get_sas_code(&self) -> String {
         self.pairing.get_sas_code()
     }

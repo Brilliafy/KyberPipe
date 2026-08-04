@@ -13,7 +13,7 @@ fn derive_path_challenge_key(session_key: &[u8]) -> [u8; 32] {
     okm
 }
 
-/// Helper for Seamless Path Migration between Wi-Fi Direct and WireGuard interfaces over QUIC CIDs
+/// Helper for Seamless Path Migration between LAN and WireGuard interfaces over QUIC CIDs
 pub struct PathMigrationManager;
 
 impl PathMigrationManager {

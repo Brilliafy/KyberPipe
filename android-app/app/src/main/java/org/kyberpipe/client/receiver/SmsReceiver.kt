@@ -57,23 +57,20 @@ class SmsReceiver : BroadcastReceiver() {
                 // never a raw thread per SMS (audit finding #11: an SMS flood
                 // or dead peer previously spawned an unbounded thread/connection
                 // storm).
+                //
+                // AUDIT FINDING #12: `onReceive` runs on the MAIN thread (~10s
+                // ANR budget). The ratchet ENCRYPT (which at a rekey boundary
+                // runs an ML-KEM encapsulate inside the session Mutex — tens of
+                // ms of CPU) must therefore NOT happen here: it is deferred to
+                // the SmsForwarder's single background worker, which encrypts
+                // AND sends. The main thread only does the cheap packet
+                // construction above.
                 val settings = org.kyberpipe.client.utils.SettingsManager(ctx)
                 val peer = settings.peerRatchetIdentity
                 // Forward only when paired AND the user has explicitly enabled
                 // SMS forwarding (audit finding #14 — opt-in, default OFF).
                 if (settings.isPaired && settings.smsForwardingEnabled && peer.isNotEmpty()) {
-                    val tlv = try {
-                        uniffi.core_crypto.ratchetEncryptMessageBinary(peer, jsonPacket.toByteArray())
-                    } catch (e: Exception) {
-                        Log.e("KyberpipeSmsReceiver", "Ratchet encrypt failed: ${e.message}")
-                        null
-                    }
-                    if (tlv != null) {
-                        val payload = org.json.JSONObject().put("encrypted_ratchet", org.json.JSONObject()
-                            .put("tlv_b64", android.util.Base64.encodeToString(tlv, android.util.Base64.NO_WRAP))
-                        ).toString()
-                        SmsForwarder.enqueue(ctx, payload)
-                    }
+                    SmsForwarder.enqueueEncryptAndSend(ctx, peer, jsonPacket.toByteArray())
                 }
             } catch (e: Exception) {
                 Log.e("KyberpipeSmsReceiver", "Failed to create SMS packet: ${e.message}")
@@ -218,46 +215,87 @@ object SmsForwarder {
             Log.d(TAG, "Dropping SMS: forward rate limit ($MAX_FORWARDS_PER_MINUTE/min) exceeded (audit finding #14)")
             return
         }
+        executor.execute { sendWithRetry(context, payload) }
+    }
+
+    /// AUDIT FINDING #12: ratchet-encrypt + forward entirely on the background
+    /// worker. The caller (an SMS broadcast receiver, main thread) must NEVER
+    /// run `ratchetEncryptMessageBinary` — at a rekey boundary it performs an
+    /// ML-KEM encapsulate inside the session Mutex (tens of ms of CPU) and the
+    /// receiver has a ~10s ANR budget. The single-threaded executor also
+    /// serializes the encrypt against the poll engine's own native calls,
+    /// eliminating session-Mutex contention between poll/SMS/media.
+    fun enqueueEncryptAndSend(
+        context: android.content.Context,
+        peer: String,
+        plaintext: ByteArray,
+    ) {
+        if (desktopRecentlyFailed()) {
+            Log.d(TAG, "Dropping SMS: desktop recently unreachable (audit finding #7)")
+            return
+        }
+        if (!allowForward()) {
+            Log.d(TAG, "Dropping SMS: forward rate limit ($MAX_FORWARDS_PER_MINUTE/min) exceeded (audit finding #14)")
+            return
+        }
         executor.execute {
-            // At most 2 attempts per task (audit finding #7): initial send +
-            // one retry after 1s. No unbounded blocking backoff — a stuck task
-            // must not pile up behind a dead desktop.
-            var attempt = 0
-            var forwarded = false
-            while (attempt < 2 && !forwarded) {
-                try {
-                    val settings = org.kyberpipe.client.utils.SettingsManager(context)
-                    val hostIp = settings.pairedHostIp
-                    if (hostIp.isNotEmpty()) {
-                        try {
-                            val ok = org.kyberpipe.client.PairingManager.connectWithIdentity(
-                                hostIp, 9876.toUShort(), settings.serverCertPin, context
-                            )
-                            if (!ok) {
-                                try {
-                                    uniffi.core_crypto.quicConnect(hostIp, 9876.toUShort(), settings.serverCertPin)
-                                } catch (_: Exception) {}
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    synchronized(lock) {
-                        uniffi.core_crypto.quicSendAndRecv(0x07.toUByte(), payload)
-                    }
-                    Log.i(TAG, "SMS forwarded via QUIC")
-                    forwarded = true
-                } catch (e: Exception) {
-                    Log.e(TAG, "SMS QUIC forward failed (attempt $attempt): ${e.message}")
-                    attempt++
-                    if (attempt >= 2) {
-                        lastFailureAt = System.currentTimeMillis()
-                        break
-                    }
+            val tlv = try {
+                uniffi.core_crypto.ratchetEncryptMessageBinary(peer, plaintext)
+            } catch (e: Exception) {
+                Log.e(TAG, "Ratchet encrypt failed on worker: ${e.message}")
+                return@execute
+            }
+            val payload = org.json.JSONObject()
+                .put("encrypted_ratchet", org.json.JSONObject()
+                    .put("tlv_b64", android.util.Base64.encodeToString(tlv, android.util.Base64.NO_WRAP))
+                )
+                .toString()
+            sendWithRetry(context, payload)
+        }
+    }
+
+    /// The shared bounded send loop (audit finding #7): at most 2 attempts per
+    /// task (initial + one retry after 1s). No unbounded blocking backoff — a
+    /// stuck task must not pile up behind a dead desktop.
+    private fun sendWithRetry(context: android.content.Context, payload: String) {
+        // At most 2 attempts per task (audit finding #7): initial send +
+        // one retry after 1s. No unbounded blocking backoff — a stuck task
+        // must not pile up behind a dead desktop.
+        var attempt = 0
+        var forwarded = false
+        while (attempt < 2 && !forwarded) {
+            try {
+                val settings = org.kyberpipe.client.utils.SettingsManager(context)
+                val hostIp = settings.pairedHostIp
+                if (hostIp.isNotEmpty()) {
                     try {
-                        Thread.sleep(1_000L)
-                    } catch (_: InterruptedException) {
-                        lastFailureAt = System.currentTimeMillis()
-                        break
-                    }
+                        val ok = org.kyberpipe.client.PairingManager.connectWithIdentity(
+                            hostIp, 9876.toUShort(), settings.serverCertPin, context
+                        )
+                        if (!ok) {
+                            try {
+                                uniffi.core_crypto.quicConnect(hostIp, 9876.toUShort(), settings.serverCertPin)
+                            } catch (_: Exception) {}
+                        }
+                    } catch (_: Exception) {}
+                }
+                synchronized(lock) {
+                    uniffi.core_crypto.quicSendAndRecv(0x07.toUByte(), payload)
+                }
+                Log.i(TAG, "SMS forwarded via QUIC")
+                forwarded = true
+            } catch (e: Exception) {
+                Log.e(TAG, "SMS QUIC forward failed (attempt $attempt): ${e.message}")
+                attempt++
+                if (attempt >= 2) {
+                    lastFailureAt = System.currentTimeMillis()
+                    break
+                }
+                try {
+                    Thread.sleep(1_000L)
+                } catch (_: InterruptedException) {
+                    lastFailureAt = System.currentTimeMillis()
+                    break
                 }
             }
         }

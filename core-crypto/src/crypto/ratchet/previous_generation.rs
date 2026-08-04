@@ -5,7 +5,7 @@
 //! live in their own file.
 
 use super::super::{decrypt_chacha20, KyberError};
-use super::resync::{advance_receiving_chain, prune_skip_keys};
+use super::resync::{advance_receiving_chain, prune_skip_keys, try_decrypt_with_cached_key};
 use crate::crypto::ratchet::state::DoubleRatchetState;
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -47,13 +47,21 @@ impl DoubleRatchetState {
         // the cache is the ONLY path that can deliver them. A key present here
         // means the message was never delivered (keys are removed at delivery),
         // so this cannot re-accept a replay.
-        if let Some(cached_key) = self
-            .skip_message_keys
-            .as_mut()
-            .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?
-            .remove(&(nonce_gen, seq))
-        {
-            let plaintext = decrypt_chacha20(&cached_key, nonce, ciphertext, aad)?;
+        if let Some(plaintext) = {
+            let store = self
+                .skip_message_keys
+                .as_mut()
+                .ok_or_else(|| KyberError::CryptoError("Skip key store already consumed".into()))?;
+            // AUDIT #5 (VERIFY-THEN-REMOVE): the shared helper consumes the
+            // cached key ONLY after AEAD verification. The legacy code removed
+            // the key BEFORE decrypting, so an on-path attacker who flipped one
+            // ciphertext bit of a captured legitimate frame and replayed it
+            // permanently burned the key — the genuine frame arriving later
+            // found no key and the retained chain cannot step below its anchor,
+            // a deterministic message-loss DoS on out-of-order deliveries
+            // straddling a rekey commit.
+            try_decrypt_with_cached_key(store, nonce_gen, seq, nonce, ciphertext, aad)?
+        } {
             self.replay_window.record_delivered(nonce_gen, seq);
             // Keep the delivery watermark in sync so a genuine duplicate that
             // somehow re-enters the cache can still be rejected downstream.
