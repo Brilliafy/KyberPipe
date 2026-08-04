@@ -16,7 +16,13 @@ data class PairingResult(
     val sasCode: String,
     val hostIp: String,
     val p2pIp: String,
-    val deviceName: String
+    val deviceName: String,
+    /// OUR client public halves (hex) needed by the UI to build the pairing
+    /// ciphertext payload + SAS. Public, so they cross the boundary freely
+    /// (audit #2 follow-up — added so the UI no longer re-derives them, keeping
+    /// the handshake in ONE place).
+    val clientMlkemPkHex: String,
+    val clientX25519PkHex: String,
 )
 
 private fun hexDecode(hex: String): ByteArray {
@@ -197,7 +203,9 @@ object PairingManager {
             sasCode = computedSas,
             hostIp = hostIp,
             p2pIp = p2pIp,
-            deviceName = deviceName
+            deviceName = deviceName,
+            clientMlkemPkHex = clientPublic.mlkemPkHex,
+            clientX25519PkHex = clientPublic.x25519PkHex
         )
     }
 

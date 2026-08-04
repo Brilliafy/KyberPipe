@@ -76,9 +76,9 @@ mod registry_tests {
             true,
             Some((
                 alice_pair.x25519_pk.to_vec(),
-                alice_pair.x25519_sk.to_vec(),
+                zeroize::Zeroizing::new(alice_pair.x25519_sk.to_vec()),
                 alice_pair.mlkem_pk.clone(),
-                alice_pair.mlkem_sk.clone(),
+                zeroize::Zeroizing::new(alice_pair.mlkem_sk.clone()),
             )),
             Some(&bob_pair.x25519_pk),
             Some(&bob_pair.mlkem_pk),
@@ -90,9 +90,9 @@ mod registry_tests {
             false,
             Some((
                 bob_pair.x25519_pk.to_vec(),
-                bob_pair.x25519_sk.to_vec(),
+                zeroize::Zeroizing::new(bob_pair.x25519_sk.to_vec()),
                 bob_pair.mlkem_pk.clone(),
-                bob_pair.mlkem_sk.clone(),
+                zeroize::Zeroizing::new(bob_pair.mlkem_sk.clone()),
             )),
             Some(&alice_pair.x25519_pk),
             Some(&alice_pair.mlkem_pk),
@@ -267,9 +267,9 @@ mod registry_tests {
         let pair = generate_hybrid_keypair();
         let our_keypair = Some((
             pair.x25519_pk.to_vec(),
-            pair.x25519_sk.to_vec(),
+            zeroize::Zeroizing::new(pair.x25519_sk.to_vec()),
             pair.mlkem_pk.clone(),
-            pair.mlkem_sk.clone(),
+            zeroize::Zeroizing::new(pair.mlkem_sk.clone()),
         ));
         let tag = format!("lock{}", std::process::id());
 
@@ -561,9 +561,9 @@ mod registry_tests {
             true,
             Some((
                 pair.x25519_pk.to_vec(),
-                pair.x25519_sk.to_vec(),
+                zeroize::Zeroizing::new(pair.x25519_sk.to_vec()),
                 pair.mlkem_pk.clone(),
-                pair.mlkem_sk.clone(),
+                zeroize::Zeroizing::new(pair.mlkem_sk.clone()),
             )),
             None,
             None,
@@ -612,6 +612,59 @@ mod registry_tests {
                 probe.root_key
             },
             "the re-paired session's root key must NOT revert to the old pairing's key material"
+        );
+    }
+
+    /// AUDIT #2 (follow-up, HIGH): the import guard must be SEND-CHAIN-AWARE.
+    /// The legacy guard compared only (ratchet_generation, recv_message_count),
+    /// so a live session that had sent MORE than the snapshot contained was
+    /// judged "not ahead" and the import rolled the SEND chain back — the
+    /// derived message keys and (generation, seq) nonces would then be reused
+    /// for NEW plaintext (the exact IV-reuse class the nonce redesign
+    /// eliminates elsewhere). This test drives the failure scenario: identical
+    /// epoch, generation and recv count, but live send > snapshot send.
+    #[test]
+    fn send_chain_rollback_import_is_refused() {
+        let (alice, _bob) = alice_bob_registry("sendwm");
+        // Alice sends 2 messages, then the snapshot is taken (send = 2, recv = 0).
+        for _ in 0..2 {
+            let _ = ratchet_encrypt_message_impl(&alice, b"a").expect("encrypt");
+        }
+        let snap = ratchet_export_session_impl(&alice)
+            .expect("export")
+            .expect("session exists");
+        // The live session keeps SENDING (3 more messages — the phone sent
+        // seq 0..=4 while the snapshot on disk is from seq 2).
+        for _ in 0..3 {
+            let _ = ratchet_encrypt_message_impl(&alice, b"b").expect("encrypt");
+        }
+
+        // Preconditions: identical epoch/gen/recv, live send strictly ahead.
+        let wm_live = ratchet_session_watermark_impl(&alice)
+            .expect("live wm")
+            .expect("some");
+        let wm_snap = ratchet_snapshot_watermark_impl(&snap)
+            .expect("snap wm")
+            .expect("some");
+        assert_eq!(wm_live.pairing_epoch, wm_snap.pairing_epoch);
+        assert_eq!(wm_live.ratchet_generation, wm_snap.ratchet_generation);
+        assert_eq!(wm_live.recv_message_count, wm_snap.recv_message_count);
+        assert!(
+            wm_live.send_message_count > wm_snap.send_message_count,
+            "precondition: the live send chain is ahead of the snapshot"
+        );
+        assert!(
+            wm_live.is_ahead_of(&wm_snap),
+            "the 4-tuple watermark must capture the send-chain lead"
+        );
+
+        // The old guard (gen, recv) would have allowed this import. It must be
+        // REFUSED now — the live send chain must not roll back to 2.
+        ratchet_import_session_impl(&alice, &snap).expect("import call");
+        assert_eq!(
+            ratchet_send_count_impl(&alice).expect("send count"),
+            wm_live.send_message_count,
+            "send-chain rollback must be refused: the live send count must stay ahead"
         );
     }
 }

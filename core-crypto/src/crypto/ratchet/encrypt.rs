@@ -2,7 +2,8 @@ use super::super::{
     encapsulate_hybrid, encrypt_chacha20, generate_hybrid_keypair, generate_nonce_from_seq,
     KyberError,
 };
-use super::state::{build_rekey_aad, now_unix_secs, DoubleRatchetState, RekeyCarrier};
+use super::policy::{REKEY_RETRY_TTL_SECS, now_unix_secs};
+use super::state::{build_rekey_aad, DoubleRatchetState, RekeyCarrier};
 use super::tlv::RatchetEncryptedMessage;
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -10,8 +11,10 @@ use sha2::Sha256;
 /// How long an unacknowledged outgoing rekey proposal may sit before the
 /// carrier is RE-SENT (attached to a later message). An unacknowledged
 /// proposal is never committed — committing key material the peer has not
-/// confirmed permanently desyncs the session (audit finding #1).
-const REKEY_RETRY_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// confirmed permanently desyncs the session (audit finding #1). The value
+/// lives in `policy.rs` (structural decomposition) — this is the sole tuning
+/// knob for the retry TTL.
+const REKEY_RETRY_TTL: std::time::Duration = std::time::Duration::from_secs(REKEY_RETRY_TTL_SECS);
 
 impl DoubleRatchetState {
     /// Advance sending symmetric chain key and encrypt plaintext payload.

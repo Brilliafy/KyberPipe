@@ -128,18 +128,21 @@ pub fn ratchet_init_session_with_keypair_handle_impl(
 ) -> Result<(), KyberError> {
     let pair = keypair_secret(keypair_handle)?;
     // The impl copies the secret halves into [u8;32] and a ZeroizeOnDrop
-    // HybridKeyPair. The transient clones below are `Zeroizing` buffers (audit
-    // F14) — they are wiped on drop even on the error path, so no explicit
-    // zeroize-and-drop dance is required.
+    // HybridKeyPair. AUDIT #2 (follow-up): the private-half clones are passed
+    // through as `Zeroizing<Vec<u8>>` (the `SecretKeypair` fields already are),
+    // so the transient buffers are wiped on drop — even on the error path. The
+    // former `(*pair.x25519_sk).clone()` deref'd the Zeroizing wrapper down to a
+    // PLAIN `Vec<u8>`, which contradicted the F14 guarantee and left raw X25519/
+    // ML-KEM secret bytes in freed heap.
     crate::ratchet_ffi::ratchet_init_session_with_keypair_impl(
         peer_identity,
         master_shared_secret,
         is_initiator,
         Some((
             pair.x25519_pk.clone(),
-            (*pair.x25519_sk).clone(),
+            pair.x25519_sk.clone(),
             pair.mlkem_pk.clone(),
-            (*pair.mlkem_sk).clone(),
+            pair.mlkem_sk.clone(),
         )),
         peer_x25519_pk,
         peer_mlkem_pk,

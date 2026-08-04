@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import org.kyberpipe.client.PairingManager
+import org.kyberpipe.client.utils.RatchetWatermarkStore
 import org.kyberpipe.client.utils.SettingsManager
 
 /**
@@ -54,6 +55,14 @@ object KyberPipePollEngine {
         val remoteClipboard: String?,
         val pendingMediaAction: Int?,
         val pairingConfirmed: Boolean,
+        /**
+         * True ONLY when the DESKTOP explicitly reported unpaired in a
+         * successful poll response — the one signal that may tear down
+         * pairing handles. Connectivity failures set this to false and carry
+         * the persisted `isPaired` instead (audit #1 follow-up), so a
+         * transient network blip can never un-pair the phone client-side.
+         */
+        val unpairSignal: Boolean = false,
     )
 
     private val _updates = MutableSharedFlow<PollUpdate>(extraBufferCapacity = 32)
@@ -67,6 +76,14 @@ object KyberPipePollEngine {
     /// AUDIT FINDING #20: the wire protocol (request build + response parse +
     /// update emission) lives in the extracted [PollTransport] class. The
     /// engine owns ONLY the loop, reconnect gating and persistence.
+    ///
+    /// AUDIT #1 (follow-up): there is exactly ONE update flow, owned by the
+    /// engine. The transport is injected the engine's `_updates` and emits
+    /// into it — the transport no longer creates its own orphaned flow that
+    /// the UI never subscribes to. The transport is stateless w.r.t. delivery,
+    /// so it is kept across engine restarts to give subscribers a stable
+    /// identity (it re-reads SettingsManager's SharedPreferences on every
+    /// call, so the instance never goes stale).
     private var transport: PollTransport? = null
 
     /// Timestamp of the last SUCCESSFUL connectWithIdentity. Combined with
@@ -108,13 +125,18 @@ object KyberPipePollEngine {
         if (loopJob?.isActive == true) return
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         loopScope = scope
-        currentSettings = SettingsManager(context.applicationContext)
-        // AUDIT FINDING #20: instantiate the extracted wire protocol once per
-        // loop start; it re-reads SettingsManager on each poll.
+        val appCtx = context.applicationContext
+        currentSettings = SettingsManager(appCtx)
+        // AUDIT FINDING #20: instantiate the extracted wire protocol. AUDIT #1
+        // (follow-up): created ONCE and kept across restarts — the transport
+        // emits into the engine-owned `_updates` flow and re-reads
+        // SettingsManager's backing SharedPreferences on every call, so a
+        // restart never orphans buffered updates nor mints a new flow.
         if (transport == null) {
             transport = PollTransport(
-                context.applicationContext,
-                currentSettings!!,
+                context = appCtx,
+                settings = currentSettings!!,
+                updates = _updates,
                 requestSync = { needSync = true },
             )
         }
@@ -131,16 +153,25 @@ object KyberPipePollEngine {
                     // DISCONNECTED update so the UI reflects reality instead of
                     // staying green. The Rust side tears down the wedged QUIC
                     // connection on timeout, so the next poll reconnects.
+                    //
+                    // AUDIT #1 (follow-up): connectivity failure is NOT an
+                    // unpair signal. The DISCONNECTED update carries the
+                    // CURRENT persisted pairing state so the UI renders the
+                    // outage without MainScreen destroying the pairing handles
+                    // on a transient network blip. The only path that flips
+                    // `isPaired` to false is the desktop explicitly reporting
+                    // `is_paired: false` in a successful poll response.
                     _updates.tryEmit(
                         PollUpdate(
                             connected = false,
                             status = "DISCONNECTED",
                             method = "None",
                             color = "red",
-                            isPaired = false,
+                            isPaired = currentSettings?.isPaired ?: false,
                             remoteClipboard = null,
                             pendingMediaAction = null,
                             pairingConfirmed = false,
+                            unpairSignal = false,
                         )
                     )
                     delay(backoffMs)
@@ -161,7 +192,9 @@ object KyberPipePollEngine {
         loopScope?.cancel()
         loopScope = null
         currentSettings = null
-        transport = null
+        // AUDIT #1 (follow-up): keep the transport across restarts — it emits
+        // into the engine-owned flow and never caches settings, so resetting it
+        // would only churn the instance identity for no benefit.
     }
 
     @Synchronized
@@ -222,14 +255,13 @@ object KyberPipePollEngine {
 
                 // ── Build the poll REQUEST body ────────────────────────────
                 // AUDIT FINDING #16: request a sync when a gap was detected OR
-                // on the slow heartbeat; the flag is cleared once the request
-                // is built so the next poll is quiet again.
+                // on the slow heartbeat; the flag is cleared only AFTER the
+                // request round-trips (AUDIT #12 follow-up): clearing it before
+                // the send meant a session-momentarily-absent throw or a
+                // rejected/rate-limited sync silently dropped the recovery
+                // request until the next heartbeat.
                 pollsSinceSyncRequest++
                 val wantSync = needSync || pollsSinceSyncRequest >= SYNC_HEARTBEAT_EVERY
-                if (wantSync) {
-                    pollsSinceSyncRequest = 0
-                }
-                needSync = false
                 // AUDIT FINDING #20: the wire protocol lives in the extracted
                 // [PollTransport]; the engine owns only the loop.
                 val transport = this.transport ?: return@withLock
@@ -252,6 +284,15 @@ object KyberPipePollEngine {
                         uniffi.core_crypto.ratchetConsumeRekeyAck(peer)
                     } catch (_: Exception) {}
                 }
+                // AUDIT #12 (follow-up): the round-trip succeeded — the sync
+                // request (and any peeked RekeyAck) reached the desktop. Only
+                // now is `needSync` cleared so a lost/rejected request is
+                // retried on the next poll; the heartbeat counter is reset so
+                // the next natural sync stays 75s away.
+                if (wantSync) {
+                    pollsSinceSyncRequest = 0
+                    needSync = false
+                }
 
                 val json = try { JSONObject(resp) } catch (_: Exception) { null }
                 if (json != null) {
@@ -272,6 +313,13 @@ object KyberPipePollEngine {
                         )
                         if (wrapped != null) {
                             PipeService.persistWrappedSnapshot(settings, wrapped.nonce, wrapped.ciphertext)
+                        }
+                        // AUDIT #2 (follow-up): advance the monotonic rollback
+                        // watermark AFTER a successful export so a later cold-start
+                        // restore refuses a rolled-back snapshot (device backup /
+                        // same-user tamper) exactly like the desktop store does.
+                        uniffi.core_crypto.ratchetSessionWatermark(peer)?.let { wm ->
+                            RatchetWatermarkStore.update(settings, peer, wm)
                         }
                     } catch (e: Exception) {
                         Log.d(TAG, "Snapshot persist skipped: ${e.message}")

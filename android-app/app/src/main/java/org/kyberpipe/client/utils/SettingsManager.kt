@@ -81,6 +81,18 @@ class SettingsManager(context: Context) {
         get() = securePrefs.getString("ratchet_snapshot_key", "") ?: ""
         set(value) = securePrefs.edit().putString("ratchet_snapshot_key", value).apply()
 
+    /// Monotonic ratchet rollback high-water mark, one entry per peer
+    /// (audit #2 follow-up). JSON shape: `{ "<peer>": [epoch, gen, send, recv] }`
+    /// mirroring the core-crypto `RatchetWatermark` record. Kept in
+    /// EncryptedSharedPreferences (Android Keystore-backed) so a same-user
+    /// process that restores an OLD wrapped snapshot blob cannot regress it —
+    /// the restore path refuses any snapshot whose watermark is strictly below
+    /// this recorded value (the same monotonic bound the desktop store enforces
+    /// with its keyring watermark). Only ever moves forward.
+    var ratchetWatermarkJson: String
+        get() = securePrefs.getString("ratchet_watermark_json", "") ?: ""
+        set(value) = securePrefs.edit().putString("ratchet_watermark_json", value).apply()
+
     /// Per-install client identity certificate (DER, base64) generated at
     /// pairing time. Presented on every post-pairing QUIC connection so the
     /// desktop authorizes this device by certificate hash — never by IP

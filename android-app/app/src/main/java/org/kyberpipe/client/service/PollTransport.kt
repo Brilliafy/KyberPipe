@@ -6,8 +6,6 @@ import android.util.Log
 import org.json.JSONObject
 import org.kyberpipe.client.utils.SettingsManager
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 
 /**
  * Poll WIRE PROTOCOL (audit finding #20 — extracted from the former
@@ -19,25 +17,29 @@ import kotlinx.coroutines.flow.asSharedFlow
  *  - `processResponse`: the poll RESPONSE parse (pairing two-phase commit,
  *    clipboard decrypt, RekeyAck/Synchronize consumers, ordered by the
  *    desktop's `manifest` — audit finding #18),
- *  - `updates`: the single `SharedFlow` the UI subscribes to.
+ *  - `emit`: forwards poll results into the ENGINE-OWNED update flow.
  *
  * It is a plain class (not a singleton) so the transport is unit-testable and
  * the engine owns only the loop. All ratchet FFI calls remain rekey-aware in
  * Rust; this layer only marshals TLVs.
+ *
+ * AUDIT #1 (follow-up): there is exactly ONE update flow, owned by
+ * [KyberPipePollEngine]. It is injected here as `updates` instead of the
+ * transport creating its own private flow — the extraction (finding #20)
+ * previously left the success-path emissions on an orphaned SharedFlow that
+ * the UI never subscribed to.
  */
 class PollTransport(
     private val context: Context,
     private val settings: SettingsManager,
+    private val updates: MutableSharedFlow<KyberPipePollEngine.PollUpdate>,
     private val requestSync: () -> Unit,
 ) {
     private val TAG = "PollTransport"
 
-    private val _updates = MutableSharedFlow<KyberPipePollEngine.PollUpdate>(extraBufferCapacity = 32)
-    val updates: SharedFlow<KyberPipePollEngine.PollUpdate> = _updates.asSharedFlow()
-
-    /** Emit a poll result to the UI. */
+    /** Emit a poll result to the UI (forwards to the engine-owned flow). */
     fun emit(update: KyberPipePollEngine.PollUpdate) {
-        _updates.tryEmit(update)
+        updates.tryEmit(update)
     }
 
     /**
@@ -114,9 +116,16 @@ class PollTransport(
                 Log.w(TAG, "Desktop rejected pairing — not confirmed")
             }
         }
+        // AUDIT #1 (follow-up): `unpairSignal` is set ONLY when the desktop
+        // explicitly reports unpaired in this response — it is the single
+        // signal the UI may use to tear down pairing handles. Transport-level
+        // failures never reach this branch (they surface as DISCONNECTED
+        // updates carrying the persisted isPaired state instead).
+        var unpairSignal = false
         if (!json.optBoolean("is_paired", true)) {
             settings.isPaired = false
             settings.pairedDeviceName = ""
+            unpairSignal = true
         }
 
         val status = json.optString("connection_status", "ACTIVE")
@@ -192,6 +201,7 @@ class PollTransport(
                 remoteClipboard = remoteClipboard,
                 pendingMediaAction = pendingMediaAction,
                 pairingConfirmed = pairingConfirmed,
+                unpairSignal = unpairSignal,
             )
         )
     }

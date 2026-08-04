@@ -875,6 +875,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1024,6 +1028,10 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_core_crypto_fn_func_ratchet_send_count(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    fun uniffi_core_crypto_fn_func_ratchet_session_watermark(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_snapshot_watermark(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_ratchet_synchronize_packet(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_ratchet_synchronize_packet_binary(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1300,6 +1308,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_send_count(
     ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_session_watermark(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_snapshot_watermark(
+    ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_synchronize_packet(
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_synchronize_packet_binary(
@@ -1546,6 +1558,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_ratchet_send_count() != 16757.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_session_watermark() != 58900.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_snapshot_watermark() != 42699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_ratchet_synchronize_packet() != 44601.toShort()) {
@@ -2262,6 +2280,59 @@ public object FfiConverterTypeRatchetEncryptedMessage: FfiConverterRustBuffer<Ra
 
 
 
+/**
+ * Full rollback watermark of a ratchet session (audit finding #2 follow-up).
+ * `(pairing_epoch, ratchet_generation, send_message_count,
+ * recv_message_count)` — lexicographically comparable. The send chain is
+ * exactly as stateful as the recv chain (chain key + counter advance on every
+ * `ratchet_encrypt`), so a live session that has sent MORE than a snapshot
+ * contains must never be replaced by it: the send chain would roll back and
+ * the derived message keys + (generation, seq) nonces would be reused for NEW
+ * plaintext — the exact IV-reuse class the nonce-generation redesign
+ * eliminates elsewhere. This record is the SINGLE watermark representation
+ * shared by the UniFFI import guard, the UniFFI export surface and the store
+ * restore paths, so the comparisons cannot drift.
+ */
+data class RatchetWatermark (
+    var `pairingEpoch`: kotlin.ULong, 
+    var `ratchetGeneration`: kotlin.UInt, 
+    var `sendMessageCount`: kotlin.ULong, 
+    var `recvMessageCount`: kotlin.ULong
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRatchetWatermark: FfiConverterRustBuffer<RatchetWatermark> {
+    override fun read(buf: ByteBuffer): RatchetWatermark {
+        return RatchetWatermark(
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RatchetWatermark) = (
+            FfiConverterULong.allocationSize(value.`pairingEpoch`) +
+            FfiConverterUInt.allocationSize(value.`ratchetGeneration`) +
+            FfiConverterULong.allocationSize(value.`sendMessageCount`) +
+            FfiConverterULong.allocationSize(value.`recvMessageCount`)
+    )
+
+    override fun write(value: RatchetWatermark, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`pairingEpoch`, buf)
+            FfiConverterUInt.write(value.`ratchetGeneration`, buf)
+            FfiConverterULong.write(value.`sendMessageCount`, buf)
+            FfiConverterULong.write(value.`recvMessageCount`, buf)
+    }
+}
+
+
+
 
 
 sealed class KyberException: kotlin.Exception() {
@@ -2669,6 +2740,38 @@ public object FfiConverterOptionalTypeRatchetEncryptedMessage: FfiConverterRustB
         } else {
             buf.put(1)
             FfiConverterTypeRatchetEncryptedMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeRatchetWatermark: FfiConverterRustBuffer<RatchetWatermark?> {
+    override fun read(buf: ByteBuffer): RatchetWatermark? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeRatchetWatermark.read(buf)
+    }
+
+    override fun allocationSize(value: RatchetWatermark?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeRatchetWatermark.allocationSize(value)
+        }
+    }
+
+    override fun write(value: RatchetWatermark?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeRatchetWatermark.write(value, buf)
         }
     }
 }
@@ -3598,6 +3701,42 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_send_count(
         FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Live-session rollback watermark (audit finding #2 follow-up):
+         * `(pairing_epoch, ratchet_generation, send_message_count,
+         * recv_message_count)`. The Android snapshot-persistence path records this as
+         * its monotonic high-water mark so a later restore can refuse a rolled-back
+         * snapshot exactly like the desktop store does. Returns None when no session
+         * exists for the peer.
+         */
+    @Throws(KyberException::class) fun `ratchetSessionWatermark`(`peerIdentity`: kotlin.String): RatchetWatermark? {
+            return FfiConverterOptionalTypeRatchetWatermark.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_session_watermark(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Parse the full 4-tuple rollback watermark out of a serialized ratchet
+         * snapshot (audit finding #2 follow-up). Used by the Android cold-start
+         * restore path (after unwrapping the snapshot) and by the desktop store's
+         * restore check — the field mapping lives in ONE registry function so no
+         * caller re-derives the watermark from a different set of fields. Returns
+         * None when the blob does not parse as a snapshot.
+         */
+    @Throws(KyberException::class) fun `ratchetSnapshotWatermark`(`data`: kotlin.ByteArray): RatchetWatermark? {
+            return FfiConverterOptionalTypeRatchetWatermark.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_snapshot_watermark(
+        FfiConverterByteArray.lower(`data`),_status)
 }
     )
     }

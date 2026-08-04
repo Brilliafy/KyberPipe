@@ -203,13 +203,16 @@ type Watermark = (u32, u64, u64);
 /// is AEAD-authenticated, so a watermark extracted from a validly-decrypted
 /// blob is authentic — an attacker cannot craft a snapshot with a forged
 /// watermark without the wrap key.
+///
+/// AUDIT #2 (follow-up): the field mapping is centralized in the core-crypto
+/// registry (`ratchet_snapshot_watermark`), so the desktop store and the
+/// UniFFI import guard read the same fields and cannot drift. The store keeps
+/// its 3-tuple high-water format (epoch is enforced separately by the registry
+/// import guard); the FULL 4-tuple watermark is what the registry exports.
 fn snapshot_watermark(snap: &[u8]) -> Option<Watermark> {
-    let v: serde_json::Value = serde_json::from_slice(snap).ok()?;
-    Some((
-        v.get("ratchet_generation")?.as_u64()? as u32,
-        v.get("send_message_count")?.as_u64()?,
-        v.get("recv_message_count")?.as_u64()?,
-    ))
+    core_crypto::ratchet_snapshot_watermark(snap.to_vec())
+        .ok()?
+        .map(|wm| (wm.ratchet_generation, wm.send_message_count, wm.recv_message_count))
 }
 
 /// Read the persisted per-peer watermarks (default empty).

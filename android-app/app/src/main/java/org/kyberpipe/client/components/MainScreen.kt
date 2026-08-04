@@ -200,10 +200,20 @@ fun MainScreen(
     val beaconListener = remember { MdnsBeaconListener(coroutineScope, context.applicationContext) }
     LaunchedEffect(Unit) {
         beaconListener.start { host: BeaconHost ->
-            addLog("[mDNS] Discovered ${host.deviceName} @ ${host.localIp}")
-            if (pairingConfigInput.isEmpty() && host.localIp.isNotEmpty()) {
+            // AUDIT #3: discovery beacons are UNAUTHENTICATED hints — the
+            // ML-DSA signature only proves the sender owns the key it embedded
+            // in the beacon, which any LAN host can mint. Never render a real
+            // device name, never auto-fill pairing, and never drive a network
+            // connection from a beacon. The only permitted use is refreshing
+            // the LAST-KNOWN-GOOD IP for an ALREADY-PAIRED host (the beacon IP
+            // is the source socket, and the pinned server cert hash — not the
+            // beacon — authenticates the QUIC connection). The Rust-side
+            // listener additionally refreshes the candidate address via
+            // quicNotePeerCandidateAddress for the pinned peer.
+            addLog("[mDNS] Discovered UNVERIFIED host @ ${host.localIp}")
+            if (settings.isPaired && settings.pairedHostIp.isEmpty() && host.localIp.isNotEmpty()) {
                 settings.pairedHostIp = host.localIp
-                p2pManager.findAndConnect(host.hostPkHex)
+                addLog("[mDNS] Updated paired host IP from beacon hint: ${host.localIp}")
             }
         }
     }
@@ -492,15 +502,27 @@ fun MainScreen(
                 pairingPendingStartedAt = 0L
                 addLog("[Pairing] Desktop confirmed SAS — pairing committed")
             }
-            if (!update.isPaired) {
+            if (update.unpairSignal) {
+                // Audit finding F7 + AUDIT #1 follow-up: the HOST explicitly
+                // unpaired us (reported `is_paired: false` in a successful poll
+                // response) — release every Rust-side pairing handle (keypair,
+                // KEM shared secret, session key). This is the ONLY path that
+                // destroys pairing handles: transient connectivity failures
+                // carry `unpairSignal = false` and the persisted isPaired, so a
+                // single network blip can never un-pair the phone client-side.
                 settings.isPaired = false
                 settings.pairedDeviceName = ""
-                // Audit finding F7: the host unpaired us — release every Rust-side
-                // pairing handle (keypair, KEM shared secret, session key).
                 org.kyberpipe.client.PairingManager.destroyPairingHandles(context)
                 keyPairHandle = null
                 pendingKemHandleId = null
                 connectionStatus = "DISCONNECTED (Host unpaired)"
+                connectionMethod = "None"
+                connectionColor = Color.Red
+            } else if (!update.isPaired) {
+                // Not paired and no explicit unpair signal (first run, or a
+                // connectivity failure while already unpaired): reflect the UI
+                // state without touching pairing handles.
+                connectionStatus = "DISCONNECTED (Not paired)"
                 connectionMethod = "None"
                 connectionColor = Color.Red
             }
@@ -582,51 +604,28 @@ fun MainScreen(
                     }
                 }
             }
-            // Audit finding F7: the KEM shared secret stays in Rust behind the
-            // handle returned by encapsulatePqSecretHandle. Only the public
-            // halves of OUR keypair (for the payload/SAS) and the peer's public
-            // halves cross the boundary — never raw secret bytes.
-            val handle = keyPairHandle
-            if (handle == null) {
+            // AUDIT #2 (follow-up — structural de-duplication): the crypto core —
+            // KEM encapsulate on the opaque keypair handle, SAS derivation,
+            // ratchet init (WITH the cross-epoch re-pair guard) and peer
+            // settings — is delegated to the SINGLE canonical implementation in
+            // PairingManager. The UI previously re-implemented this inline and
+            // DIVERGED: it missed `ratchetBumpPairingEpoch`, so a QR-path re-pair
+            // left the fresh session at epoch 0 while a stale pre-re-pair snapshot
+            // on disk sat at epoch 0 too — a later MainActivity recreation could
+            // import the old snapshot over the fresh one (the finding-#2
+            // rollback). Delegating removes the duplication AND closes that gap.
+            val result = org.kyberpipe.client.PairingManager.performKemHandshake(
+                json, keyPairHandle, context
+            ) ?: run {
                 addLog("[Pairing] Aborted: no keypair handle — regenerate the keypair and retry")
                 return@handshake
             }
-            val clientPublic = uniffi.core_crypto.getPqKeypairPublic(handle)
-            val clientMlkemPkHex = clientPublic.mlkemPkHex
-            val clientX25519PkHex = clientPublic.x25519PkHex
-            val kemResponse = uniffi.core_crypto.encapsulatePqSecretHandle(
-                wireguardPkHex.hexToByteArray(),
-                hostPkHex.hexToByteArray()
-            )
-            val computedSas = uniffi.core_crypto.generateSasCodeWithKemHandle(
-                hostPkHex.hexToByteArray(),
-                clientMlkemPkHex.hexToByteArray(),
-                kemResponse.handle
-            )
-            sasCodeDisplay = computedSas
-            pendingKemHandleId = kemResponse.handle
-            kemCiphertext = kemResponse.ciphertext.toHex()
-
-            // Initialize the ratchet session NOW (single handshake path), keyed by
-            // the host PK fingerprint — the same identity every later decrypt uses.
-            // ratchetInitSessionFromKemHandle derives everything from the KEM
-            // handle — no raw sharedSecret bytes (audit finding F7).
-            val peerIdentity = hostPkHex
-            try {
-                uniffi.core_crypto.ratchetRemoveSession(peerIdentity)
-                uniffi.core_crypto.ratchetInitSessionFromKemHandle(
-                    peerIdentity,
-                    false, // Android is not the initiator
-                    handle,
-                    kemResponse.handle,
-                    wireguardPkHex.hexToByteArray(),
-                    hostPkHex.hexToByteArray()
-                )
-                settings.peerRatchetIdentity = peerIdentity
-                addLog("[Pairing] Ratchet session initialized (peer=$peerIdentity)")
-            } catch (e: Exception) {
-                addLog("[Pairing] Ratchet init failed: ${e.message}")
-            }
+            sasCodeDisplay = result.sasCode
+            pendingKemHandleId = result.kemHandleId
+            kemCiphertext = result.kemCiphertext
+            val clientMlkemPkHex = result.clientMlkemPkHex
+            val clientX25519PkHex = result.clientX25519PkHex
+            val peerIdentity = result.hostPkHex
 
             // Do NOT set isPaired yet — the host must first receive
             // the ciphertext and derive its own session key.
@@ -685,7 +684,7 @@ fun MainScreen(
             if (hostAccepted) {
                 tempPcName = "Linux Desktop workstation"
                 showFirstConnectModal = true
-                addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $computedSas")
+                addLog("[Pairing] Successfully verified host identity ($tempHostIp). SAS Code: $result.sasCode")
             }
         } else {
             addLog("[Pairing] Invalid QR: missing PQC public keys")

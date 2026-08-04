@@ -32,6 +32,7 @@ pub use records::*;
 pub use runtime::*;
 
 use error::KyberError;
+use ratchet_ffi::RatchetWatermark;
 
 uniffi::setup_scaffolding!();
 
@@ -90,7 +91,12 @@ pub fn ratchet_init_session_with_keypair(
         &peer_identity,
         &master_shared_secret,
         is_initiator,
-        Some((our_x25519_pk, our_x25519_sk, our_mlkem_pk, our_mlkem_sk)),
+        Some((
+            our_x25519_pk,
+            zeroize::Zeroizing::new(our_x25519_sk),
+            our_mlkem_pk,
+            zeroize::Zeroizing::new(our_mlkem_sk),
+        )),
         x25519,
         mlkem,
     )?;
@@ -121,6 +127,30 @@ pub fn ratchet_bump_pairing_epoch(peer_identity: String) -> Option<u64> {
 pub fn ratchet_peer_ids() -> Vec<String> {
     ensure_panic_hook_installed();
     ratchet_ffi::ratchet_peer_ids_impl()
+}
+
+/// Live-session rollback watermark (audit finding #2 follow-up):
+/// `(pairing_epoch, ratchet_generation, send_message_count,
+/// recv_message_count)`. The Android snapshot-persistence path records this as
+/// its monotonic high-water mark so a later restore can refuse a rolled-back
+/// snapshot exactly like the desktop store does. Returns None when no session
+/// exists for the peer.
+#[uniffi::export]
+pub fn ratchet_session_watermark(peer_identity: String) -> Result<Option<RatchetWatermark>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_session_watermark_impl(&peer_identity)
+}
+
+/// Parse the full 4-tuple rollback watermark out of a serialized ratchet
+/// snapshot (audit finding #2 follow-up). Used by the Android cold-start
+/// restore path (after unwrapping the snapshot) and by the desktop store's
+/// restore check — the field mapping lives in ONE registry function so no
+/// caller re-derives the watermark from a different set of fields. Returns
+/// None when the blob does not parse as a snapshot.
+#[uniffi::export]
+pub fn ratchet_snapshot_watermark(data: Vec<u8>) -> Result<Option<RatchetWatermark>, KyberError> {
+    ensure_panic_hook_installed();
+    ratchet_ffi::ratchet_snapshot_watermark_impl(&data)
 }
 #[uniffi::export]
 pub fn ratchet_encrypt_message(
