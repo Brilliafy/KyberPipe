@@ -48,8 +48,8 @@ fun bindToWifiNetwork(connectivityManager: ConnectivityManager) {
     }
 }
 
-fun sendPostRequestAsync(urlStr: String, jsonBody: String) {
-    CoroutineScope(Dispatchers.IO).launch {
+fun sendPostRequestAsync(scope: CoroutineScope, urlStr: String, jsonBody: String) {
+    scope.launch {
         var conn: HttpURLConnection? = null
         try {
             val url = URL(urlStr)

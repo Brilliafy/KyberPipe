@@ -1,69 +1,330 @@
 use crate::state::AppState;
 use crate::state::SecureString;
 use core_crypto::generate_pq_keypair;
+use hex;
 use tauri::State;
+
+/// Keyring service name used for all KyberPipe secrets.
+const KEYRING_SERVICE: &str = "kyberpipe";
+
+/// Store a secret (already hex-encoded by the caller) directly in the OS
+/// keychain/keyring. No double encryption: the OS keyring (Secret Service /
+/// Keychain / Credential Manager) already encrypts the stored blob at rest with
+/// its own key, so a second application-layer wrap key only creates a nonce-
+/// reuse hazard (fixed zero nonce) and a per-boot throwaway key that made every
+/// blob written before a restart permanently undecryptable.
+fn write_keyring_secret(key_name: &str, secret_hex: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, key_name)
+        .map_err(|e| format!("Keyring access failed: {e}"))?;
+    entry
+        .set_password(secret_hex)
+        .map_err(|e| format!("Failed to store secret in OS Secret Service: {e}"))
+}
+
+/// Read a secret previously stored by `write_keyring_secret`.
+#[allow(dead_code)] // keyring test helper / API surface
+fn read_keyring_secret(key_name: &str) -> Option<String> {
+    keyring::Entry::new(KEYRING_SERVICE, key_name)
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+}
 
 #[tauri::command]
 pub fn generate_keypair(
     state: State<'_, std::sync::Arc<AppState>>,
-) -> Result<core_crypto::PqKeyPair, String> {
+) -> Result<core_crypto::PqPairingPublic, String> {
+    // Generate the keypair; the FULL keypair (including secrets) stays in Rust
+    // state where the pairing handler can decapsulate. The webview receives ONLY
+    // the public keys needed to build pairing QR payloads — the private halves
+    // never enter the JS heap.
     let pair = generate_pq_keypair().map_err(|e| e.to_string())?;
-    if let Ok(mut lock) = state.keypair.lock() {
-        *lock = Some(pair.clone());
-    }
-    state.add_log("[PQC] Generated Hybrid Keypair (X25519 + ML-KEM-768)".to_string());
-    Ok(pair)
+    state.set_keypair(Some(pair.clone()));
+    // Audit KYP-2026-02 #6: persist the pairing keypair in the OS keyring so it
+    // is NOT regenerated on every app mount (which rotated the identity the
+    // phone pins and invalidated in-flight pairing QRs on restart).
+    crate::ratchet_store::store_pairing_keypair_to_keyring(&pair);
+    state.add_log(
+        "[PQC] Generated Hybrid Keypair (X25519 + ML-KEM-768) — persisted in OS keyring"
+            .to_string(),
+    );
+    Ok(core_crypto::PqPairingPublic::from(&pair))
 }
 
 #[allow(dead_code)]
-#[tauri::command]
-pub fn confirm_pairing_sas(
+/// Core SAS-confirmation logic, extracted from the Tauri command so the
+/// pairing flow can be driven end-to-end by integration tests without a
+/// Tauri `State` handle.
+pub async fn perform_sas_confirmation(
+    state: &std::sync::Arc<AppState>,
     verified_sas: String,
     paired_name: String,
-    state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
-    let mut count = state.sas_attempt_count.lock().unwrap();
-    if *count >= 3 {
-        *state.pending_session_key.lock().unwrap() = SecureString::new(String::new());
-        state.sas_code.lock().unwrap().clear();
+    // Use atomic accessor to check and increment attempt count
+    let count = state.get_sas_attempt_count();
+    if count >= 3 {
+        state.clear_all_pairing();
         return Err("Too many SAS attempts. Re-initiate pairing.".into());
     }
-    *count += 1;
-    drop(count);
+    state.increment_sas_attempt_count();
 
-    let (stored_sas, pending_key) = {
-        let sas_lock = state.sas_code.lock().unwrap();
-        let pend_lock = state.pending_session_key.lock().unwrap();
-        (sas_lock.clone(), pend_lock.to_string())
-    };
+    // Atomically read both sas_code and pending_session_key in one critical section.
+    // AUDIT #2 (follow-up): the pending session key is held in a `Zeroizing`
+    // wrapper so the heap String (and the decoded byte vector below) is wiped on
+    // drop — the legacy plain String/`Vec<u8>` materialization left session-key
+    // bytes lingering in GC/heap memory during every SAS confirmation.
+    let (stored_sas, pending_key) = state.get_pairing_read();
+    let pending_key = zeroize::Zeroizing::new(pending_key);
 
     if stored_sas.is_empty() {
         return Err("No pending pairing SAS code found. Initiate pairing first.".into());
     }
-    if stored_sas != verified_sas {
+    // AUDIT (LOW): constant-time SAS comparison — no early exit on a prefix
+    // mismatch, so a future machine-authenticated SAS channel gains no timing
+    // oracle. (The human-typed single-shot path is negligible, but this is
+    // cheap and removes the class outright.)
+    if !constant_time_str_eq(&stored_sas, &verified_sas) {
         return Err("SAS code mismatch. Pairing rejected.".into());
     }
     if pending_key.is_empty() {
         return Err("No pending session key. Initiate pairing first.".into());
     }
 
-    *state.session_key.lock().unwrap() = SecureString::new(pending_key);
-    *state.pending_session_key.lock().unwrap() = SecureString::new(String::new());
-    state.sas_code.lock().unwrap().clear();
+    state.set_pending_session_key(SecureString::new(String::new()));
+    // `to_string()` on the Zeroizing<String> derefs to a plain String clone
+    // which is immediately re-wrapped in a (drop-zeroizing) SecureString — the
+    // original Zeroizing buffer is wiped when it drops.
+    state.set_session_key(SecureString::new(pending_key.to_string()));
+    // Persist the session key in the OS keyring so ratchet snapshots can be
+    // encrypted/restored across restarts.
+    crate::ratchet_store::store_session_key_to_keyring(&pending_key);
+    let shared_secret_hex = state.get_pending_shared_secret().to_string();
+    if !shared_secret_hex.is_empty() {
+        let peer_id = state.get_pairing_initiator_pk();
+        if !peer_id.is_empty() {
+            if let Ok(shared_secret) = hex::decode(&shared_secret_hex) {
+                let peer_mlkem = hex::decode(state.get_pairing_initiator_pk()).unwrap_or_default();
+                let peer_x25519 =
+                    hex::decode(state.get_pairing_initiator_x25519_pk()).unwrap_or_default();
+                // Audit finding #1: the ratchet's initial DH identity must be OUR
+                // OWN pairing keypair (the public halves the phone encapsulated
+                // to). The private halves stay in Rust — never cross to the
+                // renderer. Using a fresh ratchet keypair here would guarantee a
+                // permanent desync at the first rekey boundary (seq 100).
+                //
+                // Audit KYP-2026-02 #2 (CRITICAL): a RE-PAIR must never silently
+                // keep the OLD ratchet session. `ratchet_init_session_with_keypair`
+                // rejects when a session already exists for this peer; the old
+                // code discarded that error with `let _ =`, leaving the stale
+                // session (old master secret, old keypair) live while the phone
+                // installed a fresh one — a guaranteed permanent desync that
+                // presents as "paired but nothing syncs". Mirror the Android
+                // flow: remove the existing session FIRST, then init, and
+                // PROPAGATE any error instead of swallowing it. There is no
+                // legacy fresh-keypair fallback: init without OUR pairing
+                // keypair would permanently desync at the first rekey boundary,
+                // so pairing fails loudly instead (audit KYP-2026-02 #18).
+                let mut our_pair = state.get_keypair().ok_or_else(|| {
+                    "No local pairing keypair registered — cannot initialize the ratchet session. \
+                     Generate a pairing keypair first, then re-pair."
+                        .to_string()
+                })?;
+                // Remove any pre-existing session for this peer so the fresh
+                // pairing key material is installed atomically. The Rust-INTERNAL
+                // impl is called directly (not the raw-secrets UniFFI export,
+                // which is cfg(test)-gated — audit KYP-2026-02 #25): this is a
+                // same-process crate call, never an FFI boundary, so no secret
+                // bytes are marshalled.
+                core_crypto::ratchet_remove_session(peer_id.clone());
+                core_crypto::ratchet_ffi::ratchet_init_session_with_keypair_impl(
+                    &peer_id,
+                    &shared_secret,
+                    true,
+                    Some((
+                        our_pair.x25519_pk.clone(),
+                        zeroize::Zeroizing::new(our_pair.x25519_sk.clone()),
+                        our_pair.mlkem_pk.clone(),
+                        zeroize::Zeroizing::new(our_pair.mlkem_sk.clone()),
+                    )),
+                    if peer_x25519.is_empty() {
+                        None
+                    } else {
+                        Some(peer_x25519.as_slice())
+                    },
+                    if peer_mlkem.is_empty() {
+                        None
+                    } else {
+                        Some(peer_mlkem.as_slice())
+                    },
+                )
+                .map_err(|e| {
+                    format!(
+                        "Failed to initialize ratchet session for peer {peer_id}: {e} — re-pair required"
+                    )
+                })?;
+                // Audit F14: the `get_keypair()` clone (and the transient secret
+                // halves it carried) must not linger in freed heap — the
+                // ratchet impl has copied what it needs into ZeroizeOnDrop
+                // storage; wipe the clone now.
+                use zeroize::Zeroize;
+                our_pair.zeroize();
+            }
+        }
+
+        // AUDIT #2 (follow-up): the decoded key bytes are also wrapped in
+        // `Zeroizing` so they are wiped after `session_key_create` regardless of
+        // whether it succeeds or errors.
+        let pending_sk = zeroize::Zeroizing::new(hex::decode(&pending_key).unwrap_or_default());
+        if !pending_sk.is_empty() {
+            // Audit finding #13: `session_key_create` can fail (duplicate key
+            // bytes, registry cap). `unwrap_or(0)` previously turned the failure
+            // into a LIVE handle 0 — every later session_key_* call then failed
+            // with "Invalid session key handle 0" and the session was silently
+            // broken. Handle the error explicitly instead: abort the SAS
+            // confirmation (the user can re-pair) rather than commit to a
+            // session that cannot encrypt.
+            let handle = match core_crypto::session_key_create(pending_sk.to_vec()) {
+                Ok(h) if h != 0 => h,
+                Ok(_) => {
+                    return Err(
+                        "Session key handle creation returned the reserved handle 0 — re-pair required"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to create session key handle: {e} — re-pair required"
+                    ));
+                }
+            };
+            // Audit finding #23: the master session key is used only at
+            // restore/startup (long-idle) and must NEVER be silently evicted by
+            // the LRU cap — pin it so per-poll churn cannot destroy it.
+            core_crypto::session_key_pin(handle);
+            crate::handlers::DESKTOP_SESSION_KEY_HANDLE
+                .store(handle, std::sync::atomic::Ordering::Release);
+        }
+    }
+    // Store pinned client cert hash and rebind server with mTLS BEFORE marking as paired
+    let cert_hash = state.get_pending_client_cert_hash();
+    if !cert_hash.is_empty() {
+        // Promote the pairing connection's identity to the trusted peer identity
+        // used to authorize post-pairing streams.
+        state.set_paired_client_cert_hash(cert_hash.clone());
+        // AUDIT F12: register the per-peer cert→ratchet-id mapping so this
+        // device's poll/clipboard/SMS/media streams route to ITS session, not
+        // the global pairing id (which a SECOND paired device would otherwise
+        // corrupt).
+        let peer_id = state.get_pairing_initiator_pk();
+        if !peer_id.is_empty() {
+            state.register_peer_cert_mapping(&peer_id, &cert_hash);
+        }
+        // AUDIT F1 FIX: persist the pairing identity NOW so a desktop restart
+        // can rebuild the mTLS allowlist + peer routing map (public data only:
+        // cert hashes + peer public keys). Without this, the allowlist and map
+        // were process-global/in-memory and every restart severed the data
+        // plane while `is_paired` stayed true.
+        state.persist_pairing_identity();
+        core_crypto::quic_app::set_pinned_client_cert(cert_hash.clone());
+        // AUDIT FINDING #4 (multi-device): registering the per-peer mapping
+        // must ALSO extend the TLS-layer allowlist so a SECOND paired device's
+        // certificate passes the TLS handshake (the single-pin verifier would
+        // otherwise reject it before the stream layer ever ran). Both layers
+        // now enforce the same set.
+        core_crypto::quic_app::register_allowed_client_cert(cert_hash.clone());
+        match core_crypto::quic_app::QuicAppManager::rebind_server(9876).await {
+            Ok(()) => {
+                tracing::info!("[Pairing] Server rebound with mTLS enforcement completed prior to pairing state promotion");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[Pairing] Server rebind failed: {e} — mTLS will take effect on next restart"
+                );
+            }
+        }
+    }
+    // Transition: SasPending → Confirmed (audit finding #24 — the single
+    // confirmation transition clears the pending handshake fields).
+    state.confirm_pairing();
     {
-        let mut settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = state.settings.lock();
         settings.is_paired = true;
         settings.paired_device_name = Some(paired_name);
     }
     state.save_settings();
+    crate::handlers::IS_SESSION_KEY_AUTHENTICATED.store(true, std::sync::atomic::Ordering::Release);
     state.set_connection_status("ACTIVE".to_string());
     state.set_connection_method("QUIC mTLS".to_string());
     state.set_connection_color("green".to_string());
-    state.add_log("[Pairing] SAS verified. Session key promoted. Fully paired.".to_string());
+    state.add_log(
+        "[Pairing] SAS verified. Server rebound with mTLS. Session key promoted. Fully paired."
+            .to_string(),
+    );
 
-    *state.sas_attempt_count.lock().unwrap() = 0;
+    state.reset_sas_attempt_count();
+
+    // Push the completion event so the webview can reconcile without polling
+    // get_settings (audit finding #7 / #13).
+    crate::handlers::emit_app_event("pairing::complete", serde_json::json!({"is_paired": true}));
 
     Ok("Paired successfully".to_string())
+}
+
+/// Constant-time string equality for the SAS comparison (audit LOW finding —
+/// defensive; the SAS may one day be consumed by a machine channel where a
+/// timing oracle matters). No early exit on a prefix mismatch: every byte is
+/// folded into the accumulator, so the timing depends only on the (public,
+/// fixed-length) SAS length, never on which byte differs.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    // SAS codes are fixed-size (7 chars) and public — length is not secret.
+    if a.len() != b.len() {
+        return false;
+    }
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut acc: u8 = 0;
+    for i in 0..ab.len() {
+        acc |= ab[i] ^ bb[i];
+    }
+    acc == 0
+}
+
+/// Current pairing state, exposed to the webview so the SAS modal can be
+/// rendered from REAL backend state (audit finding #7 — the modal was dead
+/// code because no command exposed the pending SAS).
+#[tauri::command]
+pub fn get_pairing_status(
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<PairingStatus, String> {
+    let (sas_code, _pending_key) = state.get_pairing_read();
+    let is_paired = state.settings.lock().is_paired;
+    Ok(PairingStatus {
+        pending: state.is_pairing_pending(),
+        sas_code,
+        is_paired,
+        paired_device_name: state
+            .settings
+            .lock()
+            .paired_device_name
+            .clone()
+            .unwrap_or_default(),
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct PairingStatus {
+    pub pending: bool,
+    pub sas_code: String,
+    pub is_paired: bool,
+    pub paired_device_name: String,
+}
+
+#[tauri::command]
+pub async fn confirm_pairing_sas(
+    verified_sas: String,
+    paired_name: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    perform_sas_confirmation(state.inner(), verified_sas, paired_name).await
 }
 
 #[tauri::command]
@@ -72,267 +333,158 @@ pub fn generate_sas_pairing_code(
     client_pk_hex: String,
     shared_secret_hex: String,
 ) -> Result<String, String> {
-    if host_pk_hex.len() < 64 || client_pk_hex.len() < 64 || shared_secret_hex.len() < 32 {
+    let host_pk = hex::decode(&host_pk_hex).map_err(|e| format!("Invalid host_pk hex: {e}"))?;
+    let client_pk =
+        hex::decode(&client_pk_hex).map_err(|e| format!("Invalid client_pk hex: {e}"))?;
+    let shared_secret =
+        hex::decode(&shared_secret_hex).map_err(|e| format!("Invalid shared_secret hex: {e}"))?;
+    if host_pk.len() < 32 || client_pk.len() < 32 || shared_secret.len() < 16 {
         return Err(
             "Invalid key material — SAS requires valid PQC public keys and shared secret".into(),
         );
     }
-    core_crypto::generate_sas_code(host_pk_hex, client_pk_hex, shared_secret_hex)
-        .map_err(|e| e.to_string())
+    core_crypto::generate_sas_code(host_pk, client_pk, shared_secret).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn store_key_in_secure_enclave(key_name: String, secret_hex: String) -> Result<(), String> {
-    let entry = keyring::Entry::new("kyberpipe", &key_name)
-        .map_err(|e| format!("Keyring access failed: {e}"))?;
-    entry
-        .set_password(&secret_hex)
-        .map_err(|e| format!("Failed to store secret in OS Secret Service: {e}"))?;
-    Ok(())
+pub fn store_key_in_secure_enclave(
+    key_name: String,
+    secret_hex: String,
+    token: String,
+) -> Result<(), String> {
+    // Key-material write — requires a fresh user-gesture token (audit #13).
+    if !crate::commands::security::consume_privilege_token("store_key_in_secure_enclave", &token) {
+        return Err("Privileged action requires a fresh confirmation token".into());
+    }
+    // Validate that the payload is hex so we never store garbage.
+    hex::decode(&secret_hex).map_err(|e| format!("Secret must be hex-encoded: {e}"))?;
+    write_keyring_secret(&key_name, &secret_hex)
 }
 
 #[tauri::command]
 pub fn get_pairing_config(
     host_pk_hex: String,
     wireguard_pk_hex: String,
+    token: String,
     state: State<'_, std::sync::Arc<AppState>>,
 ) -> Result<core_crypto::PairingConfig, String> {
+    // Audit KYP-2026-02 #6: the pairing config discloses host identity
+    // metadata (local IP, WireGuard key hash) plus a fresh QR nonce — an
+    // enumeration oracle. Gate it behind a fresh user-gesture token so a
+    // renderer compromise cannot harvest it silently. (Wi-Fi Direct MAC / P2P
+    // IP fields were removed with the P2P feature — audit finding #1.)
+    if !crate::commands::security::consume_privilege_token("get_pairing_config", &token) {
+        return Err("Building a pairing QR requires a fresh user-gesture token".into());
+    }
     state.add_log("[Pairing] Generated Out-of-Band Pairing Config".to_string());
-    core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex).map_err(|e| e.to_string())
+    let mut config = core_crypto::generate_pairing_config(host_pk_hex, wireguard_pk_hex)
+        .map_err(|e| e.to_string())?;
+    // Audit finding #20: the QR nonce gate is MANDATORY and the nonce is issued
+    // by the backend (at app start AND refreshed here on every QR build) — the
+    // phone must echo THIS nonce in its pairing payload. Overriding the
+    // config's internally-generated nonce with the app-issued one keeps the QR
+    // and the server-side gate in lockstep (a stale internally-generated nonce
+    // would otherwise desync the check).
+    let nonce = state.issue_fresh_pairing_nonce();
+    config.pairing_nonce_hex = nonce;
+    Ok(config)
 }
 
+/// Return the pending QR pairing nonce (issued by `get_pairing_config`). The
+/// renderer MUST embed this nonce in every pairing QR payload so the phone can
+/// echo it back; without it the server-side nonce check rejects every pairing
+/// request (audit finding #5 — QR-nonce contract drift). Returns an empty
+/// string when no nonce is pending (keypair not generated / already consumed).
 #[tauri::command]
-pub fn generate_wormhole_code() -> String {
-    // Use BIP-39 English wordlist (2048 words) for ~33 bits of entropy with 3 words.
-    // Previously used 30 words (27k combinations) which was trivially brute-forced.
-    const BIP39_WORDS: &[&str] = &[
-        "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd",
-        "abuse", "access", "accident", "account", "accuse", "achieve", "acid", "acoustic",
-        "acquire", "across", "act", "action", "actor", "actress", "actual", "adapt", "add",
-        "addict", "address", "adjust", "admit", "adult", "advance", "advice", "aerobic", "affair",
-        "afford", "afraid", "again", "age", "agent", "agree", "ahead", "aim", "air", "airport",
-        "aisle", "alarm", "album", "alcohol", "alert", "alien", "all", "alley", "allow", "almost",
-        "alone", "alpha", "already", "also", "alter", "always", "amateur", "amazing", "among",
-        "amount", "amused", "analyst", "anchor", "angel", "anger", "angle", "angry", "animal",
-        "ankle", "announce", "annual", "another", "answer", "antenna", "antique", "anxiety", "any",
-        "apart", "apology", "appear", "apple", "approve", "april", "arch", "arctic", "area",
-        "arena", "argue", "arm", "armed", "armor", "army", "around", "arrange", "arrest", "arrive",
-        "arrow", "art", "artefact", "artist", "artwork", "ask", "aspect", "assault", "asset",
-        "assist", "assume", "asthma", "athlete", "atom", "attack", "attend", "attitude", "attract",
-        "auction", "audit", "august", "aunt", "author", "auto", "autumn", "average", "avocado",
-        "avoid", "awake", "aware", "away", "awesome", "awful", "awkward", "axis", "baby",
-        "bachelor", "bacon", "badge", "bag", "balance", "balcony", "ball", "bamboo", "banana",
-        "banner", "bar", "barely", "bargain", "barrel", "base", "basic", "basket", "battle",
-        "beach", "bean", "beauty", "because", "become", "beef", "before", "begin", "behave",
-        "behind", "believe", "below", "belt", "bench", "benefit", "best", "betray", "better",
-        "between", "beyond", "bicycle", "bid", "bike", "bind", "biology", "bird", "birth",
-        "bitter", "black", "blade", "blame", "blanket", "blast", "bleak", "bless", "blind",
-        "blood", "blossom", "blouse", "blue", "blur", "blush", "board", "boat", "body", "boil",
-        "bomb", "bone", "bonus", "book", "boost", "border", "boring", "borrow", "boss", "bottom",
-        "bounce", "box", "boy", "bracket", "brain", "brand", "brass", "brave", "bread", "breeze",
-        "brick", "bridge", "brief", "bright", "bring", "brisk", "broccoli", "broken", "bronze",
-        "broom", "brother", "brown", "brush", "bubble", "buddy", "budget", "buffalo", "build",
-        "bulb", "bulk", "bullet", "bundle", "bunker", "burden", "burger", "burst", "bus",
-        "business", "busy", "butter", "buyer", "buzz", "cabbage", "cabin", "cable", "cactus",
-        "cage", "cake", "call", "calm", "camera", "camp", "can", "canal", "cancel", "candy",
-        "cannon", "canoe", "canvas", "canyon", "capable", "capital", "captain", "car", "carbon",
-        "card", "cargo", "carpet", "carry", "cart", "case", "cash", "casino", "castle", "casual",
-        "cat", "catalog", "catch", "category", "cattle", "caught", "cause", "caution", "cave",
-        "ceiling", "celery", "cement", "census", "century", "cereal", "certain", "chair", "chalk",
-        "champion", "change", "chaos", "chapter", "charge", "chase", "chat", "cheap", "check",
-        "cheese", "chef", "cherry", "chest", "chicken", "chief", "child", "chimney", "choice",
-        "choose", "chronic", "chuckle", "chunk", "churn", "cigar", "cinnamon", "circle", "citizen",
-        "city", "civil", "claim", "clap", "clarify", "claw", "clay", "clean", "clerk", "clever",
-        "click", "client", "cliff", "climb", "clinic", "clip", "clock", "clog", "close", "cloth",
-        "cloud", "clown", "club", "clump", "cluster", "clutch", "coach", "coast", "coconut",
-        "code", "coffee", "coil", "coin", "collect", "color", "column", "combine", "come",
-        "comfort", "comic", "common", "company", "concert", "conduct", "confirm", "congress",
-        "connect", "consider", "control", "convince", "cook", "cool", "copper", "copy", "coral",
-        "core", "corn", "correct", "cost", "cotton", "couch", "country", "couple", "course",
-        "cousin", "cover", "coyote", "crack", "cradle", "craft", "cram", "crane", "crash",
-        "crater", "crawl", "crazy", "cream", "credit", "creek", "crew", "cricket", "crime",
-        "crisp", "critic", "crop", "cross", "crouch", "crowd", "crucial", "cruel", "cruise",
-        "crumble", "crunch", "crush", "cry", "crystal", "cube", "culture", "cup", "cupboard",
-        "curious", "current", "curtain", "curve", "cushion", "custom", "cute", "cycle", "dad",
-        "damage", "damp", "dance", "danger", "daring", "dash", "daughter", "dawn", "day", "deal",
-        "debate", "debris", "decade", "december", "decide", "decline", "decorate", "decrease",
-        "deer", "defense", "define", "defy", "degree", "delay", "deliver", "demand", "demise",
-        "denial", "dentist", "deny", "depart", "depend", "deposit", "depth", "deputy", "derive",
-        "describe", "desert", "design", "desk", "despair", "destroy", "detail", "detect",
-        "develop", "device", "devote", "diagram", "dial", "diamond", "diary", "dice", "diesel",
-        "diet", "differ", "digital", "dignity", "dilemma", "dinner", "dinosaur", "direct", "dirt",
-        "disagree", "discover", "disease", "dish", "dismiss", "disorder", "display", "distance",
-        "divert", "divide", "divorce", "dizzy", "doctor", "document", "dog", "doll", "dolphin",
-        "domain", "donate", "donkey", "donor", "door", "dose", "double", "dove", "draft", "dragon",
-        "drama", "drastic", "draw", "dream", "dress", "drift", "drill", "drink", "drip", "drive",
-        "drop", "drum", "dry", "duck", "dumb", "dune", "during", "dust", "dutch", "duty", "dwarf",
-        "dynamic", "eager", "eagle", "early", "earn", "earth", "easily", "east", "easy", "echo",
-        "ecology", "economy", "edge", "edit", "educate", "effort", "egg", "eight", "either",
-        "elbow", "elder", "electric", "elegant", "element", "elephant", "elevator", "elite",
-        "else", "embark", "embody", "embrace", "emerge", "emotion", "employ", "empower", "empty",
-        "enable", "enact", "end", "endless", "endorse", "enemy", "energy", "enforce", "engage",
-        "engine", "enhance", "enjoy", "enlist", "enough", "enrich", "enroll", "ensure", "enter",
-        "entire", "entry", "envelope", "episode", "equal", "equip", "era", "erase", "erode",
-        "erosion", "error", "erupt", "escape", "essay", "essence", "estate", "eternal", "ethics",
-        "evidence", "evil", "evoke", "evolve", "exact", "example", "excess", "exchange", "excite",
-        "exclude", "excuse", "execute", "exercise", "exhaust", "exhibit", "exile", "exist", "exit",
-        "exotic", "expand", "expect", "expire", "explain", "expose", "express", "extend", "extra",
-        "eyebrow", "fabric", "face", "faculty", "fade", "faint", "faith", "fall", "false", "fame",
-        "family", "famous", "fan", "fancy", "fantasy", "farm", "fashion", "fat", "fatal", "father",
-        "fatigue", "fault", "favorite", "feature", "february", "federal", "fee", "feed", "feel",
-        "female", "fence", "festival", "fetch", "fever", "few", "fiber", "fiction", "field",
-        "figure", "file", "film", "filter", "final", "find", "fine", "finger", "finish", "fire",
-        "firm", "first", "fiscal", "fish", "fit", "fitness", "fix", "flag", "flame", "flash",
-        "flat", "flavor", "flee", "flight", "flip", "float", "flock", "floor", "flower", "fluid",
-        "flush", "fly", "foam", "focus", "fog", "foil", "fold", "follow", "food", "foot", "force",
-        "foreign", "forest", "forget", "fork", "fortune", "forum", "forward", "fossil", "foster",
-        "found", "fox", "fragile", "frame", "frequent", "fresh", "friend", "fringe", "frog",
-        "front", "frost", "frown", "frozen", "fruit", "fuel", "fun", "funny", "furnace", "fury",
-        "future", "gadget", "gain", "galaxy", "gallery", "game", "gap", "garage", "garbage",
-        "garden", "garlic", "garment", "gas", "gasp", "gate", "gather", "gauge", "gaze", "general",
-        "genius", "genre", "gentle", "genuine", "gesture", "ghost", "giant", "gift", "giggle",
-        "ginger", "giraffe", "girl", "give", "glad", "glance", "glare", "glass", "glide",
-        "glimpse", "globe", "gloom", "glory", "glove", "glow", "glue", "goat", "goddess", "gold",
-        "good", "goose", "gorilla", "gospel", "gossip", "govern", "gown", "grab", "grace", "grain",
-        "grant", "grape", "grass", "gravity", "great", "green", "grid", "grief", "grit", "grocery",
-        "group", "grow", "grunt", "guard", "guess", "guide", "guilt", "guitar", "gun", "gym",
-        "habit", "hair", "half", "hammer", "hamster", "hand", "happy", "harbor", "hard", "harsh",
-        "harvest", "hat", "have", "hawk", "hazard", "head", "health", "heart", "heavy", "hedgehog",
-        "height", "hello", "helmet", "help", "hen", "hero", "hidden", "high", "hill", "hint",
-        "hip", "hire", "history", "hobby", "hockey", "hold", "hole", "holiday", "hollow", "home",
-        "honey", "hood", "hope", "horn", "horror", "horse", "hospital", "host", "hotel", "hour",
-        "hover", "hub", "huge", "human", "humble", "humor", "hundred", "hungry", "hunt", "hurdle",
-        "hurry", "hurt", "husband", "hybrid", "ice", "icon", "idea", "identify", "idle", "ignore",
-        "ill", "illegal", "illness", "image", "imitate", "immense", "immune", "impact", "impose",
-        "improve", "impulse", "include", "income", "increase", "index", "indicate", "indoor",
-        "industry", "infant", "inflict", "inform", "inhale", "inherit", "initial", "inject",
-        "injury", "inmate", "inner", "innocent", "input", "inquiry", "insane", "insect", "inside",
-        "inspire", "install", "intact", "interest", "into", "invest", "invite", "involve", "iron",
-        "island", "isolate", "issue", "item", "ivory", "jacket", "jaguar", "jar", "jazz",
-        "jealous", "jeans", "jelly", "jewel", "job", "join", "joke", "journey", "joy", "judge",
-        "juice", "jump", "jungle", "junior", "junk", "just", "kangaroo", "keen", "keep", "ketchup",
-        "key", "kick", "kid", "kidney", "kind", "kingdom", "kiss", "kit", "kitchen", "kite",
-        "kitten", "kiwi", "knee", "knife", "knock", "know", "lab", "label", "labor", "ladder",
-        "lady", "lake", "lamp", "language", "laptop", "large", "later", "latin", "laugh",
-        "laundry", "lava", "law", "lawn", "lawsuit", "layer", "lazy", "leader", "leaf", "learn",
-        "leave", "lecture", "left", "leg", "legal", "legend", "leisure", "lemon", "lend", "length",
-        "lens", "leopard", "lesson", "letter", "level", "liar", "liberty", "library", "license",
-        "life", "lift", "light", "like", "limb", "limit", "link", "lion", "liquid", "list",
-        "little", "live", "lizard", "load", "loan", "lobster", "local", "lock", "logic", "lonely",
-        "long", "loop", "lottery", "loud", "lounge", "love", "loyal", "lucky", "luggage", "lumber",
-        "lunar", "lunch", "luxury", "lyrics", "machine", "mad", "magic", "magnet", "maid", "mail",
-        "main", "major", "make", "mammal", "man", "manage", "mandate", "mango", "mansion",
-        "manual", "maple", "marble", "march", "margin", "marine", "market", "marriage", "mask",
-        "mass", "master", "match", "material", "math", "matrix", "matter", "maximum", "maze",
-        "meadow", "mean", "measure", "meat", "mechanic", "medal", "media", "melody", "melt",
-        "member", "memory", "mention", "menu", "mercy", "merge", "merit", "merry", "mesh",
-        "message", "metal", "method", "middle", "midnight", "milk", "million", "mimic", "mind",
-        "minimum", "minor", "minute", "miracle", "mirror", "misery", "miss", "mistake", "mix",
-        "mixed", "mixture", "mobile", "model", "modify", "mom", "moment", "monitor", "monkey",
-        "monster", "month", "moon", "moral", "more", "morning", "mosquito", "mother", "motion",
-        "motor", "mountain", "mouse", "move", "movie", "much", "muffin", "mule", "multiply",
-        "muscle", "museum", "mushroom", "music", "must", "mutual", "myself", "mystery", "myth",
-        "naive", "name", "napkin", "narrow", "nasty", "nation", "nature", "near", "neck", "need",
-        "negative", "neglect", "neither", "nephew", "nerve", "nest", "net", "network", "neutral",
-        "never", "news", "next", "nice", "night", "noble", "noise", "nominee", "noodle", "normal",
-        "north", "nose", "notable", "note", "nothing", "notice", "novel", "now", "nuclear",
-        "number", "nurse", "nut", "oak", "obey", "object", "oblige", "obscure", "observe",
-        "obtain", "obvious", "occur", "ocean", "october", "odor", "off", "offend", "offer",
-        "office", "often", "oil", "okay", "old", "olive", "olympic", "omit", "once", "one",
-        "onion", "online", "only", "open", "opera", "opinion", "oppose", "option", "orange",
-        "orbit", "orchard", "order", "ordinary", "organ", "orient", "original", "orphan",
-        "ostrich", "other", "outdoor", "outer", "output", "outside", "oval", "oven", "over", "own",
-        "owner", "oxygen", "oyster", "ozone", "pact", "paddle", "page", "pair", "palace", "palm",
-        "panda", "panel", "panic", "panther", "paper", "parade", "parent", "park", "parrot",
-        "party", "pass", "patch", "path", "patient", "patrol", "pattern", "pause", "pave",
-        "payment", "peace", "peanut", "pear", "peasant", "pelican", "pen", "penalty", "pencil",
-        "people", "pepper", "perfect", "permit", "person", "pet", "phone", "photo", "phrase",
-        "physical", "piano", "picnic", "picture", "piece", "pig", "pigeon", "pill", "pilot",
-        "pink", "pioneer", "pipe", "pistol", "pitch", "pizza", "place", "planet", "plastic",
-        "plate", "play", "player", "please", "pledge", "pluck", "plug", "plunge", "poem", "poet",
-        "point", "polar", "pole", "police", "pond", "pony", "pool", "popular", "portion",
-        "position", "possible", "post", "potato", "pottery", "poverty", "powder", "power",
-        "practice", "praise", "predict", "prefer", "prepare", "present", "pretty", "prevent",
-        "price", "pride", "primary", "print", "priority", "prison", "private", "prize", "problem",
-        "process", "produce", "profit", "program", "project", "property", "proposal", "protect",
-        "provide", "public", "pulse", "pumpkin", "punch", "pupil", "puppy", "purchase", "purity",
-        "purpose", "purse", "push", "put", "puzzle", "pyramid", "quality", "quantum", "quarter",
-        "question", "quick", "quit", "quiz", "quote", "rabbit", "raccoon", "race", "rack", "radar",
-        "radio", "rail", "rain", "raise", "rally", "ramp", "ranch", "random", "range", "rapid",
-        "rare", "rate", "rather", "raven", "raw", "razor", "ready", "real", "reason", "rebel",
-        "rebuild", "recall", "receive", "recipe", "record", "recycle", "reduce", "reflect",
-        "reform", "refuse", "region", "regret", "regular", "reject", "relax", "release", "relief",
-        "rely", "remain", "remember", "remind", "remove", "render", "renew", "rent", "reopen",
-        "repair", "repeat", "replace", "report", "require", "rescue", "resemble", "resist",
-        "resource", "response", "result", "retire", "retreat", "return", "reunion", "reveal",
-        "review", "reward", "rhythm", "rib", "ribbon", "rice", "rich", "ride", "ridge", "rifle",
-        "right", "rigid", "ring", "riot", "rip", "ripe", "rise", "risk", "rival", "river", "road",
-        "roast", "robot", "robust", "rocket", "romance", "roof", "rookie", "room", "rose",
-        "rotate", "rough", "round", "route", "royal", "rubber", "rude", "rug", "rule", "run",
-        "runway", "rural", "sad", "saddle", "sadness", "safe", "sail", "salad", "salmon", "salon",
-        "salt", "salute", "same", "sample", "sand", "satisfy", "satoshi", "sauce", "sausage",
-        "save", "say", "scale", "scan", "scare", "scatter", "scene", "scheme", "school", "science",
-        "scissors", "scorpion", "scout", "scrap", "screen", "script", "scrub", "sea", "search",
-        "season", "seat", "second", "secret", "section", "security", "seed", "seek", "segment",
-        "select", "sell", "seminar", "senior", "sense", "sentence", "series", "service", "session",
-        "settle", "setup", "seven", "shadow", "shaft", "shallow", "share", "shed", "shell",
-        "sheriff", "shield", "shift", "shine", "ship", "shiver", "shock", "shoe", "shoot", "shop",
-        "short", "shoulder", "shove", "shrimp", "shrug", "shuffle", "shy", "sibling", "sick",
-        "side", "siege", "sight", "sign", "silent", "silk", "silly", "silver", "similar", "simple",
-        "since", "sing", "siren", "sister", "situate", "six", "size", "skate", "sketch", "ski",
-        "skill", "skin", "skirt", "skull", "slab", "slam", "sleep", "slender", "slice", "slide",
-        "slight", "slim", "slogan", "slot", "slow", "slush", "small", "smart", "smile", "smoke",
-        "smooth", "snack", "snake", "snap", "sniff", "snow", "soap", "soccer", "social", "sock",
-        "soda", "soft", "solar", "soldier", "solid", "solution", "solve", "someone", "song",
-        "soon", "sorry", "sort", "soul", "sound", "soup", "source", "south", "space", "spare",
-        "spatial", "spawn", "speak", "special", "speed", "spell", "spend", "sphere", "spice",
-        "spider", "spike", "spin", "spirit", "split", "spoil", "sponsor", "spoon", "sport", "spot",
-        "spray", "spread", "spring", "spy", "square", "squeeze", "squirrel", "stable", "stadium",
-        "staff", "stage", "stairs", "stamp", "stand", "start", "state", "stay", "steak", "steel",
-        "step", "stereo", "stick", "still", "sting", "stock", "stomach", "stone", "stool", "story",
-        "stove", "strategy", "street", "strike", "strong", "struggle", "student", "stuff",
-        "stumble", "style", "subject", "submit", "subway", "success", "such", "sudden", "suffer",
-        "sugar", "suggest", "suit", "sun", "sunny", "sunset", "super", "supply", "support",
-        "suppose", "sure", "surface", "surge", "surround", "survey", "suspect", "sustain",
-        "swallow", "swamp", "swap", "swarm", "swear", "sweet", "swift", "swim", "swing", "switch",
-        "sword", "symbol", "symptom", "syrup", "system", "table", "tackle", "tag", "tail",
-        "talent", "talk", "tank", "tape", "target", "task", "taste", "tattoo", "taxi", "teach",
-        "team", "tell", "ten", "tenant", "tennis", "tent", "term", "test", "text", "thank", "that",
-        "theme", "then", "theory", "there", "they", "thing", "this", "thought", "three", "thrive",
-        "throw", "thumb", "thunder", "ticket", "tide", "tiger", "tilt", "timber", "time", "tiny",
-        "tip", "tired", "tissue", "title", "toast", "tobacco", "today", "toddler", "toe",
-        "together", "toilet", "token", "tomato", "tomorrow", "tone", "tongue", "tonight", "tool",
-        "tooth", "top", "topic", "topple", "torch", "tornado", "tortoise", "toss", "total",
-        "tourist", "toward", "tower", "town", "toy", "track", "trade", "traffic", "tragic",
-        "train", "transfer", "trap", "trash", "travel", "tray", "treat", "tree", "trend", "trial",
-        "tribe", "trick", "trigger", "trim", "trip", "trophy", "trouble", "truck", "true", "truly",
-        "trumpet", "trust", "truth", "try", "tube", "tuition", "tumble", "tuna", "tunnel",
-        "turkey", "turn", "turtle", "twelve", "twenty", "twice", "twin", "twist", "two", "type",
-        "typical", "ugly", "umbrella", "unable", "unaware", "uncle", "uncover", "under", "undo",
-        "unfair", "unfold", "unhappy", "uniform", "unique", "unit", "universe", "unknown",
-        "unlock", "until", "unusual", "unveil", "update", "upgrade", "uphold", "upon", "upper",
-        "upset", "urban", "urge", "usage", "use", "used", "useful", "useless", "usual", "utility",
-        "vacant", "vacuum", "vague", "valid", "valley", "valve", "van", "vanish", "vapor",
-        "various", "vast", "vault", "vehicle", "velvet", "vendor", "venture", "venue", "verb",
-        "verify", "version", "very", "vessel", "veteran", "viable", "vibrant", "vicious",
-        "victory", "video", "view", "village", "vintage", "violin", "virtual", "virus", "visa",
-        "visit", "visual", "vital", "vivid", "vocal", "voice", "void", "volcano", "volume", "vote",
-        "voyage", "wage", "wagon", "wait", "walk", "wall", "walnut", "want", "warfare", "warm",
-        "warrior", "wash", "wasp", "waste", "water", "wave", "way", "wealth", "weapon", "wear",
-        "weasel", "weather", "web", "wedding", "weekend", "weird", "welcome", "west", "wet",
-        "whale", "what", "wheat", "wheel", "when", "where", "whip", "whisper", "wide", "width",
-        "wife", "wild", "will", "win", "window", "wine", "wing", "wink", "winner", "winter",
-        "wire", "wisdom", "wise", "wish", "witness", "wolf", "woman", "wonder", "wood", "wool",
-        "word", "work", "world", "worry", "worth", "wrap", "wreck", "wrestle", "wrist", "write",
-        "wrong", "yard", "year", "yellow", "you", "young", "youth", "zebra", "zero", "zone", "zoo",
-    ];
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let n1 = rng.gen_range(0..BIP39_WORDS.len());
-    let n2 = rng.gen_range(0..BIP39_WORDS.len());
-    let n3 = rng.gen_range(0..BIP39_WORDS.len());
-    format!(
-        "{}-{}-{}",
-        BIP39_WORDS[n1], BIP39_WORDS[n2], BIP39_WORDS[n3]
-    )
+pub fn get_pairing_nonce(
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    // Audit KYP-2026-02 #6: the QR nonce defeats the pairing-slot hijack gate;
+    // disclosing it to an unauthenticated renderer would defeat its purpose.
+    // Require a fresh user-gesture token.
+    if !crate::commands::security::consume_privilege_token("get_pairing_nonce", &token) {
+        return Err("Reading the pairing nonce requires a fresh user-gesture token".into());
+    }
+    Ok(state.get_pending_pairing_nonce())
+}
+
+/// SHA-256 (hex) of the desktop server's identity certificate. Embedded in the
+/// pairing QR so the phone pins the certificate bound to the QR — never the
+/// certificate observed on a possibly MITM'd bootstrap connection (audit
+/// finding #15).
+#[tauri::command]
+pub fn get_server_cert_hash() -> Result<String, String> {
+    Ok(core_crypto::quic_server_cert_hash().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod keyring_tests {
+    use super::*;
+
+    /// Probe the keyring backend with a hard timeout so a STUCK Secret Service
+    /// daemon (hung D-Bus call) cannot hang the whole test binary after the
+    /// assertions pass. Returns None when the backend is unavailable OR does
+    /// not answer within the bound — both are treated as a graceful skip.
+    fn keyring_available(name: &'static str) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ok = keyring::Entry::new(KEYRING_SERVICE, name)
+                .and_then(|e| e.set_password("probe"))
+                .is_ok();
+            let _ = tx.send(ok);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(ok) => ok,
+            Err(_) => {
+                eprintln!("Skipping keyring test: keyring probe timed out (stuck backend)");
+                false
+            }
+        }
+    }
+
+    /// Round-trip: secrets written to the OS keyring must survive a simulated
+    /// process restart (the old per-boot wrap key made this fail — every blob
+    /// written in a previous boot was permanently undecryptable). The keyring
+    /// itself is OS-persistent, so write-then-re-read in a fresh call path is
+    /// the same guarantee the app needs across reboots.
+    #[test]
+    fn test_keyring_secret_roundtrip_across_restart() {
+        // Gracefully skip when no keyring backend is available (headless CI)
+        // or a stuck daemon does not answer within the bound (audit follow-up).
+        if !keyring_available("test_roundtrip_key") {
+            eprintln!("Skipping keyring test: no OS keyring backend available");
+            return;
+        }
+        let secret_hex = "deadbeefcafebabec0ffee42";
+        write_keyring_secret("test_roundtrip_key", secret_hex).unwrap();
+        let read_back = read_keyring_secret("test_roundtrip_key").expect("secret must persist");
+        assert_eq!(
+            read_back, secret_hex,
+            "stored secret must round-trip verbatim"
+        );
+        // Cleanup
+        let _ = keyring::Entry::new(KEYRING_SERVICE, "test_roundtrip_key")
+            .and_then(|e| e.delete_password());
+    }
+
+    /// The stored payload must be the plaintext secret (hex), not an encrypted
+    /// blob — this is what generate_shamir_recovery_shares already assumes when
+    /// it hex-decodes the keyring entry directly.
+    #[test]
+    fn test_keyring_does_not_double_encrypt() {
+        if !keyring_available("test_plain_key") {
+            eprintln!("Skipping keyring test: no OS keyring backend available");
+            return;
+        }
+        let secret_hex = "00112233445566778899aabbccddeeff";
+        write_keyring_secret("test_plain_key", secret_hex).unwrap();
+        let entry = keyring::Entry::new(KEYRING_SERVICE, "test_plain_key").unwrap();
+        let stored = entry.get_password().unwrap();
+        assert_eq!(
+            stored, secret_hex,
+            "keyring stores the plain secret hex directly"
+        );
+        let _ = entry.delete_password();
+    }
 }

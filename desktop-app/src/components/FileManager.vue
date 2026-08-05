@@ -54,11 +54,17 @@ const loadFiles = async () => {
 
 const handleGrantAccess = async (isDesktop: boolean) => {
   try {
-    await invoke("grant_file_access", { isDesktop, granted: true });
+    // Privileged state mutation — request the single-use user-gesture token
+    // (audit finding #20: uniform privilege gating).
+    const token = await invoke<string>("request_privilege_token", {
+      action: "grant_file_access",
+    });
+    await invoke("grant_file_access", { isDesktop, granted: true, token });
     emit("updateSettings");
     setTimeout(loadFiles, 200);
   } catch (err) {
     console.error(err);
+    alert("Granting file access failed: " + err);
   }
 };
 
@@ -79,7 +85,11 @@ const toggleMenu = (path: string, event: Event) => {
 
 const handleOpenLocal = async (path: string) => {
   try {
-    await invoke("open_local_file", { path });
+    // Destructive command — single-use user-gesture token (audit finding #20).
+    const token = await invoke<string>("request_privilege_token", {
+      action: "open_local_file",
+    });
+    await invoke("open_local_file", { path, token });
   } catch (err) {
     alert("Error opening file: " + err);
   }
