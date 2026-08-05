@@ -149,6 +149,12 @@ pub fn wipe_keyring_entries() {
     if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
         let _ = entry.delete_password();
     }
+    // AUDIT F16 (follow-up): the legacy PLAINTEXT ML-DSA beacon key files
+    // (device_mldsa_*.bin under the app data dir) must not survive an explicit
+    // wipe either — deleting the keyring entries alone left the 0600 fallback
+    // files behind. Removing them here covers unpair AND panic self-destruct
+    // (both call this routine).
+    core_crypto::network::beacon::remove_legacy_beacon_key_files();
     clear_pairing_keypair_from_keyring();
 }
 

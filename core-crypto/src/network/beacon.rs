@@ -79,6 +79,56 @@ fn persist_beacon_signing_keypair(pk: &[u8], sk: &[u8]) -> bool {
 /// "kyberpipe" (keys "beacon_signing_sk"/"beacon_signing_pk"); only when no
 /// keyring backend is available (headless CI) is the keypair persisted under
 /// the app data dir with 0600 permissions — never weaker.
+/// The two legacy plaintext beacon key files under the app data dir
+/// (pre-keyring installs / headless fallback). Centralized so the migration
+/// path and the teardown path (`remove_legacy_beacon_key_files`) can never
+/// disagree about the on-disk location (AUDIT F16 follow-up).
+fn beacon_key_files() -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|p| p.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    (dir.join("device_mldsa_pk.bin"), dir.join("device_mldsa_sk.bin"))
+}
+
+/// Migrate a legacy plaintext beacon keypair into the OS keyring and — only
+/// after the keyring write is VERIFIED durable by readback — delete the
+/// plaintext files. Mirrors the server TLS key migration in `quic_app`: a
+/// backend that accepts `set_password` but does not persist must NOT destroy
+/// the only copy of the key (AUDIT F16 follow-up — the legacy files were
+/// previously left on disk indefinitely after a successful migration).
+fn migrate_and_remove_legacy_files(pk: &[u8], sk: &[u8]) {
+    if !persist_beacon_signing_keypair(pk, sk) {
+        return;
+    }
+    let sk_hex = hex::encode(sk);
+    let durable = keyring::Entry::new("kyberpipe", "beacon_signing_sk")
+        .and_then(|e| e.get_password())
+        .is_ok_and(|v| v == sk_hex);
+    if durable {
+        let (pk_path, sk_path) = beacon_key_files();
+        let _ = std::fs::remove_file(&pk_path);
+        let _ = std::fs::remove_file(&sk_path);
+        tracing::info!(
+            "[Beacon] Legacy plaintext beacon key files removed after verified keyring migration (AUDIT F16)"
+        );
+    } else {
+        tracing::warn!(
+            "[Beacon] Keyring write did not verify durable; KEEPING legacy plaintext beacon key files (never destroy the only copy — AUDIT F16)"
+        );
+    }
+}
+
+/// Remove the legacy plaintext beacon key files (`device_mldsa_*.bin`).
+/// Called by the desktop teardown (`ratchet_store::wipe_keyring_entries` →
+/// unpair / delete_connection / panic self-destruct) so the plaintext ML-DSA
+/// secret never survives an explicit wipe — the keyring entries alone were
+/// deleted before, leaving the 0600 files behind (AUDIT F16 follow-up).
+pub fn remove_legacy_beacon_key_files() {
+    let (pk_path, sk_path) = beacon_key_files();
+    let _ = std::fs::remove_file(&pk_path);
+    let _ = std::fs::remove_file(&sk_path);
+}
+
 fn device_signing_key() -> (Vec<u8>, Vec<u8>) {
     // Preferred: OS keyring. Both entries must decode to the expected sizes.
     let sk_hex = keyring::Entry::new("kyberpipe", "beacon_signing_sk")
@@ -98,16 +148,13 @@ fn device_signing_key() -> (Vec<u8>, Vec<u8>) {
     // Fallback store: the legacy 0600 files under the app data dir, used only
     // when the OS keyring is unavailable (headless CI). If a keypair already
     // lives there (pre-keyring install), keep it — and migrate it into the
-    // keyring when a backend is present so the device identity survives.
-    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
-        .map(|p| p.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let _ = std::fs::create_dir_all(&dir);
-    let pk_path = dir.join("device_mldsa_pk.bin");
-    let sk_path = dir.join("device_mldsa_sk.bin");
+    // keyring when a backend is present so the device identity survives. The
+    // plaintext files are removed once the keyring write is verified durable
+    // (AUDIT F16 follow-up).
+    let (pk_path, sk_path) = beacon_key_files();
     if let (Ok(pk), Ok(sk)) = (std::fs::read(&pk_path), std::fs::read(&sk_path)) {
         if pk.len() == 1952 && sk.len() == 4032 {
-            let _ = persist_beacon_signing_keypair(&pk, &sk);
+            migrate_and_remove_legacy_files(&pk, &sk);
             return (pk, sk);
         }
     }
