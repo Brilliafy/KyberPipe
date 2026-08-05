@@ -40,7 +40,20 @@ export function useMedia(isPaired: Ref<boolean>) {
 
   const handleMediaAction = async (actionIndex: number) => {
     try {
-      await invoke("trigger_desktop_media_action", { actionIndex });
+      // AUDIT P4-1(c)/P5-2: the media-action command was reclassified Tier-1 →
+      // Tier-2 — it drives a REMOTE side effect on the phone (fires a foreign
+      // PendingIntent), so it now requires the same fresh native user-gesture
+      // token every other remote-action command does. The renderer surfaces a
+      // confirmation, then mints the single-use token; the backend command
+      // consumes it.
+      const confirmed = window.confirm(
+        "Trigger this media action on the paired phone? This fires the action on the phone's media app."
+      );
+      if (!confirmed) return;
+      const token = await invoke<string>("request_privilege_token", {
+        action: "trigger_desktop_media_action",
+      });
+      await invoke("trigger_desktop_media_action", { actionIndex, token });
     } catch (e) {
       console.error("Failed to trigger media action:", e);
     }

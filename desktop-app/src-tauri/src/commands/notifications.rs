@@ -142,24 +142,47 @@ pub fn send_hardware_command(
 }
 
 #[tauri::command]
-pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
+pub fn trigger_desktop_media_action(
+    action_index: u32,
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<String, String> {
+    // AUDIT P4-1(c) / P5-2 (MEDIUM): reclassified Tier-1 → Tier-2. The
+    // command drives a REMOTE side effect — the phone fires the indexed
+    // PendingIntent of a foreign media app — so renderer-trust (Tier-1) is
+    // not enough: a compromised webview could fire "Reply"/"Send"/"Approve"
+    // actions on the phone with zero phone-side consent. A fresh native
+    // user-gesture token is now required, exactly like every other
+    // destructive/remote-action command.
+    if !crate::commands::security::consume_privilege_token(
+        "trigger_desktop_media_action",
+        &token,
+    ) {
+        return Err(
+            "Triggering a media action on the phone requires a fresh user-gesture token (audit P4-1)"
+                .into(),
+        );
+    }
     // AUDIT F18 FIX: validate the index against the phone's LAST-KNOWN media
     // actions before it can be surfaced to the phone's poll. The phone fires
     // the indexed PendingIntent, so an out-of-range or stale index from a
-    // compromised renderer (Tier-1 command) or a bug would otherwise trigger
-    // a foreign app's action on the phone with zero desktop-side validation.
+    // compromised renderer or a bug would otherwise trigger a foreign app's
+    // action on the phone with zero desktop-side validation.
     let known = state.get_media_state();
     let valid = known.actions.iter().any(|a| a.index == action_index);
     if !valid {
         state.add_log(format!(
             "[Media] Ignoring action index {action_index} — not in the phone's known media action list (audit F18)"
         ));
-        return;
+        return Err(format!(
+            "Media action index {action_index} is not in the phone's known action list"
+        ));
     }
     state.set_pending_media_action(Some(action_index));
     state.add_log(format!(
-        "[Media] Desktop triggered action index: {action_index}"
+        "[Media] Desktop triggered action index: {action_index} (native gesture confirmed)"
     ));
+    Ok("Media action staged for the phone's next poll".to_string())
 }
 
 #[tauri::command]

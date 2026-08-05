@@ -3,9 +3,43 @@
 //! its own module with its documented boundedness contract.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
 use std::sync::OnceLock;
+
+/// Durably write `data` to `path` via temp-file → fsync → rename (audit P4-2).
+///
+/// This is the SHARED atomic-write discipline the ratchet store already
+/// applied to the secret-bearing store (`persist_all_ratchet_sessions`): the
+/// bytes go to a sibling `.tmp` file, are fsynced to disk, then renamed over
+/// the real path. A crash mid-write leaves only the `.tmp` sibling — the
+/// previous good file at `path` is never truncated, so a power loss cannot
+/// produce a zero-length/partial `settings.json` that a restart would parse
+/// as defaults (silently dropping the persisted pairing identity that F1's
+/// restart-rebuild depends on). Returns true only when the rename landed.
+pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> bool {
+    let mut tmp_path = path.as_os_str().to_owned();
+    tmp_path.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_path);
+    let mut write_ok = false;
+    if std::fs::write(&tmp, data).is_ok() {
+        // fsync BEFORE rename: a power loss must not leave an empty temp file
+        // that then gets renamed over the good target.
+        write_ok = std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
+    }
+    if write_ok {
+        if std::fs::rename(&tmp, path).is_ok() {
+            // fsync the containing directory so the rename itself is durable
+            // (best-effort; not supported on every platform/filesystem).
+            if let Some(dir) = path.parent() {
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+            return true;
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    false
+}
 
 /// Shared latest-value persistence state (audit F7): a `Mutex<VecDeque<(path,
 /// data)>>` slot + Condvar replaced the previous UNBOUNDED `mpsc` channel. The
@@ -69,8 +103,21 @@ fn persist_channel() -> &'static PersistState {
                 }
                 drop(guard);
                 for (path, data) in latest.drain() {
-                    if let Ok(mut file) = File::create(&path) {
-                        let _ = file.write_all(data.as_bytes());
+                    // AUDIT P4-2 (LOW): settings.json (which holds the
+                    // persisted pairing identity F1's restart-rebuild depends
+                    // on) was written with `File::create` + `write_all` and NO
+                    // fsync — a crash mid-write left a truncated/zero-length
+                    // file that the next boot parsed as defaults, silently
+                    // losing `is_paired` while the keyring and ratchet store
+                    // still held the session material. Route every persist
+                    // through the same temp-fsync-rename discipline the
+                    // ratchet store uses.
+                    let path = std::path::PathBuf::from(&path);
+                    if !atomic_write(&path, data.as_bytes()) {
+                        tracing::warn!(
+                            "[Persist] Atomic write failed for {} — previous file left untouched",
+                            path.display()
+                        );
                     }
                 }
             }

@@ -38,6 +38,23 @@ class PollTransport(
 ) {
     private val TAG = "PollTransport"
 
+    companion object {
+        /// AUDIT P1-1 (HIGH): the shared wire-contract frame bound, resolved
+        /// from the UniFFI-exported `maxMessageSize()` — the SAME export the
+        /// desktop producer's cap is derived from, so the two independently-
+        /// compiled ends can never disagree. Falls back to the documented
+        /// 1 MiB only when the native library is absent (JVM unit tests with
+        /// a fake FFI) — in production the export always resolves.
+        val MAX_FRAME_BODY_SIZE: Int = runCatching {
+            uniffi.core_crypto.maxMessageSize().toInt()
+        }.getOrDefault(1024 * 1024)
+    }
+
+    /// AUDIT P1-1: the wire-contract size predicate. Extracted as a pure
+    /// function so the JVM unit tests can exercise it (the
+    /// `android.util.Base64` decode path is not mockable in a plain JVM).
+    internal fun refusesOversizedTlv(tlvSize: Int): Boolean = tlvSize > MAX_FRAME_BODY_SIZE
+
     /** Emit a poll result to the UI (forwards to the engine-owned flow). */
     fun emit(update: KyberPipePollEngine.PollUpdate) {
         updates.tryEmit(update)
@@ -253,6 +270,21 @@ class PollTransport(
                 Base64.decode(enc.getString("tlv_b64"), Base64.NO_WRAP)
             } catch (e: Exception) {
                 Log.d(TAG, "Clip TLV decode failed: ${e.message}")
+                return null
+            }
+            // AUDIT P1-1 (HIGH): mirror the wire-contract frame bound. The
+            // desktop producer now refuses to encrypt clipboard payloads whose
+            // TLV+base64 framing would exceed MAX_MESSAGE_SIZE (1 MiB); the
+            // phone's QUIC frame consumer hard-rejects anything larger anyway.
+            // A TLV beyond the shared bound can only come from a broken/foreign
+            // producer — refuse it here instead of feeding an oversized blob to
+            // the ratchet. The bound is the SHARED UniFFI-exported constant, so
+            // the two independently-compiled ends can never disagree.
+            if (refusesOversizedTlv(tlv.size)) {
+                Log.w(
+                    TAG,
+                    "Clip TLV is ${tlv.size} bytes > MAX_MESSAGE_SIZE ($MAX_FRAME_BODY_SIZE) — refusing oversized payload (audit P1-1)"
+                )
                 return null
             }
             try {

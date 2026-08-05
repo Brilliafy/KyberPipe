@@ -59,6 +59,10 @@ const ALLOWED_TOKEN_ACTIONS: &[&str] = &[
     "generate_shamir_recovery_shares",
     "reconstruct_key_from_shamir_shares",
     "bind_pkcs11_yubikey_hardware_token",
+    // AUDIT P4-1(c)/P5-2: trigger_desktop_media_action drives a REMOTE side
+    // effect on the phone (fires a foreign PendingIntent) — reclassified
+    // Tier-1 → Tier-2, token-gated like every other remote-action command.
+    "trigger_desktop_media_action",
 ];
 
 /// Every action string consumed by a token-gated command. Kept as a single
@@ -89,6 +93,8 @@ pub(crate) const CONSUMED_TOKEN_ACTIONS: &[&str] = &[
     "generate_shamir_recovery_shares",
     "reconstruct_key_from_shamir_shares",
     "bind_pkcs11_yubikey_hardware_token",
+    // AUDIT P4-1(c)/P5-2: mirror of the allowlist entry above.
+    "trigger_desktop_media_action",
 ];
 
 /// TEST-ONLY hermetic override: auto-confirm the native gesture dialog so
