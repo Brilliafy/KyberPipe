@@ -109,6 +109,49 @@ pub fn clear_pairing_keypair_from_keyring() {
     }
 }
 
+/// Wipe EVERY OS-keyring entry KyberPipe owns (AUDIT F12). Enumerates the full
+/// kyberpipe service set — master_identity_key, session_key, the independent
+/// snapshot wrap key, the persisted pairing keypair, the beacon ML-DSA signing
+/// keypair, the Tor onion key, the server TLS key and the ratchet watermark —
+/// plus the kyberpipe-tofu service's trusted-server TLS pin.
+///
+/// SHARED by BOTH the unpair path and the panic self-destruct path so the two
+/// can never disagree about what survives at rest once the pairing is gone.
+/// The legacy unpair path left the master session key and the pairing keypair
+/// in the OS keyring indefinitely after the user explicitly unpaired, and the
+/// next app start re-imported them even though `is_paired=false` — an attacker
+/// with a later filesystem/credential-store snapshot could decrypt historical
+/// ratchet snapshots taken before the unpair.
+///
+/// RE-PAIR SAFETY: every entry here is RECREATED by the next pairing flow
+/// (`generate_keypair` → pairing_keypair, SAS confirmation → session_key,
+/// `snapshot_key_from_keyring` → snapshot_key; the beacon signing keys, Tor
+/// onion key, server TLS key and the tofu pin are likewise regenerated on
+/// demand), so wiping the full set after an explicit unpair cannot break a
+/// future re-pair — it removes the stale pre-unpair key material that must not
+/// survive at rest.
+pub fn wipe_keyring_entries() {
+    for key_name in [
+        "master_identity_key",
+        KEYRING_SESSION_KEY,
+        KEYRING_SNAPSHOT_KEY,
+        KEYRING_PAIRING_KEYPAIR,
+        "beacon_signing_sk",
+        "beacon_signing_pk",
+        "tor_onion_key",
+        "server_tls_key",
+        KEYRING_RATCHET_WATERMARK,
+    ] {
+        if let Ok(entry) = keyring::Entry::new("kyberpipe", key_name) {
+            let _ = entry.delete_password();
+        }
+    }
+    if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
+        let _ = entry.delete_password();
+    }
+    clear_pairing_keypair_from_keyring();
+}
+
 /// Ensure an independent snapshot-wrap key exists in the keyring (generated
 /// once per install) and return it as hex.
 pub fn snapshot_key_from_keyring() -> Option<String> {
@@ -180,6 +223,29 @@ fn store_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&dir);
     dir.join("ratchet_sessions.json")
+}
+
+/// Temp file for an in-progress atomic store write (audit F19). The store is
+/// never written in place: bytes go to this path, are fsynced, then renamed
+/// over the real store path. A crash mid-write leaves only this temp file —
+/// the previous good store stays intact.
+fn store_tmp_path() -> PathBuf {
+    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|p| p.data_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("ratchet_sessions.json.tmp")
+}
+
+/// Previous-good-store backup (audit F19). Before the store path is replaced,
+/// the current file is rotated here, so a torn/replaced store can be recovered
+/// on the next restore.
+fn store_bak_path() -> PathBuf {
+    let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+        .map(|p| p.data_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("ratchet_sessions.json.bak")
 }
 
 /// SEPARATE, tamper-evident high-water-mark file (audit F16). Written on every
@@ -435,9 +501,43 @@ pub fn persist_all_ratchet_sessions(snapshot_key_hex: &str) {
         return;
     }
     if let Ok(json) = serde_json::to_string_pretty(&map) {
-        let _ = std::fs::write(store_path(), json);
-        // The store file is fully written — NOW advance the watermark file.
-        save_watermarks(&fresh_watermarks);
+        // AUDIT F19: ATOMIC store write. The legacy `fs::write(store_path())`
+        // wrote in place — a crash mid-write left a truncated
+        // `ratchet_sessions.json` that `restore_all_ratchet_sessions` failed
+        // to parse, silently discarding EVERY persisted session (full re-pair
+        // for every device). Now the bytes go to a temp file, are fsynced,
+        // and are renamed over the real path; the previous good store is
+        // rotated to `.bak` first so the next restore can recover it.
+        let tmp = store_tmp_path();
+        let mut write_ok = false;
+        if std::fs::write(&tmp, &json).is_ok() {
+            // fsync before rename so a power loss cannot leave an empty file
+            // at the temp path that then gets renamed over the good store.
+            write_ok = std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
+        }
+        if write_ok {
+            // Rotate the current good store to .bak before replacing it.
+            if store_path().exists() {
+                let _ = std::fs::rename(store_path(), store_bak_path());
+            }
+            match std::fs::rename(&tmp, store_path()) {
+                Ok(()) => {
+                    // The store file is durably in place — NOW advance the
+                    // watermark file (a crash between the two is recovered by
+                    // the watermark/rollback guard on the next restore).
+                    save_watermarks(&fresh_watermarks);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[RatchetStore] Atomic rename failed ({e}) — restoring previous store from .bak"
+                    );
+                    let _ = std::fs::rename(store_bak_path(), store_path());
+                }
+            }
+        } else {
+            tracing::warn!("[RatchetStore] Store write failed — previous store left untouched");
+        }
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -446,8 +546,83 @@ pub fn persist_all_ratchet_sessions(snapshot_key_hex: &str) {
 pub fn clear_ratchet_store() {
     let _ = std::fs::remove_file(store_path());
     let _ = std::fs::remove_file(watermark_path());
+    // AUDIT F19: also remove the atomic-write temp + .bak siblings so no
+    // ciphertext residue survives an unpair/self-destruct.
+    let _ = std::fs::remove_file(store_tmp_path());
+    let _ = std::fs::remove_file(store_bak_path());
     if let Ok(entry) = keyring::Entry::new("kyberpipe", KEYRING_RATCHET_WATERMARK) {
         let _ = entry.delete_password();
+    }
+}
+
+/// Remove ONE peer's persisted ratchet snapshot AND its watermark entry
+/// (AUDIT F13). The store is a per-peer map, so un-pairing a SECOND device
+/// must not clear every other peer's persisted sessions — the legacy unpair
+/// called [`clear_ratchet_store`], wiping the whole store (and the keyring
+/// watermark) on ANY peer's unpair, silently "un-pairing" the other devices
+/// after the next desktop restart.
+///
+/// `save_watermarks` only ever ADVANCES marks and cannot remove an entry, so
+/// the watermark tiers (keyring + file) are rewritten directly with the peer's
+/// key dropped.
+pub fn remove_ratchet_session_for_peer(peer_id: &str) {
+    if peer_id.is_empty() {
+        return;
+    }
+    // 1) Snapshot store — atomic rewrite without the peer's entry.
+    if let Ok(data) = std::fs::read_to_string(store_path()) {
+        if let Ok(mut map) = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&data) {
+            if map.remove(peer_id).is_some() {
+                if let Ok(json) = serde_json::to_string_pretty(&map) {
+                    let tmp = store_tmp_path();
+                    let mut ok = std::fs::write(&tmp, &json).is_ok()
+                        && std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
+                    if ok {
+                        if store_path().exists() {
+                            let _ = std::fs::rename(store_path(), store_bak_path());
+                        }
+                        ok = std::fs::rename(&tmp, store_path()).is_ok();
+                        if !ok {
+                            let _ = std::fs::rename(store_bak_path(), store_path());
+                        }
+                    }
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
+        }
+    }
+    // 2) Watermark tiers — keyring first (tamper-evident source of truth),
+    //    then the file fallback. Rewrite each with the peer's key removed; if
+    //    the map is now empty, delete the tier outright.
+    let remove_key =
+        |obj: &mut serde_json::Map<String, serde_json::Value>| obj.remove(peer_id).is_some();
+    if let Ok(entry) = keyring::Entry::new("kyberpipe", KEYRING_RATCHET_WATERMARK) {
+        if let Ok(data) = entry.get_password() {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(obj) = v.as_object_mut() {
+                    if remove_key(obj) {
+                        if obj.is_empty() {
+                            let _ = entry.delete_password();
+                        } else if let Ok(json) = serde_json::to_string(&v) {
+                            let _ = entry.set_password(&json);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(data) = std::fs::read_to_string(watermark_path()) {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(obj) = v.as_object_mut() {
+                if remove_key(obj) {
+                    if obj.is_empty() {
+                        let _ = std::fs::remove_file(watermark_path());
+                    } else if let Ok(json) = serde_json::to_string(&v) {
+                        let _ = std::fs::write(watermark_path(), json);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -472,8 +647,30 @@ pub fn restore_all_ratchet_sessions(snapshot_key_hex: &str) -> usize {
     let Ok(data) = std::fs::read_to_string(store_path()) else {
         return 0;
     };
-    let Ok(map) = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&data) else {
-        return 0;
+    // AUDIT F19: tolerate a torn/corrupt store (a crash from a pre-fix build,
+    // or a filesystem-level truncation) by recovering the previous good store
+    // from `.bak`. The legacy code returned 0 on ANY parse failure — silently
+    // discarding every persisted session and forcing a full re-pair.
+    let map = match serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&data) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "[RatchetStore] Store parse failed ({e}) — attempting .bak recovery (audit F19)"
+            );
+            match std::fs::read_to_string(store_bak_path())
+                .ok()
+                .and_then(|bak| {
+                    serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&bak).ok()
+                }) {
+                Some(m) => m,
+                None => {
+                    tracing::error!(
+                        "[RatchetStore] Store AND .bak unreadable — persisted sessions lost"
+                    );
+                    return 0;
+                }
+            }
+        }
     };
     let watermarks = load_watermarks();
     let mut restored = 0usize;

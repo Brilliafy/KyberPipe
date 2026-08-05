@@ -28,7 +28,16 @@ pub(crate) const SEEN_SET_MAX: usize = 4096;
 /// payload has not been acked within this window is RE-SENT on a later message
 /// (never TTL-auto-committed — committing unacknowledged key material
 /// permanently desyncs the peer).
-pub(crate) const REKEY_RETRY_TTL_SECS: u64 = 30;
+///
+/// AUDIT F3 FIX: lowered 30s → 15s. The bounded latency cost of a LOST
+/// carrier (the peer never received the rekey payload, e.g. a dropped packet
+/// at the boundary message) is exactly this window: the sender cannot commit
+/// and `should_rekey` is blocked by the pending proposal, so the payload is
+/// re-attached only on the retry path. 15s halves the recovery time while
+/// remaining far below the 60s incoming-proposal staleness TTL, so a re-send
+/// can never race the peer's eviction. Re-sends ride messages that advance
+/// the chain anyway — no extra chain burn.
+pub(crate) const REKEY_RETRY_TTL_SECS: u64 = 15;
 
 /// Current wall-clock time in unix seconds.
 pub(crate) fn now_unix_secs() -> u64 {
@@ -51,6 +60,19 @@ pub(crate) fn carrier_effective_age(c: &RekeyCarrier) -> std::time::Duration {
     let mono_elapsed = c.attached_at.elapsed();
     let wall_elapsed =
         std::time::Duration::from_secs(now_unix_secs().saturating_sub(c.attached_at_unix));
+    mono_elapsed.max(wall_elapsed)
+}
+
+/// Effective age of a pending rekey carrier measured from its FIRST staging
+/// (AUDIT F2), bounded by both clocks like [`carrier_effective_age`]. Unlike
+/// the retry age, the first-attached stamps are NEVER refreshed by re-sends,
+/// so this is the honest measure of "how long has the peer had to ACK this
+/// proposal". The resync-path staleness predicate uses THIS age; the
+/// encrypt-path retry eviction keeps using [`carrier_effective_age`].
+pub(crate) fn carrier_first_attached_effective_age(c: &RekeyCarrier) -> std::time::Duration {
+    let mono_elapsed = c.first_attached_at.elapsed();
+    let wall_elapsed =
+        std::time::Duration::from_secs(now_unix_secs().saturating_sub(c.first_attached_at_unix));
     mono_elapsed.max(wall_elapsed)
 }
 
@@ -82,12 +104,18 @@ pub(crate) fn incoming_proposal_is_stale(p: &IncomingProposal) -> bool {
 /// acked and no re-send traffic has flowed for the TTL window — the proposal
 /// is stale and must not block recovery.
 ///
-/// Audit finding #8: the effective age of every carrier is judged by
-/// [`carrier_effective_age`] — the max of the monotonic and the persisted
-/// wall-clock elapsed — so a restored carrier whose monotonic stamp was reset
-/// to `now` by `from_snapshot` still ages by its persisted wall-clock attach
-/// time and does NOT resurrect as "fresh" for the resend path while the
-/// encrypt path evicts it (or vice versa). Both consumers share the helper.
+/// AUDIT F2: the staleness window is measured from the proposal's FIRST
+/// staging (`first_attached_at*`), NOT from the last re-send. The legacy
+/// predicate measured [`carrier_effective_age`] — the last re-send — and the
+/// encrypt path refreshes that stamp every `REKEY_RETRY_TTL` (30s), so a
+/// live-but-unacked proposal whose sender kept producing traffic could never
+/// reach the 60s staleness threshold and permanently blocked the Synchronize
+/// recovery path (the peer's ACK channel down while its data channel flows).
+/// Resend frequency keeps its own budget ([`carrier_effective_age`] vs
+/// `REKEY_RETRY_TTL`); the STALENESS predicate judges the unacknowledged
+/// window from first staging (bounded by both clocks — a restored carrier
+/// whose monotonic stamp was reset to `now` by `from_snapshot` still ages by
+/// its persisted wall-clock first-attach time).
 pub(crate) fn outgoing_proposal_is_stale(queue: &VecDeque<RekeyCarrier>) -> bool {
     if queue.is_empty() {
         // No live carrier — nothing to evict (a half-committed proposal whose
@@ -95,5 +123,7 @@ pub(crate) fn outgoing_proposal_is_stale(queue: &VecDeque<RekeyCarrier>) -> bool
         return false;
     }
     let ttl = std::time::Duration::from_secs(INCOMING_REKEY_TTL_SECS);
-    queue.iter().all(|c| carrier_effective_age(c) >= ttl)
+    queue
+        .iter()
+        .all(|c| carrier_first_attached_effective_age(c) >= ttl)
 }

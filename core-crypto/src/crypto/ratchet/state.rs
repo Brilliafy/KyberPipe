@@ -35,6 +35,19 @@ pub struct RekeyCarrier {
     /// bounded by the TTL instead of resetting to "fresh" on restart (audit
     /// finding #8).
     pub attached_at_unix: u64,
+    /// Monotonic time of the proposal's FIRST staging (AUDIT F2). Never
+    /// refreshed by re-sends, unlike [`attached_at`]. NOT persisted (Instant
+    /// is not serializable); the wall-clock floor [`first_attached_at_unix`]
+    /// is what survives a restart.
+    pub first_attached_at: std::time::Instant,
+    /// Wall-clock unix seconds of the proposal's FIRST staging (AUDIT F2).
+    /// PERSISTED in the snapshot so a proposal whose re-sends keep refreshing
+    /// [`attached_at_unix`] still ages from its ORIGINAL staging time: the
+    /// resync-path staleness predicate measures the unacknowledged window
+    /// from this floor (while the encrypt-path retry budget measures the last
+    /// re-send), so a live-but-unacked proposal can never stay "fresh"
+    /// forever and block Synchronize.
+    pub first_attached_at_unix: u64,
     pub rekey_x25519_pk: Vec<u8>,
     pub rekey_mlkem_pk: Vec<u8>,
     pub rekey_ciphertext: Vec<u8>,

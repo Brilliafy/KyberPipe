@@ -36,8 +36,46 @@ class NotificationHook : NotificationListenerService() {
     companion object {
         /** Extracted media notification state — avoids holding full StatusBarNotification
          *  (which retains Context, Bitmaps, and PendingIntent references). */
+        @Volatile
         private var activeMediaPackage: String? = null
+        @Volatile
         private var activeMediaActions: List<Pair<Int, android.app.PendingIntent>>? = null
+        /// AUDIT F8: wall-clock capture time of the active media action set.
+        /// Media notifications are re-posted continuously while a player is
+        /// active, so a TTL sweep can safely drop a stale capture that survived
+        /// a missed removal event (listener restart / binder death).
+        @Volatile
+        private var activeMediaCapturedAt = 0L
+        private const val MEDIA_ACTIVE_TTL_MS = 60_000L
+        /// AUDIT F15 FIX: minimum interval between media-action triggers. The
+        /// desktop's pending_media_action is consumed one-shot per poll, but a
+        /// compromised renderer (Tier-1 command) or a bug could still drive a
+        /// trigger every 2.5s poll — rate-limit the actual PendingIntent send
+        /// to at most one per 5s window.
+        @Volatile
+        private var lastMediaTriggerAt = 0L
+        private const val MEDIA_TRIGGER_MIN_INTERVAL_MS = 5_000L
+
+        /// AUDIT F8: drop the retained foreign PendingIntents. Called from every
+        /// invalidation path — the post-trigger release, `onNotificationRemoved`,
+        /// `onListenerDisconnected` and the TTL sweep. Synchronized so a
+        /// concurrent `triggerMediaAction` can never observe a torn (package
+        /// cleared, actions still set) state.
+        private fun invalidateActiveMedia() {
+            synchronized(this) {
+                activeMediaPackage = null
+                activeMediaActions = null
+                activeMediaCapturedAt = 0L
+            }
+        }
+
+        /// AUDIT F8: true when the captured action set is fresh enough to be
+        /// safely triggered (a live player re-posts its media notification
+        /// continuously, so a capture older than the TTL is stale — its removal
+        /// event was likely missed).
+        private fun activeMediaIsFresh(): Boolean =
+            activeMediaCapturedAt != 0L &&
+                System.currentTimeMillis() - activeMediaCapturedAt <= MEDIA_ACTIVE_TTL_MS
 
         /// Maximum forwarded notification title/text length in chars
         /// (audit finding #14).
@@ -47,23 +85,57 @@ class NotificationHook : NotificationListenerService() {
         private val _notificationEvents = MutableSharedFlow<NotificationEvent>(extraBufferCapacity = 64)
         val notificationEvents: SharedFlow<NotificationEvent> = _notificationEvents.asSharedFlow()
 
-        fun triggerMediaAction(actionIndex: Int) {
-            val actions = activeMediaActions ?: return
-            val (_, pendingIntent) = actions.firstOrNull { it.first == actionIndex } ?: return
-            try {
-                pendingIntent.send()
-                Log.d("KyberpipeMedia", "Successfully sent media action pending intent at index $actionIndex")
-            } catch (e: Exception) {
-                Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
+        fun triggerMediaAction(actionIndex: Int): Boolean {
+            // AUDIT F9 FIX: `activeMediaPackage`/`activeMediaActions` are
+            // written on the NotificationListenerService binder thread
+            // (onNotificationPosted / onNotificationRemoved) and read here on
+            // whatever thread the UI calls from. Synchronize the critical
+            // section so a concurrent media-notification replacement can never
+            // let index 0 fire against a DIFFERENT app's freshly captured
+            // action list, and so the release-on-trigger cannot race a
+            // re-population.
+            return synchronized(this) {
+                // AUDIT F8: a capture that outlived its TTL (missed removal
+                // event / listener restart) must never fire a stale foreign
+                // PendingIntent — drop it and require a fresh capture.
+                if (!activeMediaIsFresh()) {
+                    if (activeMediaActions != null) {
+                        Log.d(
+                            "KyberpipeMedia",
+                            "Stale media action capture (older than ${MEDIA_ACTIVE_TTL_MS}ms) invalidated — audit F8"
+                        )
+                    }
+                    invalidateActiveMedia()
+                    return@synchronized false
+                }
+                // AUDIT F15 FIX: rate-limit the actual PendingIntent send.
+                val now = System.currentTimeMillis()
+                if (now - lastMediaTriggerAt < MEDIA_TRIGGER_MIN_INTERVAL_MS) {
+                    Log.w(
+                        "KyberpipeMedia",
+                        "Media action trigger rate-limited (min ${MEDIA_TRIGGER_MIN_INTERVAL_MS}ms between sends — audit F15)"
+                    )
+                    return@synchronized false
+                }
+                val actions = activeMediaActions ?: return@synchronized false
+                val (_, pendingIntent) = actions.firstOrNull { it.first == actionIndex }
+                    ?: return@synchronized false
+                lastMediaTriggerAt = now
+                try {
+                    pendingIntent.send()
+                    Log.d("KyberpipeMedia", "Successfully sent media action pending intent at index $actionIndex")
+                } catch (e: Exception) {
+                    Log.e("KyberpipeMedia", "Failed to send media action pending intent: ${e.message}")
+                }
+                // AUDIT #7 (LOW, follow-up): the companion statically retained other
+                // apps' PendingIntents until `onNotificationRemoved`. If a removal
+                // event is missed (listener restart), the reference persisted — a
+                // stale-PendingIntent invocation risk. Release them after the trigger
+                // (the desktop's pending_media_action is one-shot; a fresh media
+                // notification re-populates the set).
+                invalidateActiveMedia()
+                true
             }
-            // AUDIT #7 (LOW, follow-up): the companion statically retained other
-            // apps' PendingIntents until `onNotificationRemoved`. If a removal
-            // event is missed (listener restart), the reference persisted — a
-            // stale-PendingIntent invocation risk. Release them after the trigger
-            // (the desktop's pending_media_action is one-shot; a fresh media
-            // notification re-populates the set).
-            activeMediaActions = null
-            activeMediaPackage = null
         }
 
         /// Send media payload over QUIC via UniFFI bindings instead of HTTP/TCP.
@@ -220,6 +292,9 @@ class NotificationHook : NotificationListenerService() {
         activeMediaActions = sbn.notification.actions?.mapIndexed { i, action ->
             i to action.actionIntent
         }
+        // AUDIT F8: stamp the capture so the TTL sweep can drop a stale set
+        // whose removal event was missed (listener restart / binder death).
+        activeMediaCapturedAt = System.currentTimeMillis()
 
         // AUDIT FINDING #9: NotificationListenerService.onNotificationPosted runs
         // on a binder thread with strict deadlines. Bitmap JPEG-compression of
@@ -293,9 +368,21 @@ class NotificationHook : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        // AUDIT F8: invalidate the retained action set whenever the captured
+        // notification (or any notification from the captured package) goes
+        // away — a missed removal event is covered by the TTL sweep and
+        // onListenerDisconnected.
         if (sbn != null && sbn.packageName == activeMediaPackage) {
-            activeMediaPackage = null
-            activeMediaActions = null
+            invalidateActiveMedia()
         }
+    }
+
+    /// AUDIT F8: a listener restart (binder death / Settings toggle) can drop
+    /// the onNotificationRemoved callback for notifications that vanished while
+    /// disconnected — clear the retained foreign PendingIntents here so they
+    /// cannot survive the disconnect.
+    override fun onListenerDisconnected() {
+        invalidateActiveMedia()
+        super.onListenerDisconnected()
     }
 }

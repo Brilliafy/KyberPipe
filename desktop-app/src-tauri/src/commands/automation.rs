@@ -61,27 +61,37 @@ fn is_private_or_restricted(addr: &std::net::IpAddr) -> bool {
     }
 }
 
-fn native_http_fetch(url: &str) -> Result<String, String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
+/// Resolve + validate a feed host against the SSRF guard. Returns the
+/// validated `(host, port, path)` and the concrete address to connect to.
+/// The connect targets the VALIDATED IP — never a re-resolution of the
+/// hostname — so a DNS rebinding after this point cannot redirect the socket
+/// to a private/link-local/metadata target (AUDIT #18).
+fn resolve_feed_endpoint(url: &str) -> Result<(String, u16, String, std::net::SocketAddr), String> {
     let url_str = url.trim();
-    if url_str.starts_with("https://") {
-        return Err("HTTPS is not supported for automation feeds (no TLS cert validation available). Use an http:// URL or add certs to the trust store.".into());
-    }
-    if !url_str.starts_with("http://") {
+    let https = url_str.starts_with("https://");
+    let http = url_str.starts_with("http://");
+    if !http && !https {
         return Err("Only HTTP(S) URLs allowed for feed source".into());
     }
-
-    let without_proto = url_str.trim_start_matches("http://");
-    let (host, path) = match without_proto.find('/') {
+    let without_proto = url_str
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (authority, path) = match without_proto.find('/') {
         Some(pos) => (&without_proto[..pos], &without_proto[pos..]),
         None => (without_proto, "/"),
     };
-    let port = 80;
+    if authority.is_empty() {
+        return Err("Feed URL has no host".into());
+    }
+    // Support an explicit `host:port` authority.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            let port: u16 = p.parse().map_err(|_| "Invalid feed port".to_string())?;
+            (h, port)
+        }
+        _ => (authority, if https { 443 } else { 80 }),
+    };
     let addr = format!("{host}:{port}");
-
     let socket_addrs: Vec<std::net::SocketAddr> = addr
         .parse::<std::net::SocketAddr>()
         .map(|a| vec![a])
@@ -90,7 +100,7 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
                 .map(|iter| iter.collect())
                 .map_err(|e| format!("DNS resolution failed: {e}"))
         })?;
-    // SSRF protection: reject private/link-local/loopback addresses
+    // SSRF protection: reject private/link-local/loopback addresses.
     for addr in &socket_addrs {
         if is_private_or_restricted(&addr.ip()) {
             return Err(format!(
@@ -102,24 +112,34 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
     let first_addr = *socket_addrs
         .first()
         .ok_or_else(|| "No address resolved".to_string())?;
-    // AUDIT #18: re-verify the address IMMEDIATELY before connect. The connect
-    // targets the validated IP (never a re-resolution of the hostname), so a
-    // DNS rebinding after this point cannot redirect the socket to a
-    // private/link-local/metadata target.
     if is_private_or_restricted(&first_addr.ip()) {
         return Err(format!(
             "SSRF guard: refusing connect to {} (private/link-local/loopback)",
             first_addr.ip()
         ));
     }
-    let mut stream = TcpStream::connect_timeout(&first_addr, Duration::from_secs(5))
+    Ok((host.to_string(), port, path.to_string(), first_addr))
+}
+
+/// Plaintext HTTP fetch (legacy path, kept for `http://` feeds).
+fn native_http_fetch_plain(
+    host: &str,
+    port: u16,
+    path: &str,
+    addr: std::net::SocketAddr,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("Connect failed: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("Set timeout failed: {e}"))?;
+        .map_err(|e| format!("Set read timeout failed: {e}"))?;
 
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: KyberPipe/0.1\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nUser-Agent: KyberPipe/0.1\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -130,11 +150,104 @@ fn native_http_fetch(url: &str) -> Result<String, String> {
         .read_to_end(&mut response)
         .map_err(|e| format!("Read failed: {e}"))?;
 
-    let response_str = String::from_utf8_lossy(&response);
+    extract_http_body(&response)
+}
+
+/// HTTPS feed fetch with REAL certificate validation (audit F17 fix). The
+/// legacy path rejected `https://` outright, leaving the feed plaintext-only
+/// and MITM-able on hostile networks. This path performs the rustls handshake
+/// over the SSRF-validated address (SNI + cert verification against the
+/// hostname; the TCP connect targets the validated IP), then reads the HTTP
+/// response over the encrypted channel.
+fn native_https_fetch(
+    host: &str,
+    port: u16,
+    path: &str,
+    addr: std::net::SocketAddr,
+) -> Result<String, String> {
+    use rustls::pki_types::ServerName;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|_| format!("Invalid HTTPS hostname: {host}"))?;
+    let mut conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| format!("TLS setup failed: {e}"))?;
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("Connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Set read timeout failed: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Set write timeout failed: {e}"))?;
+
+    // Complete the TLS handshake (cert validation happens here).
+    while conn.is_handshaking() {
+        conn.complete_io(&mut stream)
+            .map_err(|e| format!("TLS handshake failed: {e}"))?;
+    }
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nUser-Agent: KyberPipe/0.1\r\n\r\n"
+    );
+    conn.writer()
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Write failed: {e}"))?;
+    conn.writer()
+        .flush()
+        .map_err(|e| format!("Flush failed: {e}"))?;
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        // Drain any plaintext the TLS layer has already buffered. The loop
+        // exits only on a clean TLS close (Ok(0)) or a WouldBlock (no more
+        // buffered plaintext right now).
+        loop {
+            match conn.reader().read(&mut buf) {
+                Ok(0) => return extract_http_body(&response), // clean TLS close
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(format!("HTTPS read error: {e}")),
+            }
+        }
+        // Drive the TLS state machine. This blocks on the socket up to the
+        // read timeout; a timeout (WouldBlock) means no further data arrived
+        // within the window — treat the (connection-close) response as done.
+        match conn.complete_io(&mut stream) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return extract_http_body(&response);
+            }
+            Err(e) => return Err(format!("HTTPS I/O error: {e}")),
+        }
+    }
+}
+
+fn extract_http_body(response: &[u8]) -> Result<String, String> {
+    let response_str = String::from_utf8_lossy(response);
     if let Some(body_start) = response_str.find("\r\n\r\n") {
         Ok(response_str[body_start + 4..].trim().to_string())
     } else {
         Err("No HTTP body found in response".into())
+    }
+}
+
+fn native_http_fetch(url: &str) -> Result<String, String> {
+    let (host, port, path, addr) = resolve_feed_endpoint(url)?;
+    if url.trim().starts_with("https://") {
+        native_https_fetch(&host, port, &path, addr)
+    } else {
+        native_http_fetch_plain(&host, port, &path, addr)
     }
 }
 

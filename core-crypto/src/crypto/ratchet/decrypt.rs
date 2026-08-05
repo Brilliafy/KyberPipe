@@ -1,6 +1,8 @@
 use super::super::{decapsulate_hybrid, decrypt_chacha20, KyberError};
 use super::derive::derive_tentative_msg_key;
-use super::resync::{advance_receiving_chain, prune_skip_keys, try_decrypt_with_cached_key, SkipKeyMap};
+use super::resync::{
+    advance_receiving_chain, prune_skip_keys, try_decrypt_with_cached_key, SkipKeyMap,
+};
 use super::state::{build_rekey_aad, DoubleRatchetState};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -40,6 +42,18 @@ impl DoubleRatchetState {
     /// IMPORTANT: The fallback evaluates AEAD on the pending chain WITHOUT committing state.
     /// Only after AEAD verification succeeds is the state mutation triggered.
     /// The nonce encodes the message sequence number in its first 8 bytes.
+    ///
+    /// AUDIT F4: this is the NON-rekey-aware path. It must ONLY be handed
+    /// messages verified to carry NO rekey fields — a rekey carrier is
+    /// AEAD-bound to its rekey parameters (empty AAD here cannot
+    /// authenticate), so decrypting one here silently drops the peer's
+    /// proposal (no Phase-1 derivation, no race resolution, no ACK
+    /// bookkeeping). The registry entry point
+    /// [`ratchet_ffi::ratchet_decrypt_message_impl`] enforces this with a
+    /// distinct `CarrierMisrouted` error; crate-internal callers with a full
+    /// message must use `ratchet_decrypt_with_rekey` when rekey fields are
+    /// present (the UniFFI binary dispatcher and the sync/ack consumers all
+    /// do).
     pub fn ratchet_decrypt(
         &mut self,
         nonce: &[u8; 12],
@@ -338,6 +352,24 @@ impl DoubleRatchetState {
                     )
                 })?;
                 let _ = ss_source;
+                // AUDIT F2 FIX: a NEWER-generation carrier that REPLACES an
+                // older pending proposal must not inherit the old proposal's
+                // age. `stamp_incoming_proposal_attached_at` is idempotent
+                // (first-seen wins) — the legacy code kept the older
+                // proposal's `attached_at_unix`, so a proposal staged at
+                // T-59s that gets superseded was instantly "stale" under the
+                // 60s TTL and evicted by the Synchronize recovery path
+                // prematurely. Only identical-generation re-sends (which
+                // re-derive the identical proposal) keep the first-seen stamp,
+                // so a proposal the peer never completes still ages out.
+                if self
+                    .incoming_proposal
+                    .carrier_gen
+                    .is_some_and(|g| g < nonce_gen)
+                {
+                    self.incoming_proposal.attached_at_unix = None;
+                    self.incoming_proposal.attached_at_mono = None;
+                }
                 let hk2 = Hkdf::<Sha256>::new(Some(&self.root_key), &ss);
                 let mut new_root = [0u8; 32];
                 let mut new_send = [0u8; 32];

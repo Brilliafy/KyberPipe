@@ -1,5 +1,6 @@
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { useHeartbeat } from './useHeartbeat';
 
 export function useConnectionPolling() {
   // Connection state
@@ -14,8 +15,14 @@ export function useConnectionPolling() {
   // Retry attempt counter
   const attemptCount = ref(0);
 
-  // Poller handle
-  let connPoller: ReturnType<typeof setInterval> | null = null;
+  // AUDIT F7: the periodic status refresh now subscribes to the SHARED
+  // renderer heartbeat (useHeartbeat) instead of owning a private 2 s
+  // interval. The background settings sync and the latency reset subscribe to
+  // the same ticker, so their IPC calls and ref writes are ALIGNED in one
+  // macrotask instead of racing with arbitrary phase offsets (the
+  // yellow/green flicker source). startPolling/stopPolling keep their public
+  // shape for existing callers but are now subscribe/unsubscribe handles.
+  let unsubscribe: (() => void) | null = null;
 
   /**
    * Fetch the latest connection status from the backend and update refs.
@@ -69,32 +76,30 @@ export function useConnectionPolling() {
   };
 
   /**
-   * Start the periodic connection-status poller (2 s interval).
-   * Safe to call multiple times – stops any existing poller first.
+   * Subscribe the status refresh to the shared heartbeat (AUDIT F7).
+   * Safe to call multiple times — unsubscribes any existing handle first.
    */
   const startPolling = () => {
     stopPolling();
-    connPoller = setInterval(checkConnectionState, 2000);
+    unsubscribe = useHeartbeat(checkConnectionState);
   };
 
   /**
-   * Stop the periodic poller if running.
+   * Unsubscribe the status refresh from the shared heartbeat.
    */
   const stopPolling = () => {
-    if (connPoller !== null) {
-      clearInterval(connPoller);
-      connPoller = null;
+    if (unsubscribe !== null) {
+      unsubscribe();
+      unsubscribe = null;
     }
   };
 
-  // Auto-start polling on mount, clean up on unmount
+  // Auto-start polling on mount. Cleanup is handled by the heartbeat's own
+  // onUnmounted (the shared ticker stops when the last subscriber leaves), so
+  // no separate onUnmounted teardown is needed here.
   onMounted(async () => {
     await checkConnectionState();
     startPolling();
-  });
-
-  onUnmounted(() => {
-    stopPolling();
   });
 
   return {

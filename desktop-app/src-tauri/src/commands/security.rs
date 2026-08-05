@@ -48,6 +48,13 @@ const ALLOWED_TOKEN_ACTIONS: &[&str] = &[
     // fresh user-gesture token.
     "execute_fallback_script",
     "read_real_clipboard",
+    // AUDIT F14: the clipboard WRITE path gets the same native-gesture token
+    // the read path already had — a compromised renderer must not plant
+    // arbitrary content into the OS clipboard (and CopyQ history) without a
+    // real user gesture.
+    "write_real_clipboard",
+    // AUDIT F17: external URL opening is token-gated (replaces opener:default).
+    "open_external_url",
     "store_key_in_secure_enclave",
     "generate_shamir_recovery_shares",
     "reconstruct_key_from_shamir_shares",
@@ -71,6 +78,13 @@ pub(crate) const CONSUMED_TOKEN_ACTIONS: &[&str] = &[
     "execute_boa_script",
     "execute_fallback_script",
     "read_real_clipboard",
+    // AUDIT F14: the clipboard WRITE path gets the same native-gesture token
+    // the read path already had — a compromised renderer must not plant
+    // arbitrary content into the OS clipboard (and CopyQ history) without a
+    // real user gesture.
+    "write_real_clipboard",
+    // AUDIT F17: external URL opening is token-gated (replaces opener:default).
+    "open_external_url",
     "store_key_in_secure_enclave",
     "generate_shamir_recovery_shares",
     "reconstruct_key_from_shamir_shares",
@@ -342,35 +356,26 @@ pub fn trigger_panic_self_destruct(
         settings.paired_device_name = None;
         settings.paired_device_picture = None;
     }
+    // AUDIT F1: clear the persisted pairing identity so a later boot cannot
+    // rebuild a stale mTLS allowlist / peer map after self-destruct.
+    state.clear_persisted_pairing_identity();
+    // AUDIT F16: tear down any running tor daemon so no onion service with a
+    // QR-embedded client-auth credential survives a self-destruct.
+    state.stop_tor();
     state.save_settings();
 
-    // Wipe OS keyring entries. Enumerate EVERY kyberpipe service entry:
-    // master_identity_key, session_key, and the independent ratchet snapshot
-    // wrap key — plus the kyberpipe-tofu service's trusted-server TLS pin.
+    // Wipe OS keyring entries — the SHARED routine (AUDIT F12) so the unpair
+    // path and this self-destruct path can never disagree about what survives
+    // at rest. Enumerates EVERY kyberpipe service entry: master_identity_key,
+    // session_key, the independent ratchet snapshot wrap key, the persisted
+    // pairing keypair, the beacon ML-DSA signing keypair, the Tor onion key,
+    // the server TLS key and the ratchet watermark — plus the kyberpipe-tofu
+    // service's trusted-server TLS pin.
     // (Audit finding #16: the old path left snapshot_key and the TLS pin alive
     // after self-destruct. Audit KYP-2026-02 #13/#15: the beacon ML-DSA signing
     // key, the persisted pairing keypair, and the Tor onion key are long-term
     // identities that must not survive either.)
-    for key_name in [
-        "master_identity_key",
-        "session_key",
-        "snapshot_key",
-        "pairing_keypair",
-        "beacon_signing_sk",
-        "beacon_signing_pk",
-        "tor_onion_key",
-        "server_tls_key",
-        "ratchet_watermark",
-    ] {
-        if let Ok(entry) = keyring::Entry::new("kyberpipe", key_name) {
-            let _ = entry.delete_password();
-        }
-    }
-    if let Ok(entry) = keyring::Entry::new("kyberpipe-tofu", "server_cert_hash") {
-        let _ = entry.delete_password();
-    }
-    // Remove the persisted pairing keypair file/blob too.
-    crate::ratchet_store::clear_pairing_keypair_from_keyring();
+    crate::ratchet_store::wipe_keyring_entries();
     // Invalidate the in-memory trusted pin too.
     core_crypto::network::tls_config::store_tofu_cert_hash(String::new());
 

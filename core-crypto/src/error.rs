@@ -40,6 +40,15 @@ pub enum KyberError {
 
     #[error("[INVALID_KEY_LENGTH] expected {expected}, got {got}")]
     InvalidKeyLength { expected: u64, got: u64 },
+
+    /// AUDIT F4: a message carrying a rekey payload was routed through the
+    /// NON-rekey-aware decrypt entry point. The carrier is AEAD-bound to its
+    /// rekey parameters (empty-AAD decryption cannot authenticate), so
+    /// routing it through the plain path silently drops the peer's rekey
+    /// proposal — the distinct error makes the misrouting loud instead of a
+    /// confusing "decryption failed".
+    #[error("[CARRIER_MISROUTED] {0}")]
+    CarrierMisrouted(String),
 }
 
 impl KyberError {
@@ -58,6 +67,7 @@ impl KyberError {
             KyberError::SessionDesynchronized(_) => "SESSION_DESYNC",
             KyberError::CrossGenerationResyncRequired(_) => "CROSS_GENERATION_RESYNC_REQUIRED",
             KyberError::InvalidKeyLength { .. } => "INVALID_KEY_LENGTH",
+            KyberError::CarrierMisrouted(_) => "CARRIER_MISROUTED",
         }
     }
 }

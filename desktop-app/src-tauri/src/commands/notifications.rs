@@ -143,6 +143,19 @@ pub fn send_hardware_command(
 
 #[tauri::command]
 pub fn trigger_desktop_media_action(action_index: u32, state: State<'_, std::sync::Arc<AppState>>) {
+    // AUDIT F18 FIX: validate the index against the phone's LAST-KNOWN media
+    // actions before it can be surfaced to the phone's poll. The phone fires
+    // the indexed PendingIntent, so an out-of-range or stale index from a
+    // compromised renderer (Tier-1 command) or a bug would otherwise trigger
+    // a foreign app's action on the phone with zero desktop-side validation.
+    let known = state.get_media_state();
+    let valid = known.actions.iter().any(|a| a.index == action_index);
+    if !valid {
+        state.add_log(format!(
+            "[Media] Ignoring action index {action_index} — not in the phone's known media action list (audit F18)"
+        ));
+        return;
+    }
     state.set_pending_media_action(Some(action_index));
     state.add_log(format!(
         "[Media] Desktop triggered action index: {action_index}"

@@ -159,8 +159,15 @@ class MediaState(
 ) {
     fun onPollUpdate(update: KyberPipePollEngine.PollUpdate) {
         update.pendingMediaAction?.let { idx ->
-            org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(idx)
-            addLog("[Media] Triggered media action index $idx from PC")
+            // AUDIT F9/F15: `triggerMediaAction` now returns whether the
+            // action was actually dispatched (rate-limited / stale-index
+            // triggers are refused) — log the truth, not the intent.
+            val sent = org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(idx)
+            if (sent) {
+                addLog("[Media] Triggered media action index $idx from PC")
+            } else {
+                addLog("[Media] Media action index $idx not dispatched (stale, out-of-range, or rate-limited)")
+            }
         }
     }
 }

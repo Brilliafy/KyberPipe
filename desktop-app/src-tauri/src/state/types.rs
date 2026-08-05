@@ -1,7 +1,7 @@
 // AUDIT #21: the clipboard deduplicator is an app-level helper — it now lives
 // in `core_crypto::utils`, not the crypto-primitive re-export module.
-use core_crypto::utils::ClipboardDeduplicator;
 use core_crypto::packets::{SensorPacket, SmsPacket};
+use core_crypto::utils::ClipboardDeduplicator;
 use core_crypto::PqKeyPair;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -52,18 +52,35 @@ impl std::fmt::Display for SecureString {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AppSettings {
+    /// Every field carries `#[serde(default)]` (AUDIT F1 hardening): now that
+    /// settings.json is LOADED at startup, a file written by an older build
+    /// (or missing any field) must deserialize to defaults instead of failing
+    /// the whole parse and silently discarding all persisted settings.
+    #[serde(default)]
     pub device_name: Option<String>,
+    #[serde(default)]
     pub device_picture: Option<String>,
+    #[serde(default)]
     pub paired_device_name: Option<String>,
+    #[serde(default)]
     pub paired_device_picture: Option<String>,
+    #[serde(default)]
     pub ddns_hostname: String,
+    #[serde(default)]
     pub enable_upnp: bool,
+    #[serde(default)]
     pub enable_ddns: bool,
+    #[serde(default)]
     pub is_paired: bool,
+    #[serde(default)]
     pub file_access_granted_desktop: bool,
+    #[serde(default)]
     pub file_access_granted_phone: bool,
+    #[serde(default)]
     pub theme_mode: Option<String>,
+    #[serde(default)]
     pub pathway_order: Option<Vec<String>>,
+    #[serde(default)]
     pub wireguard_active: bool,
     #[serde(default)]
     pub yubikey_bound: bool,
@@ -83,6 +100,25 @@ pub struct AppSettings {
     /// is emitted instead).
     #[serde(default = "default_true")]
     pub inbound_clipboard_enabled: bool,
+    /// ── Persisted pairing identity (audit F1 fix) ──
+    /// These four fields are PUBLIC data (certificate hashes + peer public
+    /// keys) — safe to store in settings.json. They let a desktop restart
+    /// rebuild the mTLS client-cert allowlist and the per-peer cert→ratchet
+    /// routing map, which the legacy code kept process-global/in-memory only:
+    /// after ANY restart `is_paired` stayed true (persisted) while the
+    /// allowlist and peer map came back empty, so every inbound stream was
+    /// rejected with "Peer certificate not authorized" while the UI still
+    /// showed paired — a silent data-plane outage.
+    #[serde(default)]
+    pub paired_client_cert_hash: String,
+    #[serde(default)]
+    pub pairing_initiator_pk: String,
+    #[serde(default)]
+    pub pairing_initiator_x25519_pk: String,
+    /// Client-cert hash → ratchet peer id (multi-device). Restored so a second
+    /// paired device's streams route to ITS session after a restart.
+    #[serde(default)]
+    pub peer_cert_ratchet_map: std::collections::HashMap<String, String>,
 }
 
 /// Serde default for the inbound-clipboard policy: ON for backward

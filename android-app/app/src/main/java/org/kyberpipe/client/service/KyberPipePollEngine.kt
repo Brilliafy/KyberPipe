@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import org.kyberpipe.client.PairingManager
+import org.kyberpipe.client.utils.RatchetSessionRestorer
 import org.kyberpipe.client.utils.RatchetWatermarkStore
 import org.kyberpipe.client.utils.SettingsManager
 
@@ -73,6 +74,31 @@ object KyberPipePollEngine {
     private var loopScope: CoroutineScope? = null
     private var currentSettings: SettingsManager? = null
 
+    /// AUDIT F5 (MEDIUM): shared per-peer QUIC round-trip gate. The poll loop
+    /// and the SMS forwarder both acquire this BEFORE their QUIC round-trip, so
+    /// only ONE QUIC round-trip per peer can exist at a time at the Android
+    /// layer — a poll that is mid-flight can no longer cause the SMS forwarder's
+    /// attempts to hit the Rust per-peer in-flight gate's bounded wait and fail
+    /// permanently (silently dropping the SMS). The Rust gate remains as the
+    /// second line for any other sender (media push, clipboard sync, pairing).
+    /// A PLAIN lock (not a coroutine Mutex) because the SMS forwarder runs on a
+    /// raw executor thread; the poll loop's blocking acquisition is acceptable
+    /// on Dispatchers.IO.
+    private val peerSendLock = java.util.concurrent.locks.ReentrantLock()
+
+    /// Run `block` while holding the shared per-peer QUIC round-trip gate.
+    /// Waits (bounded by the holder's round-trip, never stacking) instead of
+    /// failing — the SMS forwarder's retry budget is spent on the round-trip,
+    /// not on the gate.
+    fun <T> withPeerRoundTrip(block: () -> T): T {
+        peerSendLock.lock()
+        try {
+            return block()
+        } finally {
+            peerSendLock.unlock()
+        }
+    }
+
     /// AUDIT FINDING #20: the wire protocol (request build + response parse +
     /// update emission) lives in the extracted [PollTransport] class. The
     /// engine owns ONLY the loop, reconnect gating and persistence.
@@ -97,6 +123,13 @@ object KyberPipePollEngine {
     /// a decrypt gap is observed (the desktop is ahead of our receive chain),
     /// and additionally on a slow heartbeat so the desktop's position is
     /// periodically refreshed without advancing our send chain on EVERY poll.
+    ///
+    /// AUDIT F7 FIX: `@Volatile` — `requestSync()` (invoked from the UI /
+    /// transport thread via the injected lambda) writes this while `pollOnce`
+    /// reads it on the IO thread. `@Synchronized` on `requestSync` alone does
+    /// not publish the write to the reader; a plain field could miss a sync
+    /// request indefinitely under memory-model reordering.
+    @Volatile
     private var needSync = false
 
     /// AUDIT FINDING #16: heartbeat counter — every N polls, request a sync
@@ -104,6 +137,8 @@ object KyberPipePollEngine {
     /// when no payload ever fails to decrypt (the failure signal is absent
     /// until it is too late). Kept far below the 15s desktop rate window
     /// (2.5s × 30 = 75s per heartbeat) so it never collides with the limiter.
+    /// AUDIT F7 FIX: `@Volatile` for the same cross-thread visibility reason.
+    @Volatile
     private var pollsSinceSyncRequest = 0
     private val SYNC_HEARTBEAT_EVERY = 30
 
@@ -141,6 +176,18 @@ object KyberPipePollEngine {
         }
         val ctx = context.applicationContext
         loopJob = scope.launch {
+            // AUDIT F1 (HIGH): restore the persisted ratchet snapshot BEFORE the
+            // first poll. The poll engine is the lifecycle-agnostic owner of
+            // the cold-start restore — a reboot / START_STICKY restart starts
+            // this loop with an EMPTY Rust registry, and the legacy design
+            // (restore only in MainActivity) polled forever against nothing
+            // until the user opened the app. Single-flight with MainActivity's
+            // restore via a process-wide gate inside RatchetSessionRestorer.
+            try {
+                RatchetSessionRestorer.restoreIfNeeded(currentSettings!!)
+            } catch (e: Exception) {
+                Log.d(TAG, "Snapshot restore skipped: ${e.message}")
+            }
             var backoffMs = 1000L
             while (isActive) {
                 try {
@@ -269,10 +316,17 @@ object KyberPipePollEngine {
                 // Audit finding F10: route by peer key so a multi-peer mesh
                 // never hits the wrong connection. Fall back to the legacy
                 // ACTIVE_PEER API only when no peer identity is known (no pair).
-                val resp = if (peerKey.isNotEmpty()) {
-                    uniffi.core_crypto.quicSendAndRecvTo(peerKey, 0x04.toUByte(), requestBody)
-                } else {
-                    uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
+                //
+                // AUDIT F5: the round-trip runs under the SHARED per-peer gate
+                // (`withPeerRoundTrip`) — the SMS forwarder acquires the same
+                // gate, so the two can never stack QUIC round-trips on the
+                // same peer (the SMS no longer loses to a mid-flight poll).
+                val resp = withPeerRoundTrip {
+                    if (peerKey.isNotEmpty()) {
+                        uniffi.core_crypto.quicSendAndRecvTo(peerKey, 0x04.toUByte(), requestBody)
+                    } else {
+                        uniffi.core_crypto.quicSendAndRecv(0x04.toUByte(), requestBody)
+                    }
                 }
                 // The round-trip succeeded — the request (including any peeked
                 // RekeyAck) reached the desktop. Consume the ack carrier ONLY

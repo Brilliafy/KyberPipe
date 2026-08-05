@@ -59,24 +59,14 @@ fn write_copyq_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn sync_clipboard(
-    text: String,
-    state: State<'_, std::sync::Arc<AppState>>,
-) -> Result<bool, String> {
-    if state.is_suppressed_duplicate(&text) {
-        state.add_log("[Clipboard] Suppressed duplicate or loop-back clipboard sync".to_string());
-        return Ok(false);
-    }
-    state.record_clipboard_text(&text);
-    crate::portal::sync_clipboard_text(&text)?;
-    state.add_log(format!(
-        "[Clipboard] Synced: \"{}\"",
-        text.chars().take(30).collect::<String>()
-    ));
-    Ok(true)
-}
-
+/// AUDIT F14: the renderer-facing `sync_clipboard` command is REMOVED. It was
+/// a second ungated OS-clipboard write path alongside `write_real_clipboard`
+/// (both wrote the host clipboard via `portal::sync_clipboard_text` /
+/// arboard), so a compromised renderer had two paste-jacking vectors instead
+/// of one. The trusted phone→desktop QUIC path still writes the clipboard
+/// directly via `portal::sync_clipboard_text` (no renderer involvement), and
+/// the token-gated `write_real_clipboard` now records the text for loop-back
+/// suppression (the behavior `sync_clipboard` provided).
 /// Whether an interactive display session is available. arboard's platform
 /// backends block indefinitely trying to reach a Wayland/X11 compositor when
 /// none exists (headless CI, ssh, tty) — which would hang the QUIC poll loop.
@@ -139,7 +129,31 @@ pub fn read_real_clipboard_internal() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn write_real_clipboard(text: String) -> Result<(), String> {
+pub fn write_real_clipboard(
+    text: String,
+    token: String,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    // AUDIT F14 (MEDIUM): the clipboard WRITE path now carries the same
+    // native-gesture token the READ path already required. The legacy write
+    // was renderer-trust-only — under a webview compromise (XSS, supply chain,
+    // devtools) a script could plant arbitrary content into the OS clipboard
+    // (and CopyQ history) that a subsequent paste into a terminal/editor could
+    // execute. With the token, a compromised renderer can only trigger the
+    // native dialog; the write happens only when a real user clicks "Yes".
+    if !crate::commands::security::consume_privilege_token("write_real_clipboard", &token) {
+        return Err("Writing the host clipboard requires a fresh user-gesture token".to_string());
+    }
+    // AUDIT F14: absorb the (now-removed) ungated `sync_clipboard` renderer
+    // command — record the text for loop-back suppression and log it, so the
+    // dedup/history behavior the frontend relied on is preserved on the trusted
+    // Rust side. The phone→desktop QUIC path writes via
+    // `portal::sync_clipboard_text` directly and is untouched.
+    state.record_clipboard_text(&text);
+    state.add_log(format!(
+        "[Clipboard] Synced: \"{}\"",
+        text.chars().take(30).collect::<String>()
+    ));
     let native_err = match arboard::Clipboard::new() {
         Ok(mut clipboard) => match clipboard.set_text(text.clone()) {
             Ok(_) => {

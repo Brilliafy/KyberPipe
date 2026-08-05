@@ -126,6 +126,8 @@ pub fn delete_connection(
     }
     crate::handlers::IS_SESSION_KEY_AUTHENTICATED
         .store(false, std::sync::atomic::Ordering::Release);
+    // AUDIT F16: tear down any running tor daemon created for this pairing.
+    state.stop_tor();
     state.set_session_key(crate::state::SecureString::new(String::new()));
     state.clear_all_pairing();
     {
@@ -134,6 +136,9 @@ pub fn delete_connection(
         settings.paired_device_name = None;
         settings.paired_device_picture = None;
     }
+    // AUDIT F1: clear the persisted pairing identity so a later boot cannot
+    // rebuild a stale mTLS allowlist / peer map after delete_connection.
+    state.clear_persisted_pairing_identity();
     state.save_settings();
     crate::ratchet_store::clear_ratchet_store();
     state.set_connection(

@@ -102,10 +102,15 @@ object RatchetWatermarkStore {
             )
         }
         map.put(peer, org.json.JSONArray().apply {
-            put(effective.pairingEpoch.toString())
-            put(effective.ratchetGeneration.toString())
-            put(effective.sendMessageCount.toString())
-            put(effective.recvMessageCount.toString())
+            // AUDIT F10 FIX: write RAW NUMBERS, not strings. The desktop store
+            // persists `[epoch, gen, send, recv]` as JSON numbers; the legacy
+            // `.toString()` here stored strings, a cross-platform wire drift
+            // that a stricter parser (or a >i64 epoch) would break. Numbers
+            // mirror the desktop contract exactly.
+            put(effective.pairingEpoch.toLong())
+            put(effective.ratchetGeneration.toLong())
+            put(effective.sendMessageCount.toLong())
+            put(effective.recvMessageCount.toLong())
         })
         settings.ratchetWatermarkJson = map.toString()
         return effective

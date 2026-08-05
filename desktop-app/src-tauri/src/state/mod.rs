@@ -102,9 +102,6 @@ impl AppState {
 
     // ── Clipboard Delegates ────────────────────────────────────────────
 
-    pub fn is_suppressed_duplicate(&self, text: &str) -> bool {
-        self.clipboard.is_suppressed_duplicate(text)
-    }
     pub fn record_clipboard_text(&self, text: &str) {
         self.clipboard.record_clipboard_text(text);
     }
@@ -225,6 +222,10 @@ impl AppState {
         self.pairing.get_pairing_generation()
     }
 
+    /// The legacy single-slot paired cert hash (AUDIT F13: authorization now
+    /// goes through `is_authorized_peer_cert`, which covers the multi-device
+    /// map too). Retained for the e2e test that asserts the pairing flow.
+    #[cfg(test)]
     pub fn get_paired_client_cert_hash(&self) -> String {
         self.pairing.get_paired_client_cert_hash()
     }
@@ -258,6 +259,13 @@ impl AppState {
     pub fn register_peer_cert_mapping(&self, peer_id: &str, cert_hash: &str) {
         self.pairing.register_peer_cert_mapping(peer_id, cert_hash);
     }
+    /// AUDIT F13: drop a SINGLE peer's cert→ratchet-id mapping (per-peer
+    /// unpair). The global unpair/self-destruct path clears the whole map via
+    /// `clear_all_pairing`; a SECOND device's unpair must only remove ITS
+    /// entry so the primary (and any other peer) keeps routing.
+    pub fn remove_peer_cert_mapping(&self, cert_hash: &str) {
+        self.pairing.remove_peer_cert_mapping(cert_hash);
+    }
     /// AUDIT F12 (admission): is this TLS-observed client cert hash a known
     /// paired peer? Used by the stream authorization gate.
     pub fn is_authorized_peer_cert(&self, cert_hash: &str) -> bool {
@@ -270,6 +278,67 @@ impl AppState {
 
     pub fn set_pairing_initiator_x25519_pk(&self, pk: String) {
         self.pairing.set_pairing_initiator_x25519_pk(pk);
+    }
+
+    /// Persist the PAIRED identity (cert hash + peer public keys + per-peer
+    /// cert→ratchet map) into settings.json so a desktop restart can rebuild
+    /// the mTLS allowlist and the peer routing map (audit F1 fix). All values
+    /// are public — no secret material crosses into settings.
+    pub fn persist_pairing_identity(&self) {
+        let (cert_hash, peer_id, peer_x25519, peer_map) = self.pairing.identity_snapshot();
+        {
+            let mut settings = self.settings.lock();
+            settings.paired_client_cert_hash = cert_hash;
+            settings.pairing_initiator_pk = peer_id;
+            settings.pairing_initiator_x25519_pk = peer_x25519;
+            settings.peer_cert_ratchet_map = peer_map;
+        }
+        self.save_settings();
+    }
+
+    /// Restore the PAIRED identity from persisted settings and rebuild the
+    /// core-crypto TLS client-cert allowlist (audit F1 fix). Called at startup
+    /// BEFORE the QUIC server binds, so `bind_server` constructs its verifier
+    /// with the restored allowlist (`required=true`) instead of an accept-any
+    /// empty set.
+    pub fn restore_pairing_identity(&self) {
+        let (cert_hash, peer_id, peer_x25519, peer_map) = {
+            let s = self.settings.lock();
+            (
+                s.paired_client_cert_hash.clone(),
+                s.pairing_initiator_pk.clone(),
+                s.pairing_initiator_x25519_pk.clone(),
+                s.peer_cert_ratchet_map.clone(),
+            )
+        };
+        if cert_hash.is_empty() {
+            return;
+        }
+        self.pairing
+            .restore_identity(&cert_hash, &peer_id, &peer_x25519, &peer_map);
+        for (cert, pid) in &peer_map {
+            self.pairing.register_peer_cert_mapping(pid, cert);
+        }
+        // Rebuild the TLS allowlist exactly as `perform_sas_confirmation` does:
+        // the first paired device is the seed pin, every map entry is admitted.
+        core_crypto::quic_app::set_pinned_client_cert(cert_hash.clone());
+        core_crypto::quic_app::register_allowed_client_cert(cert_hash.clone());
+        for cert in peer_map.keys() {
+            core_crypto::quic_app::register_allowed_client_cert(cert.clone());
+        }
+        self.add_log(
+            "[Pairing] Restored paired identity + mTLS allowlist from settings (audit F1)"
+                .to_string(),
+        );
+    }
+
+    /// Clear the persisted pairing-identity fields (unpair / self-destruct).
+    pub fn clear_persisted_pairing_identity(&self) {
+        let mut settings = self.settings.lock();
+        settings.paired_client_cert_hash = String::new();
+        settings.pairing_initiator_pk = String::new();
+        settings.pairing_initiator_x25519_pk = String::new();
+        settings.peer_cert_ratchet_map.clear();
     }
 
     pub fn get_sas_attempt_count(&self) -> u32 {
@@ -327,6 +396,17 @@ impl AppState {
     #[allow(dead_code)] // network delegate
     pub fn take_tor_child(&self) -> Option<std::process::Child> {
         self.network.take_tor_child()
+    }
+
+    /// Stop and reap any running tor daemon (audit F16). Called on unpair /
+    /// self-destruct so a tor daemon with a QR-embedded client-auth credential
+    /// does not outlive the pairing it was created for.
+    pub fn stop_tor(&self) {
+        if let Some(mut child) = self.network.take_tor_child() {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.add_log("[Tor] Stopped tor daemon (audit F16)".to_string());
+        }
     }
 
     pub fn set_tor_child(&self, child: std::process::Child) {

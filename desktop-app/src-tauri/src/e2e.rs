@@ -51,6 +51,19 @@ fn pairing_poll_clipboard_roundtrip() {
     // identity guard refuse to serve REGARDLESS of THIS test's own setup — make
     // the server identity hermetic so the assertion below is meaningful.
     reset_server_tls_identity();
+    // AUDIT F1: SettingsService now LOADS settings.json at startup, so a stale
+    // real-user settings file (is_paired, identity fields) would leak into
+    // this test and break the fresh-state assertions. Wipe the persisted
+    // app-data state so the test is hermetic.
+    if let Some(dirs) = directories::ProjectDirs::from("io", "github", "KyberPipe") {
+        for name in [
+            "settings.json",
+            "ratchet_sessions.json",
+            "ratchet_watermarks.json",
+        ] {
+            let _ = std::fs::remove_file(dirs.data_dir().join(name));
+        }
+    }
     // Hermetic clipboard: the wire-level rekey crossing below must be
     // deterministic. If the real OS clipboard has content, the desktop's own
     // send chain crosses seq 100 during the test and, as the initiator,
@@ -353,8 +366,11 @@ fn pairing_poll_clipboard_roundtrip() {
 
     // 9) The server's clipboard deduplicator must now hold the decrypted text's
     // hash — proof the plaintext was actually recovered, not merely acknowledged.
+    // (AUDIT F14: `is_suppressed_duplicate` was removed with the ungated
+    // `sync_clipboard` command; re-checking via `check_and_record` proves the
+    // hash was already recorded — a second check reports it as a duplicate.)
     assert!(
-        state.is_suppressed_duplicate(plaintext),
+        !state.check_and_record_clipboard(plaintext),
         "server must have recorded the decrypted clipboard text"
     );
 
@@ -393,7 +409,7 @@ fn pairing_poll_clipboard_roundtrip() {
             "clipboard msg {i} must decrypt on the wire, got: {resp_json}"
         );
         assert!(
-            state.is_suppressed_duplicate(&payload),
+            !state.check_and_record_clipboard(&payload),
             "server must have recovered plaintext of msg {i}"
         );
 

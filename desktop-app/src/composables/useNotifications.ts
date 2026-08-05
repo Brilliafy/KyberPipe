@@ -1,4 +1,4 @@
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { debounce } from './utils'
 
@@ -70,10 +70,24 @@ export function useNotifications() {
     if (notif) notifySyncChannel(notif)
   }
 
+  // AUDIT F6: the purge timer is captured and cleared on unmount — the legacy
+  // code registered the interval without a matching teardown, so every mounted
+  // instance leaked a 1-hour timer holding `autoPurgeDays` + the purge closure
+  // alive (bounded today because the app mounts once, but a repeated
+  // mount/unmount consumer would accumulate timers).
+  let purgeTimer: ReturnType<typeof setInterval> | null = null
+
   onMounted(() => {
     loadPersistedNotifications()
     purgeOldNotifications(autoPurgeDays.value)
-    setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000)
+    purgeTimer = setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000)
+  })
+
+  onUnmounted(() => {
+    if (purgeTimer !== null) {
+      clearInterval(purgeTimer)
+      purgeTimer = null
+    }
   })
 
   return {

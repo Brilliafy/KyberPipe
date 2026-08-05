@@ -85,6 +85,15 @@ pub struct RatchetSnapshot {
     /// this field existed.
     #[serde(default)]
     pub rekey_pending_confirm_queue_attached_at_unix: Vec<u64>,
+    /// Wall-clock unix time of the FIRST staging of each pending rekey
+    /// confirmation, parallel to `rekey_pending_confirm_queue` (AUDIT F2).
+    /// PERSISTED so the resync-path staleness predicate keeps measuring the
+    /// unacknowledged window from the proposal's ORIGINAL staging time across
+    /// restarts — never reset by re-sends. Serde-defaults to empty for
+    /// snapshots written before this field existed; `from_snapshot` falls back
+    /// to the last-attach wall clock (the old behavior) for those.
+    #[serde(default)]
+    pub rekey_pending_confirm_queue_first_attached_at_unix: Vec<u64>,
     pub pending_rekey_ack_seq: Option<u64>,
     /// Cumulative forward advancement budget consumed by resyncs (audit #4).
     #[serde(default)]
@@ -182,6 +191,11 @@ impl DoubleRatchetState {
                 .iter()
                 .map(|c| c.attached_at_unix)
                 .collect(),
+            rekey_pending_confirm_queue_first_attached_at_unix: self
+                .rekey_pending_confirm_queue
+                .iter()
+                .map(|c| c.first_attached_at_unix)
+                .collect(),
             pending_rekey_ack_seq: self.pending_rekey_ack_seq,
             is_initiator: self.is_initiator,
             outgoing_rekey_payload: self.outgoing_proposal.rekey_payload.clone(),
@@ -241,6 +255,19 @@ impl DoubleRatchetState {
         if confirm_attach_unix.len() < queue_len {
             confirm_attach_unix.resize(queue_len, now_unix);
         }
+        // AUDIT F2: restore the FIRST-staged wall-clock time so the resync-
+        // path staleness predicate keeps measuring the unacknowledged window
+        // from the proposal's ORIGINAL staging across restarts. When the
+        // parallel array is absent (a snapshot written by an older build)
+        // fall back to the last-attach wall clock — the old behavior, where a
+        // proposal that was never re-sent after staging ages from its staging
+        // time and one that was re-sent ages from its most recent re-send.
+        let mut confirm_first_attach_unix: Vec<u64> = snap
+            .rekey_pending_confirm_queue_first_attached_at_unix
+            .clone();
+        if confirm_first_attach_unix.len() < queue_len {
+            confirm_first_attach_unix = confirm_attach_unix.clone();
+        }
         let mut rekey_pending_confirm_queue: VecDeque<RekeyCarrier> = snap
             .rekey_pending_confirm_queue
             .iter()
@@ -252,6 +279,14 @@ impl DoubleRatchetState {
                 // keeps the carrier aging across restarts (audit finding #8).
                 attached_at: now,
                 attached_at_unix: confirm_attach_unix.get(idx).copied().unwrap_or(now_unix),
+                // Monotonic first-attach starts at "now" too (Instant cannot
+                // be restored); the persisted wall-clock floor below drives the
+                // AUDIT F2 staleness window.
+                first_attached_at: now,
+                first_attached_at_unix: confirm_first_attach_unix
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(now_unix),
                 rekey_x25519_pk: vec![],
                 rekey_mlkem_pk: vec![],
                 rekey_ciphertext: vec![],

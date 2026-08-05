@@ -190,6 +190,18 @@ pub fn run() {
         }
     }
 
+    // AUDIT F1 FIX: rebuild the pairing identity + TLS client-cert allowlist
+    // from persisted settings. `SettingsService::new` now LOADS settings.json
+    // (the legacy constructor discarded every persisted value on boot), and
+    // this call restores `paired_client_cert_hash`, the peer public keys and
+    // the per-peer cert→ratchet map into the pairing service, and re-seeds
+    // core-crypto's `ALLOWED_CLIENT_CERTS`. It MUST run before the QUIC server
+    // binds (`start_local_sync_server` in `.setup`) so `bind_server` builds
+    // its verifier with the restored allowlist (`required=true`) instead of an
+    // empty set that both accepts any client cert at TLS and rejects every
+    // stream at the authorization layer.
+    state.restore_pairing_identity();
+
     // AUDIT F11: re-create the DESKTOP session-key handle from the persisted
     // keyring entry after a restart. The handle is a process-global AtomicU64
     // that starts at 0 — previously it was only ever set during a live
@@ -273,7 +285,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate_keypair,
             save_settings,
-            sync_clipboard,
             push_sensor_reading,
             push_sms_packet,
             push_notification_packet,
@@ -313,6 +324,9 @@ pub fn run() {
             bind_pkcs11_yubikey_hardware_token,
             grant_file_access,
             open_local_file,
+            // AUDIT F17: external URL opening is token-gated + scheme
+            // allowlisted (opener:default was dropped from the capability).
+            open_external_url,
             request_firewall_open,
             create_tor_onion,
             execute_boa_script,

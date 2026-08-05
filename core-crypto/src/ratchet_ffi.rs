@@ -23,14 +23,32 @@ pub fn ratchet_encrypt_message_impl(
 
 pub fn ratchet_decrypt_message_impl(
     peer_identity: &str,
-    nonce: &[u8],
-    ciphertext: &[u8],
+    msg: &crypto::RatchetEncryptedMessage,
 ) -> Result<Vec<u8>, KyberError> {
-    let nonce_arr: [u8; 12] = nonce
+    // AUDIT F4: this entry point is the NON-rekey-aware path. A message whose
+    // TLV carries rekey fields is AEAD-bound to those fields — decrypting it
+    // here (empty AAD) would fail with a misleading "decryption failed" while
+    // silently dropping the peer's rekey proposal (no Phase-1 derivation, no
+    // race resolution, no ACK bookkeeping). Surface a DISTINCT
+    // `CarrierMisrouted` error instead so no internal caller can silently
+    // lose a carrier; the rekey-aware dispatch
+    // (`ratchet_decrypt_with_rekey_message_impl` / the UniFFI binary
+    // dispatcher) is the ONLY path that may consume rekey payloads.
+    if msg.rekey_x25519_pk.is_some()
+        || msg.rekey_mlkem_pk.is_some()
+        || msg.rekey_ciphertext.is_some()
+    {
+        return Err(KyberError::CarrierMisrouted(
+            "decrypt called on a message carrying a rekey payload — route through the rekey-aware dispatch".into(),
+        ));
+    }
+    let nonce_arr: [u8; 12] = msg
+        .nonce
+        .as_slice()
         .try_into()
         .map_err(|_| KyberError::DecryptionFailed("Nonce must be 12 bytes".into()))?;
     with_ratchet_session(peer_identity, |ratchet| {
-        ratchet.ratchet_decrypt(&nonce_arr, ciphertext)
+        ratchet.ratchet_decrypt(&nonce_arr, &msg.ciphertext)
     })
 }
 
@@ -124,8 +142,8 @@ mod registry_tests {
 
         // Bob can now decrypt a fresh message from alice (seq 151).
         let msg = ratchet_encrypt_message_impl(&alice, b"after-resync").expect("encrypt");
-        let pt = ratchet_decrypt_message_impl(&bob, &msg.nonce, &msg.ciphertext)
-            .expect("bob decrypts post-resync message");
+        let pt =
+            ratchet_decrypt_message_impl(&bob, &msg).expect("bob decrypts post-resync message");
         assert_eq!(pt, b"after-resync");
     }
 
@@ -699,13 +717,16 @@ mod registry_tests {
         // Bob sends 100 messages; Alice receives all of them → live (0,0,0,100).
         for _ in 0..100 {
             let m = ratchet_encrypt_message_impl(&bob, b"p").expect("bob encrypt");
-            ratchet_decrypt_message_impl(&alice, &m.nonce, &m.ciphertext).expect("alice decrypt");
+            ratchet_decrypt_message_impl(&alice, &m).expect("alice decrypt");
         }
         let live_wm = ratchet_session_watermark_impl(&alice)
             .expect("live wm")
             .expect("some");
         assert_eq!(live_wm.send_message_count, 0, "precondition: nothing sent");
-        assert_eq!(live_wm.recv_message_count, 100, "precondition: all received");
+        assert_eq!(
+            live_wm.recv_message_count, 100,
+            "precondition: all received"
+        );
 
         // A same-user snapshot from a device with the OPPOSITE traffic pattern:
         // ahead in send (50) but behind in recv (0). Patch the exported JSON's
@@ -743,5 +764,191 @@ mod registry_tests {
             100,
             "live receiving chain must stay positioned at seq 100"
         );
+    }
+
+    /// AUDIT F3 (LOW/MEDIUM): an AEAD-valid but MALFORMED cross-generation
+    /// Synchronize must NOT advance the live session. The legacy code ran the
+    /// rekey-aware decrypt against the LIVE state — a gen+1 packet that
+    /// authenticates on the pending chain COMMITTED the incoming rekey
+    /// (generation bump, counter reset, seen-set clear) BEFORE the payload was
+    /// verified, so a compromised/buggy paired peer could leave the session at
+    /// a new generation on an error path (the caller sees an error, the state
+    /// has already advanced, and watermark accounting no longer reflects the
+    /// jump). The decrypt now runs on a TRIAL CLONE and commits to the live
+    /// session only after decrypt AND verify both pass.
+    #[test]
+    fn cross_gen_sync_with_malformed_payload_does_not_commit() {
+        let (alice, bob) = alice_bob_registry("f3-malformed");
+
+        // Alice sends 100 messages; bob receives them so the chains align.
+        for _ in 0..100 {
+            let m = ratchet_encrypt_message_impl(&alice, b"p").expect("encrypt");
+            ratchet_decrypt_message_impl(&bob, &m).expect("decrypt");
+        }
+        // Alice stages the rekey carrier at seq 100; bob derives the pending
+        // incoming proposal (gen 1) WITHOUT committing — bob stays at gen 0.
+        let carrier = ratchet_encrypt_message_impl(&alice, b"carrier").expect("carrier");
+        assert!(
+            carrier.rekey_ciphertext.is_some(),
+            "carrier carries the rekey"
+        );
+        let rekey_x = <[u8; 32]>::try_from(carrier.rekey_x25519_pk.as_deref().unwrap()).unwrap();
+        with_ratchet_session(&bob, |r| {
+            r.ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(carrier.nonce.as_slice()).expect("nonce"),
+                &carrier.ciphertext,
+                carrier.rekey_ciphertext.as_deref(),
+                Some(&rekey_x),
+                carrier.rekey_mlkem_pk.as_deref(),
+            )
+        })
+        .expect("bob derives the pending proposal");
+        assert_eq!(
+            with_ratchet_session(&bob, |r| Ok(r.ratchet_generation)).expect("gen"),
+            0,
+            "bob must still be at gen 0 — proposal pending, not committed"
+        );
+        assert!(
+            with_ratchet_session(&bob, |r| Ok(r.incoming_proposal.root_key.is_some()
+                || r.incoming_proposal.receiving_chain_key.is_some()))
+            .expect("pending"),
+            "bob holds a pending incoming proposal"
+        );
+
+        // Alice commits her outgoing proposal (the peer's ACK) → gen 1.
+        assert!(
+            ratchet_process_rekey_ack_impl(&alice, 100).expect("ack"),
+            "alice commits her outgoing rekey"
+        );
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.ratchet_generation)).expect("gen"),
+            1,
+            "alice is at gen 1"
+        );
+
+        // The compromised/buggy paired peer produces an AEAD-VALID gen-1
+        // message whose payload is NOT a Synchronize. It authenticates on
+        // bob's pending chain (both sides derived the same rekey keys) but
+        // must NOT commit bob's session — the live state stays untouched.
+        let malformed =
+            ratchet_encrypt_message_impl(&alice, b"{\"type\":\"clipboard\",\"text\":\"pwn\"}")
+                .expect("alice (gen 1) encrypts a non-sync payload")
+                .to_binary()
+                .expect("binary");
+        assert!(
+            ratchet_process_synchronize_impl(&bob, &malformed).is_err(),
+            "malformed cross-gen sync must be rejected"
+        );
+        assert_eq!(
+            with_ratchet_session(&bob, |r| Ok(r.ratchet_generation)).expect("gen"),
+            0,
+            "the session must NOT advance on an AEAD-valid-but-malformed sync (AUDIT F3)"
+        );
+        assert!(
+            with_ratchet_session(&bob, |r| Ok(r.incoming_proposal.root_key.is_some()
+                || r.incoming_proposal.receiving_chain_key.is_some()))
+            .expect("pending"),
+            "the pending incoming proposal must survive the rejected sync"
+        );
+    }
+
+    /// AUDIT F3 (control): a WELL-FORMED cross-generation Synchronize still
+    /// applies — the trial clone's decrypt + verify both pass, and the session
+    /// advances to gen 1 exactly as before.
+    #[test]
+    fn cross_gen_sync_with_valid_payload_commits() {
+        let (alice, bob) = alice_bob_registry("f3-valid");
+        for _ in 0..100 {
+            let m = ratchet_encrypt_message_impl(&alice, b"p").expect("encrypt");
+            ratchet_decrypt_message_impl(&bob, &m).expect("decrypt");
+        }
+        let carrier = ratchet_encrypt_message_impl(&alice, b"carrier").expect("carrier");
+        let rekey_x = <[u8; 32]>::try_from(carrier.rekey_x25519_pk.as_deref().unwrap()).unwrap();
+        with_ratchet_session(&bob, |r| {
+            r.ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(carrier.nonce.as_slice()).expect("nonce"),
+                &carrier.ciphertext,
+                carrier.rekey_ciphertext.as_deref(),
+                Some(&rekey_x),
+                carrier.rekey_mlkem_pk.as_deref(),
+            )
+        })
+        .expect("bob derives the pending proposal");
+        assert!(
+            ratchet_process_rekey_ack_impl(&alice, 100).expect("ack"),
+            "alice commits her outgoing rekey"
+        );
+        assert_eq!(
+            with_ratchet_session(&alice, |r| Ok(r.ratchet_generation)).expect("gen"),
+            1
+        );
+
+        // A REAL Synchronize from gen 1 applies and advances bob.
+        let sync = ratchet_synchronize_packet_binary_impl(&alice).expect("gen-1 sync");
+        let res = ratchet_process_synchronize_impl(&bob, &sync).expect("apply cross-gen sync");
+        assert_eq!(res, 0);
+        assert_eq!(
+            with_ratchet_session(&bob, |r| Ok(r.ratchet_generation)).expect("gen"),
+            1,
+            "a valid cross-generation sync must commit the pending proposal"
+        );
+    }
+
+    /// AUDIT F4 (LOW): the internal non-rekey-aware decrypt entry point must
+    /// surface a DISTINCT `CarrierMisrouted` error when handed a message that
+    /// carries rekey fields, instead of failing AEAD with a misleading
+    /// "decryption failed" and silently dropping the peer's rekey proposal.
+    #[test]
+    fn plain_decrypt_rejects_carrier_with_distinct_error() {
+        let (alice, bob) = alice_bob_registry("f4-misroute");
+        // Alice sends 100 messages; bob receives them so the chains align.
+        for _ in 0..100 {
+            let m = ratchet_encrypt_message_impl(&alice, b"p").expect("encrypt");
+            ratchet_decrypt_message_impl(&bob, &m).expect("decrypt");
+        }
+        // The rekey carrier at seq 100 carries rekey fields.
+        let carrier = ratchet_encrypt_message_impl(&alice, b"carrier").expect("carrier");
+        assert!(
+            carrier.rekey_ciphertext.is_some(),
+            "carrier must carry the rekey payload"
+        );
+
+        // Routing the carrier through the PLAIN path must fail with the
+        // distinct CarrierMisrouted error — and must NOT have advanced bob's
+        // session or derived/committed anything.
+        let before = ratchet_recv_count_impl(&bob).expect("recv before");
+        let err = ratchet_decrypt_message_impl(&bob, &carrier)
+            .expect_err("plain path must reject a carrier");
+        assert!(
+            matches!(err, KyberError::CarrierMisrouted(_)),
+            "expected CarrierMisrouted, got: {err:?}"
+        );
+        assert_eq!(err.error_code(), "CARRIER_MISROUTED");
+        assert_eq!(
+            ratchet_recv_count_impl(&bob).expect("recv after"),
+            before,
+            "the misrouted carrier must not advance the chain"
+        );
+        assert!(
+            with_ratchet_session(&bob, |r| Ok(r.incoming_proposal.root_key.is_none()))
+                .expect("no proposal"),
+            "no proposal may be derived on the misrouted plain path"
+        );
+
+        // Control: the SAME carrier decrypts fine through the rekey-aware
+        // dispatch (the production path), proving only the plain entry point
+        // is blocked.
+        let rekey_x = <[u8; 32]>::try_from(carrier.rekey_x25519_pk.as_deref().unwrap()).unwrap();
+        let pt = with_ratchet_session(&bob, |r| {
+            r.ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(carrier.nonce.as_slice()).expect("nonce"),
+                &carrier.ciphertext,
+                carrier.rekey_ciphertext.as_deref(),
+                Some(&rekey_x),
+                carrier.rekey_mlkem_pk.as_deref(),
+            )
+        })
+        .expect("rekey-aware decrypt of the carrier");
+        assert_eq!(pt, b"carrier");
     }
 }
