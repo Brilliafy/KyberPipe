@@ -14,8 +14,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 core-crypto = { path = "../../core-crypto" }
+quinn = "0.11"
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
+rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.0", features = ["full"] }
@@ -26,6 +27,10 @@ arboard = "3.4"
 notify-rust = "4.11"
 keyring = "2.1"
 hex = "0.4"
+base64 = "0.22"
+# AUDIT F17: zlib inflate for the kyberpipe://pair deep-link payload
+# validation (mirrors the Android DeepLinkHandler base64(zlib) decode).
+flate2 = "1"
 mimalloc = "0.1"
 tracing = "0.1"
 rand = { package = "rand", version = "0.8" }
@@ -34,5 +39,15 @@ magic-wormhole = { version = "0.8", optional = true }
 arti-client = { version = "0.44", optional = true }
 tokio-util = "0.7"
 directories = "5.0"
+sha2 = "0.10"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# Mozilla root store for the HTTPS automation-feed path (audit F17 fix). The
+# feed transport previously rejected HTTPS outright, leaving the feed
+# plaintext-only and MITM-able on hostile networks.
+webpki-roots = "0.26"
 
 
+
+[dev-dependencies]
+wat = "1.254"

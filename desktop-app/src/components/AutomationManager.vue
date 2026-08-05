@@ -12,7 +12,6 @@ interface AutomationScript {
   name: string;
   triggerCondition: string;
   code: string;
-  isSandboxed: boolean;
   feedSourceCommand: string;
   onCompletionCode: string;
 }
@@ -28,7 +27,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: "update:currentLux", val: number): void;
-  (e: "runScript", code: string, isSandboxed: boolean, feedSourceCommand: string, onCompletionCode?: string): void;
+  (e: "runScript", code: string, feedSourceCommand: string, onCompletionCode?: string): void;
 }>();
 
 const showSimulationPanel = ref(false);
@@ -39,7 +38,6 @@ const scripts = ref<AutomationScript[]>([
     name: "Safe Sandboxed Light Guard",
     triggerCondition: "getAmbientLight() < 20.0",
     code: `const light = getAmbientLight();\nlog("Safeguarding night vision: " + light + " lux.");\n// Return state value for the completion action block to check\nlight < 20.0 ? "DARK_MODE_TRIGGER" : "NORMAL_LIGHT";`,
-    isSandboxed: true,
     feedSourceCommand: "",
     onCompletionCode: `notify-send "KyberPipe" "Environment is dark! Throttling display brightness."`
   },
@@ -48,7 +46,6 @@ const scripts = ref<AutomationScript[]>([
     name: "Battery Drain Protection",
     triggerCondition: "parseInt(getFeedData()) < 20",
     code: `const battery = parseInt(getFeedData());\nlog("Battery level retrieved: " + battery + "%");\nbattery < 20 ? "BATTERY_CRITICAL" : "OK";`,
-    isSandboxed: true,
     feedSourceCommand: "cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo 18",
     onCompletionCode: `notify-send -u critical "KyberPipe Battery Alert" "Android Sync throttled to save power."`
   },
@@ -57,7 +54,6 @@ const scripts = ref<AutomationScript[]>([
     name: "System Status Diagnostics Dispatch",
     triggerCondition: "CPU temperature check",
     code: `# Unsandboxed Bash Command script\nTEMP=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 45000)\nCPU_TEMP=$((TEMP / 1000))\necho "CPU temperature is \${CPU_TEMP}°C"\nif [ $CPU_TEMP -gt 75 ]; then\n  echo "HOT"\nelse\n  echo "COOL"\nfi`,
-    isSandboxed: false,
     feedSourceCommand: "",
     onCompletionCode: `notify-send "Thermal Check Complete" "CPU state OK."`
   }
@@ -75,7 +71,6 @@ const createScript = () => {
     name: newScriptName.value.trim(),
     triggerCondition: newScriptTrigger.value.trim() || "true",
     code: newScriptCode.value || "// Custom handler code here",
-    isSandboxed: true,
     feedSourceCommand: "",
     onCompletionCode: ""
   });
@@ -95,7 +90,7 @@ const deleteScript = (index: number) => {
 const testExecution = () => {
   const script = scripts.value[selectedIndex.value];
   if (!script) return;
-  emit("runScript", script.code, script.isSandboxed, script.feedSourceCommand, script.onCompletionCode);
+  emit("runScript", script.code, script.feedSourceCommand, script.onCompletionCode);
 };
 </script>
 
@@ -118,9 +113,7 @@ const testExecution = () => {
                @click="selectedIndex = idx">
             <div class="script-meta-row">
               <span class="script-title">{{ s.name }}</span>
-              <span class="sandbox-badge" :class="{ sandboxed: s.isSandboxed }">
-                {{ s.isSandboxed ? 'JS Sandbox' : 'Unsandboxed' }}
-              </span>
+              <span class="sandbox-badge sandboxed">JS Sandbox (enforced)</span>
             </div>
             <div class="script-trigger-text">Trigger: {{ s.triggerCondition }}</div>
             <button class="delete-btn" @click.stop="deleteScript(idx)">
@@ -145,10 +138,7 @@ const testExecution = () => {
           <div class="editor-header">
             <h3>Editing Handler: {{ scripts[selectedIndex].name }}</h3>
             <div class="sandbox-toggle-row">
-              <label class="switch-row">
-                <input type="checkbox" v-model="scripts[selectedIndex].isSandboxed" />
-                <span>Run inside isolated JS VM sandbox</span>
-              </label>
+              <span class="sandbox-badge sandboxed">JS Sandbox (always enforced — audit F22)</span>
             </div>
           </div>
 

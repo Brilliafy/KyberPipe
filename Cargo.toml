@@ -11,3 +11,16 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+# FFI safety: panics in UniFFI/JNI-exported functions must never unwind across
+# the C ABI (undefined behavior). The documented design (core-crypto's
+# ensure_panic_hook_installed + UniFFI scaffolding) contains panics with
+# `panic::catch_unwind` and returns them to callers as structured errors — but
+# `panic = "abort"` made catch_unwind a no-op, so any panic aborted the whole
+# process (and its in-memory key material) instead of being contained
+# (audit finding #13). We therefore unwind: catch_unwind works at every FFI
+# boundary, panics are contained per-call, and the panic hooks zeroize the
+# process key registry before re-raising. Only a double panic (panic while
+# panicking) still aborts — that is unrecoverable by definition.
+[profile.release]
+panic = "unwind"

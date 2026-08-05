@@ -1,4 +1,5 @@
 use crate::error::KyberError;
+use crate::quic_app::MAX_MESSAGE_SIZE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -84,10 +85,27 @@ pub enum KyberMessage {
     NotificationAction(NotificationActionPacket),
     HardwareCommand(HardwareCommandPacket),
     FileChunk(FileChunkPacket),
-    PathChallenge { challenge_token: String },
-    PathResponse { response_token: String },
-    Ping { timestamp: u64 },
-    Pong { timestamp: u64 },
+    PathChallenge {
+        challenge_token: String,
+    },
+    PathResponse {
+        response_token: String,
+    },
+    Ping {
+        timestamp: u64,
+    },
+    Pong {
+        timestamp: u64,
+    },
+    RekeyAck {
+        seq: u64,
+    },
+    /// Explicit session resync. The sender of this message communicates its
+    /// current send/recv sequence counter so the peer can re-derive skipped
+    /// chain keys after a gap exceeded `max_skip`. Always ratchet-encrypted.
+    Synchronize {
+        send_count: u64,
+    },
 }
 
 impl KyberMessage {
@@ -100,36 +118,60 @@ impl KyberMessage {
     }
 }
 
-/// Sphinx Onion Packet stub — not yet implemented.
-/// Returns an error to prevent silent use of mock values.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SphinxOnionPacket {
-    pub hop_address: String,
-    pub ephemeral_pubkey: Vec<u8>,
-    pub encrypted_routing_header: Vec<u8>,
-    pub inner_payload_ciphertext: Vec<u8>,
-}
-
-impl SphinxOnionPacket {
-    pub fn create_onion_layer(
-        _dest_address: String,
-        _inner_payload: &[u8],
-    ) -> Result<Self, KyberError> {
-        Err(KyberError::CryptoError(
-            "Sphinx onion routing not yet implemented — would use mock values".into(),
-        ))
-    }
-}
-
 /// Core payload wrappers carried across QUIC streams
+///
+/// AUDIT #2 (follow-up): per-field caps are enforced at decode so a single
+/// base64 field can never balloon to the whole frame budget and drive
+/// multi-copy heap churn on the phone. (The QUIC frame already caps the total
+/// at `MAX_MESSAGE_SIZE`, and serde_json bounds nesting at 128 — these close
+/// the per-field gap.) `icon_base64` ≤ 256 KiB and a file chunk ≤ 1 MiB of
+/// binary, enforced on the base64 character length.
 pub fn safe_decode_packet(data: &[u8]) -> Result<KyberMessage, KyberError> {
     if data.is_empty() {
         return Err(KyberError::SerializationError("Empty payload".into()));
     }
+    // Defense-in-depth total bound independent of the transport frame cap.
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(KyberError::SerializationError(format!(
+            "Payload too large ({} bytes > MAX_MESSAGE_SIZE)",
+            data.len()
+        )));
+    }
     let s = std::str::from_utf8(data)
         .map_err(|e| KyberError::SerializationError(format!("Invalid UTF-8 bytes: {e}")))?;
-    KyberMessage::from_json(s)
+    let msg = KyberMessage::from_json(s)?;
+    match &msg {
+        KyberMessage::Notification(n) => {
+            if let Some(icon) = &n.icon_base64 {
+                if icon.len() > MAX_ICON_BASE64_CHARS {
+                    return Err(KyberError::SerializationError(format!(
+                        "Notification icon too large ({} base64 chars > {})",
+                        icon.len(),
+                        MAX_ICON_BASE64_CHARS
+                    )));
+                }
+            }
+        }
+        KyberMessage::FileChunk(f) if f.data_base64.len() > MAX_FILE_CHUNK_BASE64_CHARS => {
+            return Err(KyberError::SerializationError(format!(
+                "File chunk too large ({} base64 chars > {})",
+                f.data_base64.len(),
+                MAX_FILE_CHUNK_BASE64_CHARS
+            )));
+        }
+        _ => {}
+    }
+    Ok(msg)
 }
+
+/// Max base64 chars for a notification icon (≈ 256 KiB of binary). Album art
+/// embedded in media notifications must never consume the whole frame budget
+/// or drive unbounded heap copies (audit finding #9 follow-up).
+pub const MAX_ICON_BASE64_CHARS: usize = 350_000;
+
+/// Max base64 chars for a single file chunk (≈ 1 MiB of binary) — a chunk is a
+/// bounded transfer unit, never a full-file blow-up (audit finding #9).
+pub const MAX_FILE_CHUNK_BASE64_CHARS: usize = 1_400_000;
 
 pub fn compute_sha256_hex(data: &str) -> String {
     let mut hasher = Sha256::new();

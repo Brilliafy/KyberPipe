@@ -783,6 +783,104 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -798,11 +896,9 @@ internal interface UniffiLib : Library {
         
     }
 
+    fun uniffi_core_crypto_fn_func_clear_pq_pairing_registry(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_core_crypto_fn_func_compute_sha256(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_create_binary_clipboard_packet(`mimeType`: RustBuffer.ByValue,`dataBase64`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_create_clipboard_packet(`text`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_hardware_command_packet(`commandType`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -812,63 +908,163 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_outbound_sms_packet(`recipient`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_create_sensor_packet(`lux`: Double,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_create_sms_packet(`sender`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`timestamp`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_decapsulate_pq_secret(`ciphertextHex`: RustBuffer.ByValue,`myX25519SkHex`: RustBuffer.ByValue,`myMlkemSkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_decapsulate_pq_secret_handle(`ciphertext`: RustBuffer.ByValue,`keypairHandle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_decrypt_with_raw_key_32(`sessionKey`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_decrypt_payload_with_key(`sessionKeyHex`: RustBuffer.ByValue,`nonceHex`: RustBuffer.ByValue,`ciphertextHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_derive_session_key(`sharedSecretHex`: RustBuffer.ByValue,`saltHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_derive_session_key_handle(`kemHandleId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_destroy_all_kem_handles(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_destroy_all_pq_keypair_handles(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_destroy_kem_handle(`kemHandleId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_destroy_pq_keypair_handle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_core_crypto_fn_func_dump_flight_data_recorder(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_encapsulate_pq_secret(`peerX25519PkHex`: RustBuffer.ByValue,`peerMlkemPkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_encapsulate_pq_secret_handle(`peerX25519Pk`: RustBuffer.ByValue,`peerMlkemPk`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_encrypt_payload_with_key(`sessionKeyHex`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_encrypt_with_raw_key_32(`sessionKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_evaluate_connection_hierarchy(`wifiDirectActive`: Byte,`lanActive`: Byte,`publicEndpoint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_generate_client_identity_cert(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_generate_pairing_config(`hostPkHex`: RustBuffer.ByValue,`wireguardPkHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_generate_path_challenge_tokens(`sessionKeyHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_generate_path_challenge_tokens(`sessionKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_generate_pq_keypair(uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_generate_pq_keypair_handle(uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_generate_pq_pairing_public(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_generate_pq_keypair_raw(uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_generate_rekey_ack_message(`peerIdentity`: RustBuffer.ByValue,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_generate_sas_code(`hostPkHex`: RustBuffer.ByValue,`clientPkHex`: RustBuffer.ByValue,`sharedSecretHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_generate_sas_code(`hostPk`: RustBuffer.ByValue,`clientPk`: RustBuffer.ByValue,`sharedSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_generate_sas_code_with_kem_handle(`hostPk`: RustBuffer.ByValue,`clientMlkemPk`: RustBuffer.ByValue,`kemHandleId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_get_pq_keypair_public(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_hex_decode(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_hex_encode(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_initialize_pq_handshake(uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_core_crypto_fn_func_is_duplicate_clipboard(`contentHash`: RustBuffer.ByValue,`recentHashes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
+    fun uniffi_core_crypto_fn_func_kem_sizes(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_listen_for_beacons(`timeoutSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_perform_stun_hole_punch(`stunHost`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_quic_bind_server(`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_core_crypto_fn_func_quic_bridge_touch(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_quic_capture_server_cert_hash(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_quic_connect(`host`: RustBuffer.ByValue,`port`: Short,`pinnedCertHashHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_quic_connect_pairing_bootstrap(`host`: RustBuffer.ByValue,`port`: Short,`pinnedCertHashHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_quic_connect_with_client_cert(`host`: RustBuffer.ByValue,`port`: Short,`pinnedCertHashHex`: RustBuffer.ByValue,`clientCertDer`: RustBuffer.ByValue,`clientKeyDer`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_core_crypto_fn_func_quic_disconnect(uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_core_crypto_fn_func_quic_disconnect_peer(`peerKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_quic_note_peer_candidate_address(`peerKey`: RustBuffer.ByValue,`host`: RustBuffer.ByValue,`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_quic_registered_peers(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_quic_send_and_recv(`streamType`: Byte,`bodyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_ratchet_decrypt_message(`peerIdentity`: RustBuffer.ByValue,`nonceHex`: RustBuffer.ByValue,`ciphertextHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_quic_send_and_recv_to(`peerKey`: RustBuffer.ByValue,`streamType`: Byte,`bodyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_ratchet_encrypt_message(`peerIdentity`: RustBuffer.ByValue,`plaintextHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_quic_server_cert_hash(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_ratchet_init_session(`peerIdentity`: RustBuffer.ByValue,`masterSharedSecretHex`: RustBuffer.ByValue,`isInitiator`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_quic_store_server_pin(`certHash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_ratchet_bump_pairing_epoch(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_clear_all_sessions(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_ratchet_consume_rekey_ack(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_ratchet_decrypt_message_binary(`peerIdentity`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_decrypt_with_rekey_message(`peerIdentity`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,`rekeyCiphertext`: RustBuffer.ByValue,`rekeyX25519Pk`: RustBuffer.ByValue,`rekeyMlkemPk`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_encrypt_message(`peerIdentity`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_encrypt_message_binary(`peerIdentity`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_export_session(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_export_session_wrapped(`peerIdentity`: RustBuffer.ByValue,`wrapKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack_binary(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack_binary_peek(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_import_session(`peerIdentity`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_ratchet_init_session_from_kem_handle(`peerIdentity`: RustBuffer.ByValue,`isInitiator`: Byte,`keypairHandle`: Long,`kemHandleId`: Long,`peerX25519Pk`: RustBuffer.ByValue,`peerMlkemPk`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_peer_ids(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_process_rekey_ack(`peerIdentity`: RustBuffer.ByValue,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_ratchet_process_rekey_ack_binary(`peerIdentity`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_ratchet_process_synchronize(`peerIdentity`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_ratchet_recv_count(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     fun uniffi_core_crypto_fn_func_ratchet_remove_session(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    fun uniffi_core_crypto_fn_func_ratchet_send_count(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_ratchet_session_watermark(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_snapshot_watermark(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_synchronize_packet(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_ratchet_synchronize_packet_binary(`peerIdentity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_session_derivation_salt(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_session_key_create(`keyBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun uniffi_core_crypto_fn_func_session_key_decrypt(`handle`: Long,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_session_key_destroy(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_session_key_destroy_all(uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_core_crypto_fn_func_session_key_encrypt(`handle`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_session_key_hash(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_session_key_pin(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_session_key_unpin(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_core_crypto_fn_func_toggle_flight_data_recorder(`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_core_crypto_fn_func_trigger_panic_hardware_wipe(uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_core_crypto_fn_func_verify_path_response_token(`sessionKeyHex`: RustBuffer.ByValue,`challengeToken`: RustBuffer.ByValue,`responseToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_core_crypto_fn_func_verify_mldsa_signature(`payload`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_core_crypto_fn_func_verify_path_response_token(`sessionKey`: RustBuffer.ByValue,`challengeToken`: RustBuffer.ByValue,`responseToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun ffi_core_crypto_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -982,11 +1178,9 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_core_crypto_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_core_crypto_checksum_func_clear_pq_pairing_registry(
+    ): Short
     fun uniffi_core_crypto_checksum_func_compute_sha256(
-    ): Short
-    fun uniffi_core_crypto_checksum_func_create_binary_clipboard_packet(
-    ): Short
-    fun uniffi_core_crypto_checksum_func_create_clipboard_packet(
     ): Short
     fun uniffi_core_crypto_checksum_func_create_hardware_command_packet(
     ): Short
@@ -996,37 +1190,55 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_create_outbound_sms_packet(
     ): Short
-    fun uniffi_core_crypto_checksum_func_create_sensor_packet(
-    ): Short
     fun uniffi_core_crypto_checksum_func_create_sms_packet(
     ): Short
-    fun uniffi_core_crypto_checksum_func_decapsulate_pq_secret(
+    fun uniffi_core_crypto_checksum_func_decapsulate_pq_secret_handle(
     ): Short
-    fun uniffi_core_crypto_checksum_func_decrypt_payload_with_key(
+    fun uniffi_core_crypto_checksum_func_decrypt_with_raw_key_32(
     ): Short
-    fun uniffi_core_crypto_checksum_func_derive_session_key(
+    fun uniffi_core_crypto_checksum_func_derive_session_key_handle(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_destroy_all_kem_handles(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_destroy_all_pq_keypair_handles(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_destroy_kem_handle(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_destroy_pq_keypair_handle(
     ): Short
     fun uniffi_core_crypto_checksum_func_dump_flight_data_recorder(
     ): Short
-    fun uniffi_core_crypto_checksum_func_encapsulate_pq_secret(
+    fun uniffi_core_crypto_checksum_func_encapsulate_pq_secret_handle(
     ): Short
-    fun uniffi_core_crypto_checksum_func_encrypt_payload_with_key(
+    fun uniffi_core_crypto_checksum_func_encrypt_with_raw_key_32(
     ): Short
     fun uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_generate_client_identity_cert(
     ): Short
     fun uniffi_core_crypto_checksum_func_generate_pairing_config(
     ): Short
     fun uniffi_core_crypto_checksum_func_generate_path_challenge_tokens(
     ): Short
-    fun uniffi_core_crypto_checksum_func_generate_pq_keypair(
+    fun uniffi_core_crypto_checksum_func_generate_pq_keypair_handle(
     ): Short
-    fun uniffi_core_crypto_checksum_func_generate_pq_keypair_raw(
+    fun uniffi_core_crypto_checksum_func_generate_pq_pairing_public(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_generate_rekey_ack_message(
     ): Short
     fun uniffi_core_crypto_checksum_func_generate_sas_code(
     ): Short
+    fun uniffi_core_crypto_checksum_func_generate_sas_code_with_kem_handle(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_get_pq_keypair_public(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_hex_decode(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_hex_encode(
+    ): Short
     fun uniffi_core_crypto_checksum_func_initialize_pq_handshake(
     ): Short
-    fun uniffi_core_crypto_checksum_func_is_duplicate_clipboard(
+    fun uniffi_core_crypto_checksum_func_kem_sizes(
     ): Short
     fun uniffi_core_crypto_checksum_func_listen_for_beacons(
     ): Short
@@ -1034,23 +1246,105 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_quic_bind_server(
     ): Short
+    fun uniffi_core_crypto_checksum_func_quic_bridge_touch(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_capture_server_cert_hash(
+    ): Short
     fun uniffi_core_crypto_checksum_func_quic_connect(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_connect_pairing_bootstrap(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_connect_with_client_cert(
     ): Short
     fun uniffi_core_crypto_checksum_func_quic_disconnect(
     ): Short
+    fun uniffi_core_crypto_checksum_func_quic_disconnect_peer(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_note_peer_candidate_address(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_registered_peers(
+    ): Short
     fun uniffi_core_crypto_checksum_func_quic_send_and_recv(
     ): Short
-    fun uniffi_core_crypto_checksum_func_ratchet_decrypt_message(
+    fun uniffi_core_crypto_checksum_func_quic_send_and_recv_to(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_server_cert_hash(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_quic_store_server_pin(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_bump_pairing_epoch(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_clear_all_sessions(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_consume_rekey_ack(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_decrypt_message_binary(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_decrypt_with_rekey_message(
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_encrypt_message(
     ): Short
-    fun uniffi_core_crypto_checksum_func_ratchet_init_session(
+    fun uniffi_core_crypto_checksum_func_ratchet_encrypt_message_binary(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_export_session(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_export_session_wrapped(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack_binary(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack_binary_peek(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_import_session(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_init_session_from_kem_handle(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_peer_ids(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_process_rekey_ack(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_process_rekey_ack_binary(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_process_synchronize(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_recv_count(
     ): Short
     fun uniffi_core_crypto_checksum_func_ratchet_remove_session(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_send_count(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_session_watermark(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_snapshot_watermark(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_synchronize_packet(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_ratchet_synchronize_packet_binary(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_derivation_salt(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_create(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_decrypt(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_destroy(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_destroy_all(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_encrypt(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_hash(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_pin(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_session_key_unpin(
     ): Short
     fun uniffi_core_crypto_checksum_func_toggle_flight_data_recorder(
     ): Short
     fun uniffi_core_crypto_checksum_func_trigger_panic_hardware_wipe(
+    ): Short
+    fun uniffi_core_crypto_checksum_func_verify_mldsa_signature(
     ): Short
     fun uniffi_core_crypto_checksum_func_verify_path_response_token(
     ): Short
@@ -1071,13 +1365,10 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_core_crypto_checksum_func_compute_sha256() != 51586.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_clear_pq_pairing_registry() != 26811.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_binary_clipboard_packet() != 18595.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_core_crypto_checksum_func_create_clipboard_packet() != 51241.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_compute_sha256() != 40394.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_create_hardware_command_packet() != 19744.toShort()) {
@@ -1092,52 +1383,79 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_create_outbound_sms_packet() != 47502.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_create_sensor_packet() != 5319.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_core_crypto_checksum_func_create_sms_packet() != 43116.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_decapsulate_pq_secret() != 61706.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_decapsulate_pq_secret_handle() != 698.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_decrypt_payload_with_key() != 15176.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_decrypt_with_raw_key_32() != 60802.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_derive_session_key() != 2952.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_derive_session_key_handle() != 63737.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_destroy_all_kem_handles() != 61412.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_destroy_all_pq_keypair_handles() != 34795.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_destroy_kem_handle() != 42496.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_destroy_pq_keypair_handle() != 30955.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_dump_flight_data_recorder() != 32804.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_encapsulate_pq_secret() != 46997.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_encapsulate_pq_secret_handle() != 38357.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_encrypt_payload_with_key() != 36228.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_encrypt_with_raw_key_32() != 60649.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy() != 22994.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_evaluate_connection_hierarchy() != 55367.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_client_identity_cert() != 51801.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_generate_pairing_config() != 40067.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_generate_path_challenge_tokens() != 4715.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_generate_path_challenge_tokens() != 61804.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_generate_pq_keypair() != 41040.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_generate_pq_keypair_handle() != 38617.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_generate_pq_keypair_raw() != 29139.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_generate_pq_pairing_public() != 50914.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_generate_sas_code() != 8232.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_generate_rekey_ack_message() != 3953.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_sas_code() != 14450.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_generate_sas_code_with_kem_handle() != 41168.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_get_pq_keypair_public() != 48094.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_hex_decode() != 45804.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_hex_encode() != 52476.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_initialize_pq_handshake() != 6463.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_is_duplicate_clipboard() != 42674.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_kem_sizes() != 4871.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_listen_for_beacons() != 2020.toShort()) {
@@ -1149,25 +1467,145 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_quic_bind_server() != 33706.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_core_crypto_checksum_func_quic_bridge_touch() != 40012.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_quic_capture_server_cert_hash() != 14646.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_core_crypto_checksum_func_quic_connect() != 59535.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_quic_connect_pairing_bootstrap() != 19438.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_quic_connect_with_client_cert() != 38982.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_quic_disconnect() != 12258.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_core_crypto_checksum_func_quic_disconnect_peer() != 35850.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_quic_note_peer_candidate_address() != 49314.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_quic_registered_peers() != 220.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_core_crypto_checksum_func_quic_send_and_recv() != 33263.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_message() != 54926.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_quic_send_and_recv_to() != 4617.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_ratchet_encrypt_message() != 12626.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_quic_server_cert_hash() != 37359.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_ratchet_init_session() != 60581.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_quic_store_server_pin() != 39505.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_bump_pairing_epoch() != 25355.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_clear_all_sessions() != 28796.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_consume_rekey_ack() != 30610.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_message_binary() != 47629.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_decrypt_with_rekey_message() != 56293.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_encrypt_message() != 55841.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_encrypt_message_binary() != 39239.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_export_session() != 43761.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_export_session_wrapped() != 4820.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack() != 62951.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack_binary() != 42659.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_generate_rekey_ack_binary_peek() != 42709.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_import_session() != 34088.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_init_session_from_kem_handle() != 21788.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_peer_ids() != 13027.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_process_rekey_ack() != 46160.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_process_rekey_ack_binary() != 65306.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_process_synchronize() != 33309.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_recv_count() != 12993.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_ratchet_remove_session() != 23226.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_send_count() != 16757.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_session_watermark() != 58900.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_snapshot_watermark() != 42699.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_synchronize_packet() != 44601.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_ratchet_synchronize_packet_binary() != 19114.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_derivation_salt() != 59222.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_create() != 40835.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_decrypt() != 6625.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_destroy() != 6477.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_destroy_all() != 57067.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_encrypt() != 59471.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_hash() != 47805.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_pin() != 24021.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_session_key_unpin() != 693.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_toggle_flight_data_recorder() != 35988.toShort()) {
@@ -1176,7 +1614,10 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_trigger_panic_hardware_wipe() != 51324.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_core_crypto_checksum_func_verify_path_response_token() != 12415.toShort()) {
+    if (lib.uniffi_core_crypto_checksum_func_verify_mldsa_signature() != 34450.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_core_crypto_checksum_func_verify_path_response_token() != 31779.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1442,6 +1883,47 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 
+/**
+ * A generated per-install client identity certificate (audit finding #8).
+ * `cert_der`/`key_der` are DER-encoded; `sha256_hex` is the cert fingerprint
+ * the server pins during pairing.
+ */
+data class ClientIdentityCert (
+    var `certDer`: kotlin.ByteArray, 
+    var `keyDer`: kotlin.ByteArray, 
+    var `sha256Hex`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClientIdentityCert: FfiConverterRustBuffer<ClientIdentityCert> {
+    override fun read(buf: ByteBuffer): ClientIdentityCert {
+        return ClientIdentityCert(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClientIdentityCert) = (
+            FfiConverterByteArray.allocationSize(value.`certDer`) +
+            FfiConverterByteArray.allocationSize(value.`keyDer`) +
+            FfiConverterString.allocationSize(value.`sha256Hex`)
+    )
+
+    override fun write(value: ClientIdentityCert, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`certDer`, buf)
+            FfiConverterByteArray.write(value.`keyDer`, buf)
+            FfiConverterString.write(value.`sha256Hex`, buf)
+    }
+}
+
+
+
 data class ConnectionInfo (
     var `activeTier`: kotlin.UInt, 
     var `activePathDescription`: kotlin.String, 
@@ -1483,8 +1965,8 @@ public object FfiConverterTypeConnectionInfo: FfiConverterRustBuffer<ConnectionI
 
 
 data class EncryptedPayload (
-    var `nonceHex`: kotlin.String, 
-    var `ciphertextHex`: kotlin.String
+    var `nonce`: kotlin.ByteArray, 
+    var `ciphertext`: kotlin.ByteArray
 ) {
     
     companion object
@@ -1496,19 +1978,19 @@ data class EncryptedPayload (
 public object FfiConverterTypeEncryptedPayload: FfiConverterRustBuffer<EncryptedPayload> {
     override fun read(buf: ByteBuffer): EncryptedPayload {
         return EncryptedPayload(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
     override fun allocationSize(value: EncryptedPayload) = (
-            FfiConverterString.allocationSize(value.`nonceHex`) +
-            FfiConverterString.allocationSize(value.`ciphertextHex`)
+            FfiConverterByteArray.allocationSize(value.`nonce`) +
+            FfiConverterByteArray.allocationSize(value.`ciphertext`)
     )
 
     override fun write(value: EncryptedPayload, buf: ByteBuffer) {
-            FfiConverterString.write(value.`nonceHex`, buf)
-            FfiConverterString.write(value.`ciphertextHex`, buf)
+            FfiConverterByteArray.write(value.`nonce`, buf)
+            FfiConverterByteArray.write(value.`ciphertext`, buf)
     }
 }
 
@@ -1598,9 +2080,47 @@ public object FfiConverterTypePathChallengeResult: FfiConverterRustBuffer<PathCh
 
 
 
+/**
+ * Result of a HANDLE-based encapsulation (audit KYP-2026-02 #7): the opaque
+ * handle to the KEM shared secret (kept in Rust, zeroized on destroy) plus the
+ * PUBLIC ciphertext sent to the peer. The shared secret never crosses the FFI
+ * boundary.
+ */
+data class PqKemHandleResponse (
+    var `handle`: kotlin.ULong, 
+    var `ciphertext`: kotlin.ByteArray
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePqKemHandleResponse: FfiConverterRustBuffer<PqKemHandleResponse> {
+    override fun read(buf: ByteBuffer): PqKemHandleResponse {
+        return PqKemHandleResponse(
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PqKemHandleResponse) = (
+            FfiConverterULong.allocationSize(value.`handle`) +
+            FfiConverterByteArray.allocationSize(value.`ciphertext`)
+    )
+
+    override fun write(value: PqKemHandleResponse, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`handle`, buf)
+            FfiConverterByteArray.write(value.`ciphertext`, buf)
+    }
+}
+
+
+
 data class PqKemResponse (
-    var `ciphertextHex`: kotlin.String, 
-    var `sharedSecretHex`: kotlin.String
+    var `ciphertext`: kotlin.ByteArray, 
+    var `sharedSecret`: kotlin.ByteArray
 ) {
     
     companion object
@@ -1612,65 +2132,25 @@ data class PqKemResponse (
 public object FfiConverterTypePqKemResponse: FfiConverterRustBuffer<PqKemResponse> {
     override fun read(buf: ByteBuffer): PqKemResponse {
         return PqKemResponse(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
     override fun allocationSize(value: PqKemResponse) = (
-            FfiConverterString.allocationSize(value.`ciphertextHex`) +
-            FfiConverterString.allocationSize(value.`sharedSecretHex`)
+            FfiConverterByteArray.allocationSize(value.`ciphertext`) +
+            FfiConverterByteArray.allocationSize(value.`sharedSecret`)
     )
 
     override fun write(value: PqKemResponse, buf: ByteBuffer) {
-            FfiConverterString.write(value.`ciphertextHex`, buf)
-            FfiConverterString.write(value.`sharedSecretHex`, buf)
+            FfiConverterByteArray.write(value.`ciphertext`, buf)
+            FfiConverterByteArray.write(value.`sharedSecret`, buf)
     }
 }
 
 
 
 data class PqKeyPair (
-    var `x25519PkHex`: kotlin.String, 
-    var `x25519SkHex`: kotlin.String, 
-    var `mlkemPkHex`: kotlin.String, 
-    var `mlkemSkHex`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePqKeyPair: FfiConverterRustBuffer<PqKeyPair> {
-    override fun read(buf: ByteBuffer): PqKeyPair {
-        return PqKeyPair(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PqKeyPair) = (
-            FfiConverterString.allocationSize(value.`x25519PkHex`) +
-            FfiConverterString.allocationSize(value.`x25519SkHex`) +
-            FfiConverterString.allocationSize(value.`mlkemPkHex`) +
-            FfiConverterString.allocationSize(value.`mlkemSkHex`)
-    )
-
-    override fun write(value: PqKeyPair, buf: ByteBuffer) {
-            FfiConverterString.write(value.`x25519PkHex`, buf)
-            FfiConverterString.write(value.`x25519SkHex`, buf)
-            FfiConverterString.write(value.`mlkemPkHex`, buf)
-            FfiConverterString.write(value.`mlkemSkHex`, buf)
-    }
-}
-
-
-
-data class PqKeyPairRaw (
     var `x25519Pk`: kotlin.ByteArray, 
     var `x25519Sk`: kotlin.ByteArray, 
     var `mlkemPk`: kotlin.ByteArray, 
@@ -1683,9 +2163,9 @@ data class PqKeyPairRaw (
 /**
  * @suppress
  */
-public object FfiConverterTypePqKeyPairRaw: FfiConverterRustBuffer<PqKeyPairRaw> {
-    override fun read(buf: ByteBuffer): PqKeyPairRaw {
-        return PqKeyPairRaw(
+public object FfiConverterTypePqKeyPair: FfiConverterRustBuffer<PqKeyPair> {
+    override fun read(buf: ByteBuffer): PqKeyPair {
+        return PqKeyPair(
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
@@ -1693,18 +2173,180 @@ public object FfiConverterTypePqKeyPairRaw: FfiConverterRustBuffer<PqKeyPairRaw>
         )
     }
 
-    override fun allocationSize(value: PqKeyPairRaw) = (
+    override fun allocationSize(value: PqKeyPair) = (
             FfiConverterByteArray.allocationSize(value.`x25519Pk`) +
             FfiConverterByteArray.allocationSize(value.`x25519Sk`) +
             FfiConverterByteArray.allocationSize(value.`mlkemPk`) +
             FfiConverterByteArray.allocationSize(value.`mlkemSk`)
     )
 
-    override fun write(value: PqKeyPairRaw, buf: ByteBuffer) {
+    override fun write(value: PqKeyPair, buf: ByteBuffer) {
             FfiConverterByteArray.write(value.`x25519Pk`, buf)
             FfiConverterByteArray.write(value.`x25519Sk`, buf)
             FfiConverterByteArray.write(value.`mlkemPk`, buf)
             FfiConverterByteArray.write(value.`mlkemSk`, buf)
+    }
+}
+
+
+
+/**
+ * PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
+ * halves of the keypair NEVER leave the Rust process — the renderer receives
+ * only the public keys needed to build pairing QR payloads, and the pairing
+ * handler reads the private halves from Rust state.
+ */
+data class PqPairingPublic (
+    var `x25519PkHex`: kotlin.String, 
+    var `mlkemPkHex`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePqPairingPublic: FfiConverterRustBuffer<PqPairingPublic> {
+    override fun read(buf: ByteBuffer): PqPairingPublic {
+        return PqPairingPublic(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PqPairingPublic) = (
+            FfiConverterString.allocationSize(value.`x25519PkHex`) +
+            FfiConverterString.allocationSize(value.`mlkemPkHex`)
+    )
+
+    override fun write(value: PqPairingPublic, buf: ByteBuffer) {
+            FfiConverterString.write(value.`x25519PkHex`, buf)
+            FfiConverterString.write(value.`mlkemPkHex`, buf)
+    }
+}
+
+
+
+/**
+ * Represents an encrypted ratchet message with optional DH re-key payload.
+ * UniFFI Record: nonce and ciphertext are raw byte arrays, no hex encoding.
+ *
+ * AUDIT FINDING #28: the serde path was previously a SECOND, hex-based
+ * encoding of the same three rekey fields (via `opt_hex_bytes` custom
+ * deserializers). Nothing serializes this record as JSON — the wire and the
+ * snapshot both use the length-prefixed binary TLV (`to_binary`/`from_binary`)
+ * and the decoded `RatchetSnapshot` DTO respectively — so the hex contract
+ * was dead surface that could silently drift from the live wire format. The
+ * custom hex deserializers are deleted; serde is retained only as a plain
+ * default derive (never exercised by the wire), so exactly ONE (encode,
+ * decode) pair exists: the binary TLV.
+ */
+data class RatchetEncryptedMessage (
+    var `nonce`: kotlin.ByteArray, 
+    var `ciphertext`: kotlin.ByteArray, 
+    /**
+     * If Some, this message includes a new ephemeral public key for DH ratchet re-key
+     */
+    var `rekeyX25519Pk`: kotlin.ByteArray?, 
+    var `rekeyMlkemPk`: kotlin.ByteArray?, 
+    var `rekeyCiphertext`: kotlin.ByteArray?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRatchetEncryptedMessage: FfiConverterRustBuffer<RatchetEncryptedMessage> {
+    override fun read(buf: ByteBuffer): RatchetEncryptedMessage {
+        return RatchetEncryptedMessage(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RatchetEncryptedMessage) = (
+            FfiConverterByteArray.allocationSize(value.`nonce`) +
+            FfiConverterByteArray.allocationSize(value.`ciphertext`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`rekeyX25519Pk`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`rekeyMlkemPk`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`rekeyCiphertext`)
+    )
+
+    override fun write(value: RatchetEncryptedMessage, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`nonce`, buf)
+            FfiConverterByteArray.write(value.`ciphertext`, buf)
+            FfiConverterOptionalByteArray.write(value.`rekeyX25519Pk`, buf)
+            FfiConverterOptionalByteArray.write(value.`rekeyMlkemPk`, buf)
+            FfiConverterOptionalByteArray.write(value.`rekeyCiphertext`, buf)
+    }
+}
+
+
+
+/**
+ * Full rollback watermark of a ratchet session (audit finding #2 follow-up).
+ * `(pairing_epoch, ratchet_generation, send_message_count,
+ * recv_message_count)`. The send chain is exactly as stateful as the recv
+ * chain (chain key + counter advance on every `ratchet_encrypt`), so a live
+ * session that has sent MORE than a snapshot contains must never be replaced
+ * by it: the send chain would roll back and the derived message keys +
+ * (generation, seq) nonces would be reused for NEW plaintext — the exact
+ * IV-reuse class the nonce-generation redesign eliminates elsewhere. This
+ * record is the SINGLE watermark representation shared by the UniFFI import
+ * guard, the UniFFI export surface and the store restore paths, so the
+ * comparisons cannot drift.
+ *
+ * AUDIT #1 (HIGH, one-sided rollback): ordering is COMPONENT-WISE, never
+ * lexicographic. A lexicographic order lets ONE chain's lead mask the other
+ * chain's regression (send dominates recv, so a snapshot with send=50/recv=0
+ * is judged "not a rollback" against a live session with send=0/recv=100 —
+ * and the live receiving chain, positioned at seq 100, is replaced by the
+ * snapshot's chain at seq 0: silent desync + an authenticated replay window
+ * for messages 0..=99). `is_ahead_of` is therefore the monotonic partial
+ * order (dominance), and the import guard refuses any snapshot that is not
+ * at least as advanced as the live session in EVERY component.
+ */
+data class RatchetWatermark (
+    var `pairingEpoch`: kotlin.ULong, 
+    var `ratchetGeneration`: kotlin.UInt, 
+    var `sendMessageCount`: kotlin.ULong, 
+    var `recvMessageCount`: kotlin.ULong
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRatchetWatermark: FfiConverterRustBuffer<RatchetWatermark> {
+    override fun read(buf: ByteBuffer): RatchetWatermark {
+        return RatchetWatermark(
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RatchetWatermark) = (
+            FfiConverterULong.allocationSize(value.`pairingEpoch`) +
+            FfiConverterUInt.allocationSize(value.`ratchetGeneration`) +
+            FfiConverterULong.allocationSize(value.`sendMessageCount`) +
+            FfiConverterULong.allocationSize(value.`recvMessageCount`)
+    )
+
+    override fun write(value: RatchetWatermark, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`pairingEpoch`, buf)
+            FfiConverterUInt.write(value.`ratchetGeneration`, buf)
+            FfiConverterULong.write(value.`sendMessageCount`, buf)
+            FfiConverterULong.write(value.`recvMessageCount`, buf)
     }
 }
 
@@ -1778,6 +2420,30 @@ sealed class KyberException: kotlin.Exception() {
             get() = "v1=${ v1 }"
     }
     
+    class SessionDesynchronized(
+        
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
+    /**
+     * AUDIT #3: a Synchronize packet from a HIGHER ratchet generation could
+     * not be applied because the rekey carrier that would derive the pending
+     * proposal was missed (the handoff dropped it). This is NOT a benign
+     * no-op — the session cannot silently resync across the generation
+     * boundary and the poll layer must escalate to a re-pair hint instead of
+     * retrying forever against the 15s sync rate limit.
+     */
+    class CrossGenerationResyncRequired(
+        
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
     class InvalidKeyLength(
         
         val `expected`: kotlin.ULong, 
@@ -1828,7 +2494,13 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
             8 -> KyberException.NetworkException(
                 FfiConverterString.read(buf),
                 )
-            9 -> KyberException.InvalidKeyLength(
+            9 -> KyberException.SessionDesynchronized(
+                FfiConverterString.read(buf),
+                )
+            10 -> KyberException.CrossGenerationResyncRequired(
+                FfiConverterString.read(buf),
+                )
+            11 -> KyberException.InvalidKeyLength(
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
                 )
@@ -1874,6 +2546,16 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 + FfiConverterString.allocationSize(value.v1)
             )
             is KyberException.NetworkException -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.SessionDesynchronized -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
+            is KyberException.CrossGenerationResyncRequired -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
@@ -1929,8 +2611,18 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is KyberException.InvalidKeyLength -> {
+            is KyberException.SessionDesynchronized -> {
                 buf.putInt(9)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is KyberException.CrossGenerationResyncRequired -> {
+                buf.putInt(10)
+                FfiConverterString.write(value.v1, buf)
+                Unit
+            }
+            is KyberException.InvalidKeyLength -> {
+                buf.putInt(11)
                 FfiConverterULong.write(value.`expected`, buf)
                 FfiConverterULong.write(value.`got`, buf)
                 Unit
@@ -1938,6 +2630,226 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeEncryptedPayload: FfiConverterRustBuffer<EncryptedPayload?> {
+    override fun read(buf: ByteBuffer): EncryptedPayload? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeEncryptedPayload.read(buf)
+    }
+
+    override fun allocationSize(value: EncryptedPayload?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeEncryptedPayload.allocationSize(value)
+        }
+    }
+
+    override fun write(value: EncryptedPayload?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeEncryptedPayload.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeRatchetEncryptedMessage: FfiConverterRustBuffer<RatchetEncryptedMessage?> {
+    override fun read(buf: ByteBuffer): RatchetEncryptedMessage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeRatchetEncryptedMessage.read(buf)
+    }
+
+    override fun allocationSize(value: RatchetEncryptedMessage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeRatchetEncryptedMessage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: RatchetEncryptedMessage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeRatchetEncryptedMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeRatchetWatermark: FfiConverterRustBuffer<RatchetWatermark?> {
+    override fun read(buf: ByteBuffer): RatchetWatermark? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeRatchetWatermark.read(buf)
+    }
+
+    override fun allocationSize(value: RatchetWatermark?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeRatchetWatermark.allocationSize(value)
+        }
+    }
+
+    override fun write(value: RatchetWatermark?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeRatchetWatermark.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceULong: FfiConverterRustBuffer<List<kotlin.ULong>> {
+    override fun read(buf: ByteBuffer): List<kotlin.ULong> {
+        val len = buf.getInt()
+        return List<kotlin.ULong>(len) {
+            FfiConverterULong.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.ULong>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterULong.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.ULong>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterULong.write(it, buf)
+        }
+    }
 }
 
 
@@ -1966,31 +2878,27 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
             FfiConverterString.write(it, buf)
         }
     }
-} fun `computeSha256`(`data`: kotlin.String): kotlin.String {
+}
+        /**
+         * Zeroize and clear the process-global pairing keypair registry (audit
+         * KYP-2026-02 #15). The registry is the documented source of truth for the
+         * pairing handler's private halves; without this, the private halves survived
+         * `session_key_destroy_all` / `ratchet_clear_all_sessions` on the documented
+         * API path. Wired into the desktop self-destruct, the unpair paths, and kept
+         * as the panic-hook backstop via `zeroize_process_key_registry`.
+         */ fun `clearPqPairingRegistry`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_clear_pq_pairing_registry(
+        _status)
+}
+    
+    
+ fun `computeSha256`(`data`: kotlin.ByteArray): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_compute_sha256(
-        FfiConverterString.lower(`data`),_status)
-}
-    )
-    }
-    
-
-    @Throws(KyberException::class) fun `createBinaryClipboardPacket`(`mimeType`: kotlin.String, `dataBase64`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_binary_clipboard_packet(
-        FfiConverterString.lower(`mimeType`),FfiConverterString.lower(`dataBase64`),FfiConverterULong.lower(`timestamp`),_status)
-}
-    )
-    }
-    
-
-    @Throws(KyberException::class) fun `createClipboardPacket`(`text`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_clipboard_packet(
-        FfiConverterString.lower(`text`),FfiConverterULong.lower(`timestamp`),_status)
+        FfiConverterByteArray.lower(`data`),_status)
 }
     )
     }
@@ -2036,16 +2944,6 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
-    @Throws(KyberException::class) fun `createSensorPacket`(`lux`: kotlin.Double, `timestamp`: kotlin.ULong): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_create_sensor_packet(
-        FfiConverterDouble.lower(`lux`),FfiConverterULong.lower(`timestamp`),_status)
-}
-    )
-    }
-    
-
     @Throws(KyberException::class) fun `createSmsPacket`(`sender`: kotlin.String, `body`: kotlin.String, `timestamp`: kotlin.ULong): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -2056,31 +2954,87 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
-    @Throws(KyberException::class) fun `decapsulatePqSecret`(`ciphertextHex`: kotlin.String, `myX25519SkHex`: kotlin.String, `myMlkemSkHex`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+        /**
+         * Decapsulate a hybrid KEM ciphertext with the private halves held behind
+         * `keypair_handle`, returning an opaque handle to the recovered shared secret
+         * (kept in Rust, zeroized on destroy).
+         */
+    @Throws(KyberException::class) fun `decapsulatePqSecretHandle`(`ciphertext`: kotlin.ByteArray, `keypairHandle`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_decapsulate_pq_secret(
-        FfiConverterString.lower(`ciphertextHex`),FfiConverterString.lower(`myX25519SkHex`),FfiConverterString.lower(`myMlkemSkHex`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_decapsulate_pq_secret_handle(
+        FfiConverterByteArray.lower(`ciphertext`),FfiConverterULong.lower(`keypairHandle`),_status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `decryptPayloadWithKey`(`sessionKeyHex`: kotlin.String, `nonceHex`: kotlin.String, `ciphertextHex`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+    @Throws(KyberException::class) fun `decryptWithRawKey32`(`sessionKey`: kotlin.ByteArray, `nonce`: kotlin.ByteArray, `ciphertext`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_decrypt_payload_with_key(
-        FfiConverterString.lower(`sessionKeyHex`),FfiConverterString.lower(`nonceHex`),FfiConverterString.lower(`ciphertextHex`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_decrypt_with_raw_key_32(
+        FfiConverterByteArray.lower(`sessionKey`),FfiConverterByteArray.lower(`nonce`),FfiConverterByteArray.lower(`ciphertext`),_status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `deriveSessionKey`(`sharedSecretHex`: kotlin.String, `saltHex`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+        /**
+         * Derive the session key from a handle-held KEM shared secret and return an
+         * opaque SESSION KEY handle. The session key bytes never leave Rust.
+         */
+    @Throws(KyberException::class) fun `deriveSessionKeyHandle`(`kemHandleId`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_derive_session_key(
-        FfiConverterString.lower(`sharedSecretHex`),FfiConverterString.lower(`saltHex`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_derive_session_key_handle(
+        FfiConverterULong.lower(`kemHandleId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Destroy every KEM shared-secret handle.
+         */ fun `destroyAllKemHandles`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_destroy_all_kem_handles(
+        _status)
+}
+    
+    
+
+        /**
+         * Destroy EVERY keypair handle (zeroizing all private halves) — self-destruct
+         * / unpair path.
+         */ fun `destroyAllPqKeypairHandles`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_destroy_all_pq_keypair_handles(
+        _status)
+}
+    
+    
+
+        /**
+         * Destroy a KEM shared-secret handle (zeroizing the secret).
+         */ fun `destroyKemHandle`(`kemHandleId`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_destroy_kem_handle(
+        FfiConverterULong.lower(`kemHandleId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Destroy a keypair handle, zeroizing the private halves.
+         */ fun `destroyPqKeypairHandle`(`handle`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_destroy_pq_keypair_handle(
+        FfiConverterULong.lower(`handle`),_status)
 }
     )
     }
@@ -2095,21 +3049,46 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
-    @Throws(KyberException::class) fun `encapsulatePqSecret`(`peerX25519PkHex`: kotlin.String, `peerMlkemPkHex`: kotlin.String): PqKemResponse {
-            return FfiConverterTypePqKemResponse.lift(
+        /**
+         * Initialize a ratchet session using the keypair held behind `keypair_handle`
+         * as the initial DH identity.
+         *
+         * AUDIT F10: this export is GONE. The previous signature took
+         * `master_shared_secret: Vec<u8>` — the caller had to receive and re-supply
+         * the KEM shared secret, which put the secret on the JVM heap and contradicted
+         * the documented "no secret bytes cross the FFI boundary" invariant of the
+         * handle architecture. The ONLY public entry is
+         * [`ratchet_init_session_from_kem_handle`] (handle → handle); the raw-param
+         * implementation lives crate-internal in `kem_handle` where the secret is
+         * looked up by handle and consumed without ever crossing the boundary.
+         *
+         * Encapsulate to the peer's hybrid public keys. Returns an opaque handle to
+         * the derived KEM shared secret (kept in Rust) plus the PUBLIC ciphertext that
+         * is sent to the peer. The shared secret never crosses the FFI boundary.
+         */
+    @Throws(KyberException::class) fun `encapsulatePqSecretHandle`(`peerX25519Pk`: kotlin.ByteArray, `peerMlkemPk`: kotlin.ByteArray): PqKemHandleResponse {
+            return FfiConverterTypePqKemHandleResponse.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encapsulate_pq_secret(
-        FfiConverterString.lower(`peerX25519PkHex`),FfiConverterString.lower(`peerMlkemPkHex`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encapsulate_pq_secret_handle(
+        FfiConverterByteArray.lower(`peerX25519Pk`),FfiConverterByteArray.lower(`peerMlkemPk`),_status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `encryptPayloadWithKey`(`sessionKeyHex`: kotlin.String, `data`: kotlin.String): EncryptedPayload {
+        /**
+         * AUDIT FINDING #27: this is the ONLY raw-key-across-the-boundary surface in
+         * the library. It was originally misnamed `encrypt_payload_with_handle` —
+         * which implied handle semantics while actually accepting the raw 32-byte
+         * key. It is renamed to say exactly what it does, and the internal copy is
+         * zeroized on drop so no unzeroized duplicate lingers on the stack/heap.
+         * Every other key path goes through opaque handles.
+         */
+    @Throws(KyberException::class) fun `encryptWithRawKey32`(`sessionKey`: kotlin.ByteArray, `data`: kotlin.ByteArray): EncryptedPayload {
             return FfiConverterTypeEncryptedPayload.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encrypt_payload_with_key(
-        FfiConverterString.lower(`sessionKeyHex`),FfiConverterString.lower(`data`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_encrypt_with_raw_key_32(
+        FfiConverterByteArray.lower(`sessionKey`),FfiConverterByteArray.lower(`data`),_status)
 }
     )
     }
@@ -2124,6 +3103,22 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+        /**
+         * Generate a per-install client identity certificate (DER cert + DER PKCS#8
+         * key). The Android companion persists these in a secure store and presents
+         * them on every post-pairing QUIC connection so the server authorizes by cert
+         * hash instead of IP (audit finding #8).
+         */
+    @Throws(KyberException::class) fun `generateClientIdentityCert`(): ClientIdentityCert {
+            return FfiConverterTypeClientIdentityCert.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_client_identity_cert(
+        _status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `generatePairingConfig`(`hostPkHex`: kotlin.String, `wireguardPkHex`: kotlin.String): PairingConfig {
             return FfiConverterTypePairingConfig.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -2133,41 +3128,123 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
- fun `generatePathChallengeTokens`(`sessionKeyHex`: kotlin.String): PathChallengeResult {
+
+    @Throws(KyberException::class) fun `generatePathChallengeTokens`(`sessionKey`: kotlin.ByteArray): PathChallengeResult {
             return FfiConverterTypePathChallengeResult.lift(
-    uniffiRustCall() { _status ->
+    uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_path_challenge_tokens(
-        FfiConverterString.lower(`sessionKeyHex`),_status)
+        FfiConverterByteArray.lower(`sessionKey`),_status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `generatePqKeypair`(): PqKeyPair {
-            return FfiConverterTypePqKeyPair.lift(
+        /**
+         * Generate a hybrid pairing keypair and return only an opaque handle. The
+         * private halves stay in Rust and are zeroized when the handle is destroyed.
+         */
+    @Throws(KyberException::class) fun `generatePqKeypairHandle`(): kotlin.ULong {
+            return FfiConverterULong.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_pq_keypair(
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_pq_keypair_handle(
         _status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `generatePqKeypairRaw`(): PqKeyPairRaw {
-            return FfiConverterTypePqKeyPairRaw.lift(
+        /**
+         * PUBLIC-ONLY key material for crossing the Tauri webview boundary. The secret
+         * halves of the keypair NEVER leave the Rust process — the renderer receives
+         * only the public keys needed to build pairing QR payloads, and the pairing
+         * handler reads the private halves from the process-global registry populated
+         * here (NOT a dropped temporary — audit finding #14).
+         */
+    @Throws(KyberException::class) fun `generatePqPairingPublic`(): PqPairingPublic {
+            return FfiConverterTypePqPairingPublic.lift(
     uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_pq_keypair_raw(
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_pq_pairing_public(
         _status)
 }
     )
     }
     
 
-    @Throws(KyberException::class) fun `generateSasCode`(`hostPkHex`: kotlin.String, `clientPkHex`: kotlin.String, `sharedSecretHex`: kotlin.String): kotlin.String {
+    @Throws(KyberException::class) fun `generateRekeyAckMessage`(`peerIdentity`: kotlin.String, `seq`: kotlin.ULong): RatchetEncryptedMessage {
+            return FfiConverterTypeRatchetEncryptedMessage.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_rekey_ack_message(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterULong.lower(`seq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `generateSasCode`(`hostPk`: kotlin.ByteArray, `clientPk`: kotlin.ByteArray, `sharedSecret`: kotlin.ByteArray): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_sas_code(
-        FfiConverterString.lower(`hostPkHex`),FfiConverterString.lower(`clientPkHex`),FfiConverterString.lower(`sharedSecretHex`),_status)
+        FfiConverterByteArray.lower(`hostPk`),FfiConverterByteArray.lower(`clientPk`),FfiConverterByteArray.lower(`sharedSecret`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Generate the pairing SAS from a handle-held KEM shared secret. Returns only
+         * the (public) SAS string.
+         */
+    @Throws(KyberException::class) fun `generateSasCodeWithKemHandle`(`hostPk`: kotlin.ByteArray, `clientMlkemPk`: kotlin.ByteArray, `kemHandleId`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_generate_sas_code_with_kem_handle(
+        FfiConverterByteArray.lower(`hostPk`),FfiConverterByteArray.lower(`clientMlkemPk`),FfiConverterULong.lower(`kemHandleId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The PUBLIC halves of a handle-held keypair (for QR / pairing payloads).
+         */
+    @Throws(KyberException::class) fun `getPqKeypairPublic`(`handle`: kotlin.ULong): PqPairingPublic {
+            return FfiConverterTypePqPairingPublic.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_get_pq_keypair_public(
+        FfiConverterULong.lower(`handle`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * THE shared hex→bytes codec (AUDIT #12). Mirrors [`hex_encode`].
+         */
+    @Throws(KyberException::class) fun `hexDecode`(`encoded`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_hex_decode(
+        FfiConverterString.lower(`encoded`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * THE shared byte→hex codec (AUDIT #12). One encode/decode pair, exposed via
+         * UniFFI so BOTH platforms serialize wire fields identically. The Android app
+         * previously hand-rolled `joinToString { "%02x".format(it) }` for the pairing
+         * KEM ciphertext while the desktop used the Rust `hex` crate — two
+         * independent implementations of the same serialization is exactly the drift
+         * surface the binary-TLV mandate was meant to eliminate (a future contributor
+         * "fixing" one side's encoding silently corrupts the other). Round-tripping
+         * every wire field through this codec (see the desktop wire-format conformance
+         * test) makes the encoding a single source of truth.
+         */ fun `hexEncode`(`data`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_hex_encode(
+        FfiConverterByteArray.lower(`data`),_status)
 }
     )
     }
@@ -2181,11 +3258,17 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 }
     
     
- fun `isDuplicateClipboard`(`contentHash`: kotlin.String, `recentHashes`: List<kotlin.String>): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
+
+        /**
+         * Introspect the ML-KEM-768 sizes the FFI contract is built on. Exported so
+         * Android and the desktop can assert their expectations at startup instead of
+         * failing at runtime with INVALID_KEY_LENGTH after a dependency upgrade
+         * (audit finding #12).
+         */ fun `kemSizes`(): List<kotlin.ULong> {
+            return FfiConverterSequenceULong.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_is_duplicate_clipboard(
-        FfiConverterString.lower(`contentHash`),FfiConverterSequenceString.lower(`recentHashes`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_kem_sizes(
+        _status)
 }
     )
     }
@@ -2220,11 +3303,78 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     
     
 
+        /**
+         * Touch the active QUIC connection (audit finding #25): pokes the bridge so
+         * a Doze-mode keepalive performs a REAL heartbeat instead of a fake sleep. If
+         * the connection is down (e.g. Doze dropped it), the reconnect machinery
+         * re-establishes it on the next send; the touch itself is non-blocking. Used
+         * by the Android foreground service's doze keepalive.
+         */ fun `quicBridgeTouch`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_bridge_touch(
+        _status)
+}
+    
+    
+
+        /**
+         * Capture the current server's certificate hash WITHOUT storing it (no silent
+         * TOFU). The caller persists this ONLY after out-of-band SAS confirmation so a
+         * first-connection MitM can never become the permanently trusted identity.
+         */ fun `quicCaptureServerCertHash`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_capture_server_cert_hash(
+        _status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `quicConnect`(`host`: kotlin.String, `port`: kotlin.UShort, `pinnedCertHashHex`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_connect(
         FfiConverterString.lower(`host`),FfiConverterUShort.lower(`port`),FfiConverterString.lower(`pinnedCertHashHex`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Bootstrap-pairing connect: permits private (LAN) addresses. Loopback is
+         * always blocked. `pinned_cert_hash_hex` is the SHA-256 of the server
+         * certificate that was bound into the pairing QR (audit finding #15): when
+         * provided, the client verifies the server cert against it BEFORE the KEM
+         * handshake, so a bootstrap MITM cannot present its own certificate and later
+         * become the pinned identity. Empty (legacy QR without a hash) falls back to
+         * accepting any cert for the handshake — content stays protected by the
+         * app-layer ratchet, but the pin must then be re-derived from a connection
+         * authenticated with the derived session key.
+         * ONLY use from the pairing flow (audit finding #6 — the SSRF guard
+         * previously made LAN pairing unreachable).
+         */
+    @Throws(KyberException::class) fun `quicConnectPairingBootstrap`(`host`: kotlin.String, `port`: kotlin.UShort, `pinnedCertHashHex`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_connect_pairing_bootstrap(
+        FfiConverterString.lower(`host`),FfiConverterUShort.lower(`port`),FfiConverterString.lower(`pinnedCertHashHex`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Post-pairing connect that presents a per-install client identity certificate
+         * (DER cert + DER PKCS#8 key) so the server authorizes the peer by cert hash
+         * instead of IP (audit finding #8).
+         */
+    @Throws(KyberException::class) fun `quicConnectWithClientCert`(`host`: kotlin.String, `port`: kotlin.UShort, `pinnedCertHashHex`: kotlin.String, `clientCertDer`: kotlin.ByteArray, `clientKeyDer`: kotlin.ByteArray): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_connect_with_client_cert(
+        FfiConverterString.lower(`host`),FfiConverterUShort.lower(`port`),FfiConverterString.lower(`pinnedCertHashHex`),FfiConverterByteArray.lower(`clientCertDer`),FfiConverterByteArray.lower(`clientKeyDer`),_status)
 }
     )
     }
@@ -2238,6 +3388,48 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     
     
 
+        /**
+         * Close the connection to a specific peer (mesh teardown).
+         */ fun `quicDisconnectPeer`(`peerKey`: kotlin.String)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_disconnect_peer(
+        FfiConverterString.lower(`peerKey`),_status)
+}
+    
+    
+
+        /**
+         * Register a LAST-KNOWN-GOOD candidate address for a peer (audit F3 —
+         * "Seamless Path Migration"). The reconnect path rotates through the
+         * candidate set when the primary address goes stale (DHCP renewal,
+         * Wi-Fi→cellular handoff, subnet change), so a desktop whose LAN IP changed is
+         * still reachable via an alternate address learned through beacon/mDNS
+         * discovery or a prior successful connect. The peer key is the pinned cert
+         * hash (or "ip:port" pre-pairing). Returns false when the peer is not
+         * registered or the address was already known.
+         */ fun `quicNotePeerCandidateAddress`(`peerKey`: kotlin.String, `host`: kotlin.String, `port`: kotlin.UShort): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_note_peer_candidate_address(
+        FfiConverterString.lower(`peerKey`),FfiConverterString.lower(`host`),FfiConverterUShort.lower(`port`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * List the peer keys of every registered QUIC connection.
+         */ fun `quicRegisteredPeers`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_registered_peers(
+        _status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `quicSendAndRecv`(`streamType`: kotlin.UByte, `bodyJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -2247,29 +3439,328 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     )
     }
     
- fun `ratchetDecryptMessage`(`peerIdentity`: kotlin.String, `nonceHex`: kotlin.String, `ciphertextHex`: kotlin.String): kotlin.String {
+
+        /**
+         * Send/recv on the connection registered for a SPECIFIC peer key. This is the
+         * mesh addressing path: each peer connected via `quic_connect` is stored under
+         * its own registry entry, so multiple devices can be active simultaneously.
+         * The peer key is the pinned cert hash when provided, else "ip:port".
+         *
+         * AUDIT F5: every send/recv is bounded by a hard timeout. On expiry the peer
+         * connection is CLOSED so the reconnect state machine re-establishes against
+         * the candidate address set (audit F3) — without this, a blackholed network
+         * (no ICMP, no TCP reset) would leave the poll/SMS threads blocked for minutes
+         * and every subsequent poll would reuse the same dead connection.
+         */
+    @Throws(KyberException::class) fun `quicSendAndRecvTo`(`peerKey`: kotlin.String, `streamType`: kotlin.UByte, `bodyJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_decrypt_message(
-        FfiConverterString.lower(`peerIdentity`),FfiConverterString.lower(`nonceHex`),FfiConverterString.lower(`ciphertextHex`),_status)
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_send_and_recv_to(
+        FfiConverterString.lower(`peerKey`),FfiConverterUByte.lower(`streamType`),FfiConverterString.lower(`bodyJson`),_status)
 }
     )
     }
     
- fun `ratchetEncryptMessage`(`peerIdentity`: kotlin.String, `plaintextHex`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+
+        /**
+         * SHA-256 hash (hex) of the desktop server's own identity certificate.
+         * Embedded in the pairing QR so the phone pins the certificate bound to the
+         * QR rather than the certificate observed on a (possibly MITM'd) bootstrap
+         * connection (audit finding #15).
+         */ fun `quicServerCertHash`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
     uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_server_cert_hash(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Explicitly persist a server certificate pin after the user confirmed the
+         * SAS out-of-band. This is the ONLY path that writes the trusted identity.
+         */
+    @Throws(KyberException::class) fun `quicStoreServerPin`(`certHash`: kotlin.String)
+        = 
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_quic_store_server_pin(
+        FfiConverterString.lower(`certHash`),_status)
+}
+    
+    
+
+        /**
+         * Bump the pairing epoch of the live session for a peer (audit finding #2).
+         * Called by the Android app immediately after a RE-PAIR so a stale
+         * pre-re-pair snapshot on disk can be recognized as cross-epoch and refused
+         * by `ratchet_import_session`. Returns the new epoch, or None when no live
+         * session exists.
+         */ fun `ratchetBumpPairingEpoch`(`peerIdentity`: kotlin.String): kotlin.ULong? {
+            return FfiConverterOptionalULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_bump_pairing_epoch(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+ fun `ratchetClearAllSessions`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_clear_all_sessions(
+        _status)
+}
+    
+    
+
+        /**
+         * Clear the pending RekeyAck carrier — called after a poll response carrying
+         * the peeked ack has been successfully written (audit finding #6).
+         */ fun `ratchetConsumeRekeyAck`(`peerIdentity`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_consume_rekey_ack(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Decrypt a ratchet message from a BINARY TLV frame, rekey-aware (audit
+         * finding #12). Handles the same rekey payloads as the hex path.
+         */
+    @Throws(KyberException::class) fun `ratchetDecryptMessageBinary`(`peerIdentity`: kotlin.String, `data`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_decrypt_message_binary(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * AUDIT #13: the NON-rekey-aware decrypt surface is REMOVED from the UniFFI
+         * surface entirely (previously `ratchet_decrypt_message`). It was a footgun —
+         * it accepted only (nonce, ciphertext), so a message carrying a rekey payload
+         * (every `rekey_interval`-th message) is AEAD-bound to that payload and
+         * CANNOT be decrypted with an empty AAD; a misrouting caller silently dropped
+         * every carrier, never derived the peer's proposal, never ACKed, and stalled
+         * the peer's rekey. The rekey-aware binary dispatcher
+         * [`ratchet_decrypt_message_binary`] is now the ONLY inbound decrypt path —
+         * the footgun cannot be re-introduced by a future caller, because the type-
+         * level surface no longer exists. (The internal `ratchet_decrypt_message_impl`
+         * remains for tests/back-compat inside the crate.)
+         */
+    @Throws(KyberException::class) fun `ratchetDecryptWithRekeyMessage`(`peerIdentity`: kotlin.String, `nonce`: kotlin.ByteArray, `ciphertext`: kotlin.ByteArray, `rekeyCiphertext`: kotlin.ByteArray?, `rekeyX25519Pk`: kotlin.ByteArray?, `rekeyMlkemPk`: kotlin.ByteArray?): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_decrypt_with_rekey_message(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`nonce`),FfiConverterByteArray.lower(`ciphertext`),FfiConverterOptionalByteArray.lower(`rekeyCiphertext`),FfiConverterOptionalByteArray.lower(`rekeyX25519Pk`),FfiConverterOptionalByteArray.lower(`rekeyMlkemPk`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `ratchetEncryptMessage`(`peerIdentity`: kotlin.String, `plaintext`: kotlin.ByteArray): RatchetEncryptedMessage {
+            return FfiConverterTypeRatchetEncryptedMessage.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_encrypt_message(
-        FfiConverterString.lower(`peerIdentity`),FfiConverterString.lower(`plaintextHex`),_status)
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`plaintext`),_status)
 }
     )
     }
     
- fun `ratchetInitSession`(`peerIdentity`: kotlin.String, `masterSharedSecretHex`: kotlin.String, `isInitiator`: kotlin.Boolean): kotlin.String {
+
+        /**
+         * Encrypt a plaintext and return the ratchet message as a BINARY TLV frame
+         * (audit finding #12). The binary framing is the single cross-platform
+         * serialization contract — no hex-in-JSON drift surface and ~2x smaller than
+         * hex-encoded fields.
+         */
+    @Throws(KyberException::class) fun `ratchetEncryptMessageBinary`(`peerIdentity`: kotlin.String, `plaintext`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_encrypt_message_binary(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`plaintext`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Export a ratchet session as a serialized snapshot (JSON bytes) for
+         * encrypted persistence. Returns None if no session exists for the peer.
+         */
+    @Throws(KyberException::class) fun `ratchetExportSession`(`peerIdentity`: kotlin.String): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_export_session(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Export a ratchet session and AEAD-wrap the serialized snapshot INSIDE Rust
+         * (audit finding #5). Returns an `EncryptedPayload` — the raw serialized
+         * state NEVER crosses the UniFFI boundary as plaintext, so no complete
+         * session key material ever sits on the JVM heap. `wrap_key` is the caller's
+         * at-rest wrap key (32 bytes, caller-owned by design). The Android app uses
+         * this for its per-poll snapshot persistence instead of the raw export + JVM
+         * Base64 + re-entry dance.
+         */
+    @Throws(KyberException::class) fun `ratchetExportSessionWrapped`(`peerIdentity`: kotlin.String, `wrapKey`: kotlin.ByteArray): EncryptedPayload? {
+            return FfiConverterOptionalTypeEncryptedPayload.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_export_session_wrapped(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`wrapKey`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Take the pending RekeyAck carrier seq (if any) and produce the encrypted
+         * ACK message to send back to the peer. Returns None when no ACK is pending.
+         */
+    @Throws(KyberException::class) fun `ratchetGenerateRekeyAck`(`peerIdentity`: kotlin.String): RatchetEncryptedMessage? {
+            return FfiConverterOptionalTypeRatchetEncryptedMessage.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Take the pending RekeyAck carrier seq and produce the encrypted ACK as a
+         * BINARY TLV (audit finding #12), consuming the carrier in the same session
+         * lock. This is the phone's outbound RekeyAck channel: the phone attaches the
+         * returned TLV to its next poll request so the desktop can commit its
+         * outgoing proposal (audit finding #1 — the missing phone→desktop ack).
+         */
+    @Throws(KyberException::class) fun `ratchetGenerateRekeyAckBinary`(`peerIdentity`: kotlin.String): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack_binary(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * NON-CONSUMING variant of `ratchet_generate_rekey_ack_binary`: produces the
+         * ack TLV without clearing the pending carrier, so a poll response lost on
+         * the wire can be retried (audit finding #6). Callers MUST clear the carrier
+         * with `ratchet_consume_rekey_ack` only after the response is written.
+         */
+    @Throws(KyberException::class) fun `ratchetGenerateRekeyAckBinaryPeek`(`peerIdentity`: kotlin.String): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_generate_rekey_ack_binary_peek(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Restore a ratchet session from a previously exported (and decrypted)
+         * snapshot. Replaces any existing session for the peer.
+         */
+    @Throws(KyberException::class) fun `ratchetImportSession`(`peerIdentity`: kotlin.String, `data`: kotlin.ByteArray)
+        = 
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_import_session(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`data`),_status)
+}
+    
+    
+
+        /**
+         * Initialize a ratchet session entirely from opaque handles: the pairing
+         * keypair handle (our DH identity) and the KEM shared-secret handle (master
+         * secret). No secret bytes cross the FFI boundary.
+         */
+    @Throws(KyberException::class) fun `ratchetInitSessionFromKemHandle`(`peerIdentity`: kotlin.String, `isInitiator`: kotlin.Boolean, `keypairHandle`: kotlin.ULong, `kemHandleId`: kotlin.ULong, `peerX25519Pk`: kotlin.ByteArray, `peerMlkemPk`: kotlin.ByteArray): kotlin.String {
             return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_init_session_from_kem_handle(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterBoolean.lower(`isInitiator`),FfiConverterULong.lower(`keypairHandle`),FfiConverterULong.lower(`kemHandleId`),FfiConverterByteArray.lower(`peerX25519Pk`),FfiConverterByteArray.lower(`peerMlkemPk`),_status)
+}
+    )
+    }
+    
+ fun `ratchetPeerIds`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_init_session(
-        FfiConverterString.lower(`peerIdentity`),FfiConverterString.lower(`masterSharedSecretHex`),FfiConverterBoolean.lower(`isInitiator`),_status)
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_peer_ids(
+        _status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `ratchetProcessRekeyAck`(`peerIdentity`: kotlin.String, `seq`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_process_rekey_ack(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterULong.lower(`seq`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Decrypt (rekey-aware) and process a peer's RekeyAck carried as a BINARY TLV
+         * (audit finding #12): commits the peer's ack of OUR outgoing proposal. The
+         * ack is decrypted rekey-aware because a ratchet message at a rekey boundary
+         * carries a rekey payload whose AEAD tag binds those fields (audit finding
+         * #3 — the non-rekey decrypt would drop it).
+         */
+    @Throws(KyberException::class) fun `ratchetProcessRekeyAckBinary`(`peerIdentity`: kotlin.String, `data`: kotlin.ByteArray): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_process_rekey_ack_binary(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Process a peer's encrypted Synchronize packet carried as a BINARY TLV:
+         * decrypts it rekey-aware (authenticating the sender and adopting any rekey
+         * payload the packet carried), verifies it is a `Synchronize`, and only then
+         * resyncs our receiving chain to the authenticated target. Returns the number
+         * of skipped messages. Refuses (rate-limited / pending rekey / budget
+         * exhausted) per the audit finding #4 hardening.
+         */
+    @Throws(KyberException::class) fun `ratchetProcessSynchronize`(`peerIdentity`: kotlin.String, `data`: kotlin.ByteArray): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_process_synchronize(
+        FfiConverterString.lower(`peerIdentity`),FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The receiver's current recv counter — used to build a Synchronize request
+         * when a gap exceeds max_skip.
+         */
+    @Throws(KyberException::class) fun `ratchetRecvCount`(`peerIdentity`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_recv_count(
+        FfiConverterString.lower(`peerIdentity`),_status)
 }
     )
     }
@@ -2282,6 +3773,189 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 }
     )
     }
+    
+
+        /**
+         * The sender's current send counter — carried in every poll response so the
+         * peer can detect a receive-chain gap exceeding max_skip and resync (the
+         * Synchronize recovery path, audit finding #4).
+         */
+    @Throws(KyberException::class) fun `ratchetSendCount`(`peerIdentity`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_send_count(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Live-session rollback watermark (audit finding #2 follow-up):
+         * `(pairing_epoch, ratchet_generation, send_message_count,
+         * recv_message_count)`. The Android snapshot-persistence path records this as
+         * its monotonic high-water mark so a later restore can refuse a rolled-back
+         * snapshot exactly like the desktop store does. Returns None when no session
+         * exists for the peer.
+         */
+    @Throws(KyberException::class) fun `ratchetSessionWatermark`(`peerIdentity`: kotlin.String): RatchetWatermark? {
+            return FfiConverterOptionalTypeRatchetWatermark.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_session_watermark(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Parse the full 4-tuple rollback watermark out of a serialized ratchet
+         * snapshot (audit finding #2 follow-up). Used by the Android cold-start
+         * restore path (after unwrapping the snapshot) and by the desktop store's
+         * restore check — the field mapping lives in ONE registry function so no
+         * caller re-derives the watermark from a different set of fields. Returns
+         * None when the blob does not parse as a snapshot.
+         */
+    @Throws(KyberException::class) fun `ratchetSnapshotWatermark`(`data`: kotlin.ByteArray): RatchetWatermark? {
+            return FfiConverterOptionalTypeRatchetWatermark.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_snapshot_watermark(
+        FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Build an encrypted `Synchronize` packet carrying our current send counter.
+         * The peer processes it via `ratchet_process_synchronize` — the ONLY path that
+         * honors a resync target (audit finding #4: the plaintext counter in the poll
+         * body is never acted on).
+         */
+    @Throws(KyberException::class) fun `ratchetSynchronizePacket`(`peerIdentity`: kotlin.String): RatchetEncryptedMessage {
+            return FfiConverterTypeRatchetEncryptedMessage.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_synchronize_packet(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Binary-TLV variant of `ratchet_synchronize_packet` (audit finding #12):
+         * returns the full TLV framing including any rekey payload the packet carried,
+         * so the peer can process it rekey-aware via `ratchet_process_synchronize`.
+         */
+    @Throws(KyberException::class) fun `ratchetSynchronizePacketBinary`(`peerIdentity`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_ratchet_synchronize_packet_binary(
+        FfiConverterString.lower(`peerIdentity`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The canonical domain-separation salt bytes for `derive_session_key`.
+         * Exported through UniFFI so Android consumes the SAME bytes as the desktop —
+         * the single source of truth for the session-key derivation salt. Never
+         * re-encode this as hex/ASCII at a call site (audit finding #2).
+         */ fun `sessionDerivationSalt`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_derivation_salt(
+        _status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `sessionKeyCreate`(`keyBytes`: kotlin.ByteArray): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_create(
+        FfiConverterByteArray.lower(`keyBytes`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `sessionKeyDecrypt`(`handle`: kotlin.ULong, `nonce`: kotlin.ByteArray, `ciphertext`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_decrypt(
+        FfiConverterULong.lower(`handle`),FfiConverterByteArray.lower(`nonce`),FfiConverterByteArray.lower(`ciphertext`),_status)
+}
+    )
+    }
+    
+ fun `sessionKeyDestroy`(`handle`: kotlin.ULong)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_destroy(
+        FfiConverterULong.lower(`handle`),_status)
+}
+    
+    
+
+        /**
+         * Destroy EVERY live session key handle, zeroizing all key bytes. Used by the
+         * panic self-destruct path so no handle (not just the desktop's) survives with
+         * its key material in memory (audit finding #16).
+         */ fun `sessionKeyDestroyAll`()
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_destroy_all(
+        _status)
+}
+    
+    
+
+    @Throws(KyberException::class) fun `sessionKeyEncrypt`(`handle`: kotlin.ULong, `data`: kotlin.ByteArray): EncryptedPayload {
+            return FfiConverterTypeEncryptedPayload.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_encrypt(
+        FfiConverterULong.lower(`handle`),FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `sessionKeyHash`(`handle`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_hash(
+        FfiConverterULong.lower(`handle`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Pin a session key handle so the LRU cap can never silently evict it (audit
+         * finding #23). Returns false for an unknown handle. Pinned handles are still
+         * destroyed explicitly via `session_key_destroy`.
+         */ fun `sessionKeyPin`(`handle`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_pin(
+        FfiConverterULong.lower(`handle`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Unpin a session key handle, returning it to the pool of evictable handles.
+         */ fun `sessionKeyUnpin`(`handle`: kotlin.ULong)
+        = 
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_unpin(
+        FfiConverterULong.lower(`handle`),_status)
+}
+    
     
  fun `toggleFlightDataRecorder`(`enabled`: kotlin.Boolean)
         = 
@@ -2300,11 +3974,29 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 }
     
     
- fun `verifyPathResponseToken`(`sessionKeyHex`: kotlin.String, `challengeToken`: kotlin.String, `responseToken`: kotlin.String): kotlin.Boolean {
+
+        /**
+         * Verify a NIST ML-DSA-65 detached signature (audit F13). Exported so the
+         * Android companion can authenticate LAN beacon payloads at DISCOVERY time:
+         * the beacon embeds its own signing public key, and a self-consistent
+         * signature proves the sender owns that key (the phone then adopts the key
+         * during pairing). The signed region reconstructed by the caller MUST match
+         * exactly what the sender signed (`pk:ip:timestamp:nonce`).
+         */ fun `verifyMldsaSignature`(`payload`: kotlin.ByteArray, `signature`: kotlin.ByteArray, `publicKey`: kotlin.ByteArray): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_verify_mldsa_signature(
+        FfiConverterByteArray.lower(`payload`),FfiConverterByteArray.lower(`signature`),FfiConverterByteArray.lower(`publicKey`),_status)
+}
+    )
+    }
+    
+
+    @Throws(KyberException::class) fun `verifyPathResponseToken`(`sessionKey`: kotlin.ByteArray, `challengeToken`: kotlin.String, `responseToken`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCallWithError(KyberException) { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_verify_path_response_token(
-        FfiConverterString.lower(`sessionKeyHex`),FfiConverterString.lower(`challengeToken`),FfiConverterString.lower(`responseToken`),_status)
+        FfiConverterByteArray.lower(`sessionKey`),FfiConverterString.lower(`challengeToken`),FfiConverterString.lower(`responseToken`),_status)
 }
     )
     }
