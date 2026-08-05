@@ -87,7 +87,10 @@ fn beacon_key_files() -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
         .map(|p| p.data_dir().to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    (dir.join("device_mldsa_pk.bin"), dir.join("device_mldsa_sk.bin"))
+    (
+        dir.join("device_mldsa_pk.bin"),
+        dir.join("device_mldsa_sk.bin"),
+    )
 }
 
 /// Migrate a legacy plaintext beacon keypair into the OS keyring and — only
