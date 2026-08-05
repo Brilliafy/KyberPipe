@@ -3,8 +3,11 @@ package org.kyberpipe.client.state
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -149,26 +152,64 @@ fun rememberClipboardState(
 }
 
 /**
- * `useMediaState` — the media-action feature state (audit #8 follow-up). The
- * poll slice that triggers a remote media action is one line; it stays in its
- * own tiny holder so MainScreen (the router) never touches NotificationHook.
+ * `useMediaState` — the media-action feature state (audit #8 follow-up +
+ * P4-1(b)). The desktop's `pending_media_action` is NO LONGER fired
+ * automatically: it is surfaced as a phone-side confirmation dialog
+ * ([pendingTrigger]) and the foreign PendingIntent is fired only when the
+ * phone user explicitly approves ([confirmPending]). This mirrors the
+ * desktop's native-gesture token model — a compromised desktop renderer
+ * cannot initiate phone-side actions without the phone user's consent.
  */
+data class MediaTriggerRequest(
+    val index: Int,
+    val actionTitle: String,
+    val packageName: String,
+)
+
 class MediaState(
     private val context: Context,
     private val addLog: (String) -> Unit,
 ) {
+    /// Phone-side confirmation request awaiting the user's Allow/Deny (audit
+    /// P4-1(b)). Non-null renders the dialog; cleared by confirm/dismiss.
+    var pendingTrigger by mutableStateOf<MediaTriggerRequest?>(null)
+        private set
+
     fun onPollUpdate(update: KyberPipePollEngine.PollUpdate) {
         update.pendingMediaAction?.let { idx ->
-            // AUDIT F9/F15: `triggerMediaAction` now returns whether the
-            // action was actually dispatched (rate-limited / stale-index
-            // triggers are refused) — log the truth, not the intent.
-            val sent = org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(idx)
-            if (sent) {
-                addLog("[Media] Triggered media action index $idx from PC")
+            // AUDIT P4-1(b): surface a phone-side confirmation INSTEAD of
+            // firing. `peekPendingMediaAction` returns the action title +
+            // package without touching the PendingIntent; the fire happens
+            // only after the user approves in the dialog.
+            val info = org.kyberpipe.client.receiver.NotificationHook
+                .peekPendingMediaAction(idx)
+            if (info != null) {
+                pendingTrigger = MediaTriggerRequest(idx, info.first, info.second)
             } else {
                 addLog("[Media] Media action index $idx not dispatched (stale, out-of-range, or rate-limited)")
             }
         }
+    }
+
+    /// The phone user approved — now (and only now) fire the PendingIntent.
+    /// `triggerMediaAction` still enforces the TTL/freshness and the 5s
+    /// rate limit and returns whether the send actually happened.
+    fun confirmPending() {
+        val req = pendingTrigger ?: return
+        pendingTrigger = null
+        val sent = org.kyberpipe.client.receiver.NotificationHook.triggerMediaAction(req.index)
+        if (sent) {
+            addLog("[Media] Triggered media action index ${req.index} from PC (approved on phone)")
+        } else {
+            addLog("[Media] Media action index ${req.index} not dispatched (stale or rate-limited)")
+        }
+    }
+
+    /// The phone user denied — drop the request without firing.
+    fun dismissPending() {
+        val req = pendingTrigger ?: return
+        pendingTrigger = null
+        addLog("[Media] Media action index ${req.index} rejected on phone (user denied)")
     }
 }
 

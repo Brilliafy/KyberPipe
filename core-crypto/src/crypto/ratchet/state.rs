@@ -15,6 +15,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// resolving unchanged.
 pub(crate) use super::policy::{now_unix_secs, INCOMING_REKEY_TTL_SECS, SEEN_SET_MAX};
 
+/// Process-wide count of rekey confirm-queue invariant violations (audit P1-3).
+/// The invariant guards the stale-carrier-poison defense (audit #2) and is now
+/// checked in ALL builds; this counter lets a release deployment's health/
+/// diagnostic surface observe the failure class even when the flight recorder
+/// is disabled. Monotonic; exposed for tests and diagnostics.
+pub(crate) static REKEY_QUEUE_INVARIANT_VIOLATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// A pending outgoing rekey confirmation. Retains the full rekey payload so an
 /// unacknowledged proposal can be RE-SENT on a later message (never
 /// TTL-auto-committed — committing unacknowledged key material permanently
@@ -22,8 +30,16 @@ pub(crate) use super::policy::{now_unix_secs, INCOMING_REKEY_TTL_SECS, SEEN_SET_
 #[derive(Clone)]
 pub struct RekeyCarrier {
     /// Send-space sequence number of the message that currently carries the
-    /// rekey payload. The peer's RekeyAck carries this value back.
+    /// rekey payload. The peer's RekeyAck carries this value back. Provisional
+    /// (0) until the carrier is first attached by `ratchet_encrypt`.
     pub carrier_seq: u64,
+    /// Whether the carrier's payload has ever been ATTACHED to a wire message.
+    /// An API-staged carrier (`dh_ratchet_rekey`) is created with `sent=false`
+    /// so the very next `ratchet_encrypt` attaches it — a staged proposal must
+    /// never sit invisible while `should_rekey` is blocked by its own pending
+    /// proposal (audit P1-2). Restored carriers are always `sent=true` (a
+    /// persisted confirm-queue entry was attached before serialization).
+    pub sent: bool,
     /// Monotonic time the payload was attached. An entry older than
     /// `REKEY_RETRY_TTL` is re-sent (see encrypt.rs). NOT persisted (Instant
     /// is not serializable); the effective age is the MAX of this and the
@@ -285,10 +301,16 @@ pub struct DoubleRatchetState {
     /// Cleared by take_pending_rekey_ack_seq().
     #[zeroize(skip)]
     pub pending_rekey_ack_seq: Option<u64>,
-    /// Whether this side initiated the session. Deterministic tie-break for
-    /// the two-sided rekey race: the initiator's proposal always wins, so the
-    /// responder cancels its own outgoing proposal when the initiator's is
-    /// received (see ratchet_decrypt_with_rekey in decrypt.rs).
+    /// Whether this side initiated the session. INFORMATIONAL ONLY (audit
+    /// P1-3): this field is persisted and surfaced for diagnostics, but it is
+    /// NO LONGER the two-sided rekey race tie-break. The deterministic
+    /// tie-break is the payload-anchored comparison in
+    /// [`DoubleRatchetState::resolve_rekey_race_and_ack`] (the lexicographic
+    /// ordering of the rekey x25519/mlkem public keys, both AEAD-bound into
+    /// the carrier) — the legacy initiator-wins parity heuristic was removed
+    /// by audit finding #3 because generation drift could flip parity
+    /// asymmetrically. Do NOT re-introduce an initiator bias into the race
+    /// resolution.
     pub is_initiator: bool,
     /// Cumulative number of sequence positions advanced by explicit resyncs
     /// (`resync_receiving_chain`) over this session's lifetime. Persisted in the
@@ -760,20 +782,53 @@ impl DoubleRatchetState {
         }
     }
 
-    /// Debug-only invariant check (audit #2): the confirm queue must be EMPTY
-    /// whenever no outgoing proposal is pending and hold AT MOST ONE carrier
-    /// for the single pending proposal. A multi-carrier queue is the stale-
-    /// carrier poison precondition (one entry survives the peer's ACK and is
-    /// re-sent with committed payload under the new generation).
-    pub(crate) fn assert_confirm_queue_invariant(&self) {
-        debug_assert!(
-            self.outgoing_proposal.is_pending() || self.rekey_pending_confirm_queue.is_empty(),
-            "confirm queue must be empty when no outgoing proposal is pending (audit #2)"
+    /// Invariant check (audit #2): the confirm queue must be EMPTY whenever no
+    /// outgoing proposal is pending and hold AT MOST ONE carrier for the
+    /// single pending proposal. A multi-carrier queue is the stale-carrier
+    /// poison precondition (one entry survives the peer's ACK and is re-sent
+    /// with committed payload under the new generation).
+    ///
+    /// AUDIT P1-3 (MEDIUM): this check was `debug_assert!`-only, so it
+    /// compiled out of release builds — the exact failure mode the audits kept
+    /// rediscovering (a second carrier pushed under some interleaving) was
+    /// undetectable in production. Both predicates are O(1); the check is now
+    /// release-ACTIVE: a violation self-heals by clearing the queue (the
+    /// committed/cancelled payload must never be re-sent), is recorded on the
+    /// flight recorder (when enabled) and bumps a global violation counter so
+    /// health/diagnostic tooling can observe it, and still asserts in debug
+    /// builds so the regression tests catch the bug at the source.
+    pub(crate) fn assert_confirm_queue_invariant(&mut self) {
+        let pending = self.outgoing_proposal.is_pending();
+        let queue_empty_ok = pending || self.rekey_pending_confirm_queue.is_empty();
+        let single_ok = self.rekey_pending_confirm_queue.len() <= 1;
+        if queue_empty_ok && single_ok {
+            return;
+        }
+        // Violation — self-heal by clearing the queue so no stale carrier can
+        // be re-sent with committed payload under a new generation. The check
+        // only ever runs at rest (post commit/cancel/encrypt), so clearing a
+        // violated queue cannot discard a live proposal the protocol still
+        // needs — a violated queue IS the bug.
+        let detail = if !queue_empty_ok {
+            "confirm queue non-empty while no outgoing proposal is pending"
+        } else {
+            "confirm queue holds more than one carrier for a single proposal"
+        };
+        // This is the stale-carrier-poison precondition (audit #2). Fail loudly
+        // in every build: record the violation on the flight recorder (enabled
+        // via the diagnostics toggle) and bump the process-wide counter so a
+        // release deployment can detect the class even with the recorder off.
+        crate::telemetry::GLOBAL_FLIGHT_RECORDER.record_event(
+            crate::telemetry::FlightEvent::ErrorTrace {
+                error_message: format!("rekey confirm-queue invariant violated: {detail}"),
+                stacktrace: String::new(),
+            },
         );
-        debug_assert!(
-            self.rekey_pending_confirm_queue.len() <= 1,
-            "confirm queue must hold at most one carrier per pending proposal (audit #2)"
-        );
+        REKEY_QUEUE_INVARIANT_VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.rekey_pending_confirm_queue.clear();
+        // Debug builds still assert so the property tests fail at the exact
+        // offending transition instead of silently self-healing.
+        debug_assert!(false, "rekey confirm-queue invariant violated: {detail}");
     }
 
     pub fn generate_rekey_ack(&mut self, seq: u64) -> Result<RatchetEncryptedMessage, KyberError> {

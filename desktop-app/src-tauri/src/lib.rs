@@ -290,7 +290,6 @@ pub fn run() {
             push_notification_packet,
             send_outbound_sms,
             trigger_notification_action,
-            trigger_desktop_media_action,
             send_desktop_notification,
             send_hardware_command,
             set_connection_status_full,
@@ -333,6 +332,11 @@ pub fn run() {
             execute_fallback_script,
             generate_shamir_recovery_shares,
             reconstruct_key_from_shamir_shares,
+            // AUDIT P4-1(c)/P5-2: trigger_desktop_media_action drives a REMOTE
+            // side effect on the phone (fires a foreign PendingIntent) —
+            // reclassified Tier-1 → Tier-2 so a compromised renderer cannot
+            // initiate it without a native user-gesture token.
+            trigger_desktop_media_action,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

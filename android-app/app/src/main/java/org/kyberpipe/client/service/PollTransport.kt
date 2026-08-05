@@ -38,6 +38,37 @@ class PollTransport(
 ) {
     private val TAG = "PollTransport"
 
+    /**
+     * Result of building a poll request. `ratchetHealthy` is FALSE when a
+     * ratchet FFI call failed while attaching the authenticated payloads
+     * (Synchronize / RekeyAck) — e.g. the per-peer session is missing after a
+     * cold start whose snapshot restore failed (audit P3-1). The engine must
+     * NOT proceed with a blind poll against a missing session: it would emit a
+     * green "connected" update while nothing ever decrypts — the silent
+     * "paired but nothing syncs" failure class.
+     */
+    data class RequestBuild(
+        val body: String,
+        val ratchetHealthy: Boolean,
+    )
+
+    companion object {
+        /// AUDIT P1-1 (HIGH): the shared wire-contract frame bound, resolved
+        /// from the UniFFI-exported `maxMessageSize()` — the SAME export the
+        /// desktop producer's cap is derived from, so the two independently-
+        /// compiled ends can never disagree. Falls back to the documented
+        /// 1 MiB only when the native library is absent (JVM unit tests with
+        /// a fake FFI) — in production the export always resolves.
+        val MAX_FRAME_BODY_SIZE: Int = runCatching {
+            uniffi.core_crypto.maxMessageSize().toInt()
+        }.getOrDefault(1024 * 1024)
+    }
+
+    /// AUDIT P1-1: the wire-contract size predicate. Extracted as a pure
+    /// function so the JVM unit tests can exercise it (the
+    /// `android.util.Base64` decode path is not mockable in a plain JVM).
+    internal fun refusesOversizedTlv(tlvSize: Int): Boolean = tlvSize > MAX_FRAME_BODY_SIZE
+
     /** Emit a poll result to the UI (forwards to the engine-owned flow). */
     fun emit(update: KyberPipePollEngine.PollUpdate) {
         updates.tryEmit(update)
@@ -58,8 +89,13 @@ class PollTransport(
      * ITS Synchronize carrier in response (the desktop only advances its own
      * chain when asked).
      */
-    fun buildRequestBody(peer: String, needSync: Boolean): String {
+    fun buildRequestBody(peer: String, needSync: Boolean): RequestBuild {
         val body = JSONObject()
+        // AUDIT P3-1: a failed ratchet FFI call while attaching the
+        // authenticated payloads means the session is NOT usable — the flag
+        // surfaces that so the poll engine can skip the round-trip and emit a
+        // distinct RATCHET_UNAVAILABLE update instead of a green-but-dead poll.
+        var ratchetHealthy = true
         if (peer.isNotEmpty()) {
             // Authenticated Synchronize producer: the phone's send counter as a
             // ratchet-encrypted binary-TLV packet (audit finding #12). Sent only
@@ -70,7 +106,10 @@ class PollTransport(
                     body.put("sync", JSONObject().put(
                         "tlv_b64", Base64.encodeToString(syncTlv, Base64.NO_WRAP)
                     ))
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.e(TAG, "Synchronize packet build failed — ratchet session unavailable: ${e.message}")
+                    ratchetHealthy = false
+                }
                 // Ask the desktop to attach ITS Synchronize carrier in response
                 // (audit finding #16).
                 body.put("need_sync", true)
@@ -85,9 +124,12 @@ class PollTransport(
                         "tlv_b64", Base64.encodeToString(ackTlv, Base64.NO_WRAP)
                     ))
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                Log.e(TAG, "RekeyAck build failed — ratchet session unavailable: ${e.message}")
+                ratchetHealthy = false
+            }
         }
-        return body.toString()
+        return RequestBuild(body.toString(), ratchetHealthy)
     }
 
     /**
@@ -253,6 +295,21 @@ class PollTransport(
                 Base64.decode(enc.getString("tlv_b64"), Base64.NO_WRAP)
             } catch (e: Exception) {
                 Log.d(TAG, "Clip TLV decode failed: ${e.message}")
+                return null
+            }
+            // AUDIT P1-1 (HIGH): mirror the wire-contract frame bound. The
+            // desktop producer now refuses to encrypt clipboard payloads whose
+            // TLV+base64 framing would exceed MAX_MESSAGE_SIZE (1 MiB); the
+            // phone's QUIC frame consumer hard-rejects anything larger anyway.
+            // A TLV beyond the shared bound can only come from a broken/foreign
+            // producer — refuse it here instead of feeding an oversized blob to
+            // the ratchet. The bound is the SHARED UniFFI-exported constant, so
+            // the two independently-compiled ends can never disagree.
+            if (refusesOversizedTlv(tlv.size)) {
+                Log.w(
+                    TAG,
+                    "Clip TLV is ${tlv.size} bytes > MAX_MESSAGE_SIZE ($MAX_FRAME_BODY_SIZE) — refusing oversized payload (audit P1-1)"
+                )
                 return null
             }
             try {

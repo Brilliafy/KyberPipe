@@ -31,7 +31,7 @@ class PollTransportTest {
         override var pairedDeviceName: String = ""
     }
 
-    private class FakeFfi : PollFfi {
+    open class FakeFfi : PollFfi {
         override fun synchronizePacketBinary(peer: String): ByteArray = byteArrayOf(1)
         override fun generateRekeyAckBinaryPeek(peer: String): ByteArray? = null
         override fun processRekeyAckBinary(peer: String, tlv: ByteArray) {}
@@ -104,6 +104,32 @@ class PollTransportTest {
         assertFalse(settings.pendingPairingConfirmation)
     }
 
+    /**
+     * AUDIT P1-1 (HIGH): the phone mirrors the producer-side frame cap — a clip
+     * TLV whose size exceeds the shared UniFFI-exported MAX_MESSAGE_SIZE is
+     * refused BEFORE it reaches the ratchet. The producer (desktop poll
+     * handler) now refuses to encrypt clipboard payloads whose framing would
+     * exceed the bound, so a payload beyond it can only come from a
+     * broken/foreign producer.
+     */
+    @Test
+    fun oversizedClipTlvIsRefusedBeforeRatchet() = runBlocking {
+        val flow = MutableSharedFlow<KyberPipePollEngine.PollUpdate>(replay = 1)
+        val settings = FakeSettings()
+        val transport = PollTransport(settings = settings, updates = flow, requestSync = {})
+
+        // The shared bound (1 MiB) is the UniFFI-exported constant; in the JVM
+        // test it falls back to the documented value via runCatching.
+        assertTrue(
+            "a TLV at MAX_MESSAGE_SIZE + 1 must be refused",
+            transport.refusesOversizedTlv(PollTransport.MAX_FRAME_BODY_SIZE + 1)
+        )
+        assertFalse(
+            "a TLV exactly at MAX_MESSAGE_SIZE is still accepted",
+            transport.refusesOversizedTlv(PollTransport.MAX_FRAME_BODY_SIZE)
+        )
+    }
+
     /** The two-phase pairing commit (audit #6): a rejection must NOT commit. */
     @Test
     fun pairingRejectedWhenDesktopRefuses() = runBlocking {
@@ -121,5 +147,47 @@ class PollTransportTest {
         assertFalse("must not commit on rejection", update.pairingConfirmed)
         assertFalse(settings.pendingPairingConfirmation)
         assertTrue("explicit rejection still surfaces unpairSignal", update.unpairSignal)
+    }
+
+    /**
+     * AUDIT P3-1 (MEDIUM): `buildRequestBody` must surface ratchet health —
+     * a Synchronize/RekeyAck FFI failure (missing/unusable session) sets
+     * `ratchetHealthy=false` so the engine skips the round-trip instead of
+     * emitting a green-but-dead poll.
+     */
+    @Test
+    fun failingRatchetFfiMarksRequestUnhealthy() {
+        val transport = PollTransport(
+            settings = FakeSettings(),
+            updates = MutableSharedFlow(extraBufferCapacity = 32),
+            requestSync = {},
+            ffi = FakeFfi(),
+        )
+        // Healthy path: a peer whose session works produces a healthy request.
+        val healthy = transport.buildRequestBody("peer", needSync = true)
+        assertTrue("healthy session — request must be healthy", healthy.ratchetHealthy)
+        assertTrue(healthy.body.contains("need_sync"))
+
+        // Broken path: a peer whose session throws on EVERY ratchet call.
+        val brokenFfi = object : FakeFfi() {
+            override fun synchronizePacketBinary(peer: String): ByteArray =
+                throw IllegalStateException("no session")
+            override fun generateRekeyAckBinaryPeek(peer: String): ByteArray? =
+                throw IllegalStateException("no session")
+        }
+        val broken = PollTransport(
+            settings = FakeSettings(),
+            updates = MutableSharedFlow(extraBufferCapacity = 32),
+            requestSync = {},
+            ffi = brokenFfi,
+        )
+        val req = broken.buildRequestBody("peer", needSync = true)
+        assertFalse(
+            "a failed ratchet attach must mark the request unhealthy (audit P3-1)",
+            req.ratchetHealthy,
+        )
+        // The body still carries need_sync (the flag is not dropped) so a
+        // recovered session re-requests alignment on the next poll.
+        assertTrue(req.body.contains("need_sync"))
     }
 }

@@ -161,6 +161,24 @@ pub async fn perform_sas_confirmation(
                         "Failed to initialize ratchet session for peer {peer_id}: {e} — re-pair required"
                     )
                 })?;
+                // AUDIT P1-2 (MEDIUM, one-sided epoch bump): the Android flow
+                // explicitly bumps the fresh session to epoch 1 so a stale
+                // pre-re-pair snapshot (epoch 0, large counters) is
+                // distinguished from the fresh session at restore. The desktop
+                // left the fresh session at epoch 0, so its restore guard
+                // (`is_rollback`) refused the new epoch-0/0/0/0 snapshot
+                // against the old high-water (epoch 0, gen≥1, send≥1, recv≥1)
+                // whenever the old watermark survived the unpair — silent
+                // session loss after a restart following a re-pair. Bump the
+                // epoch HERE, immediately after the fresh init and before the
+                // first persist, mirroring the phone exactly. The epoch-aware
+                // dirty-gate in the poll handler then persists the fresh
+                // (epoch 1) snapshot + watermark on the next poll.
+                if let Some(new_epoch) = core_crypto::ratchet_bump_pairing_epoch(peer_id.clone()) {
+                    tracing::info!(
+                        "[Pairing] Fresh ratchet session for {peer_id} bumped to pairing epoch {new_epoch} (audit P1-2)"
+                    );
+                }
                 // Audit F14: the `get_keypair()` clone (and the transient secret
                 // halves it carried) must not linger in freed heap — the
                 // ratchet impl has copied what it needs into ZeroizeOnDrop

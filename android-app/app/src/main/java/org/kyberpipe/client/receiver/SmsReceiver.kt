@@ -65,13 +65,17 @@ class SmsReceiver : BroadcastReceiver() {
                 // the SmsForwarder's single background worker, which encrypts
                 // AND sends. The main thread only does the cheap packet
                 // construction above.
-                val settings = org.kyberpipe.client.utils.SettingsManager(ctx)
-                val peer = settings.peerRatchetIdentity
-                // Forward only when paired AND the user has explicitly enabled
-                // SMS forwarding (audit finding #14 — opt-in, default OFF).
-                if (settings.isPaired && settings.smsForwardingEnabled && peer.isNotEmpty()) {
-                    SmsForwarder.enqueueEncryptAndSend(ctx, peer, jsonPacket.toByteArray())
-                }
+                //
+                // AUDIT P2-3 (MEDIUM): the Keystore-backed SettingsManager
+                // construction + encrypted consent/peer reads are deferred to
+                // the worker too. The legacy code built SettingsManager (two
+                // Keystore ops) and ran three EncryptedSharedPreferences
+                // decrypts per SMS on the main thread — an SMS flood blew the
+                // broadcast receiver's shared ANR budget before the forward
+                // rate limit was even consulted. The worker re-resolves the
+                // consent gate (`isPaired` + `smsForwardingEnabled` + peer)
+                // and drops unauthorized messages there.
+                SmsForwarder.enqueueEncryptAndSend(ctx, jsonPacket.toByteArray())
             } catch (e: Exception) {
                 Log.e("KyberpipeSmsReceiver", "Failed to create SMS packet: ${e.message}")
             }
@@ -230,9 +234,16 @@ object SmsForwarder {
     /// receiver has a ~10s ANR budget. The single-threaded executor also
     /// serializes the encrypt against the poll engine's own native calls,
     /// eliminating session-Mutex contention between poll/SMS/media.
+    ///
+    /// AUDIT P2-3 (MEDIUM): the Keystore-backed consent/peer resolution ALSO
+    /// moved here. The legacy receiver opened SettingsManager (MasterKey +
+    /// EncryptedSharedPreferences init = two Keystore ops) and performed three
+    /// AES-GCM decrypts on the MAIN thread per SMS — an SMS flood could ANR
+    /// the broadcast receiver before the rate limiter ran. The worker is the
+    /// ONLY place SettingsManager is constructed for the SMS path; unauthorized
+    /// messages (not paired / forwarding disabled / no peer) are dropped here.
     fun enqueueEncryptAndSend(
         context: android.content.Context,
-        peer: String,
         plaintext: ByteArray,
     ) {
         if (desktopRecentlyFailed()) {
@@ -244,6 +255,19 @@ object SmsForwarder {
             return
         }
         executor.execute {
+            // All Keystore-backed SettingsManager reads happen on the worker.
+            val settings = org.kyberpipe.client.utils.SettingsManager(context)
+            val peer = settings.peerRatchetIdentity
+            // Forward only when paired AND the user has explicitly enabled SMS
+            // forwarding (audit finding #14 — opt-in, default OFF). The
+            // receiver no longer performs this gate on the main thread.
+            if (!settings.isPaired || !settings.smsForwardingEnabled || peer.isEmpty()) {
+                Log.d(
+                    TAG,
+                    "SMS forward skipped on worker: not paired or forwarding disabled (audit #14/#P2-3)"
+                )
+                return@execute
+            }
             val tlv = try {
                 uniffi.core_crypto.ratchetEncryptMessageBinary(peer, plaintext)
             } catch (e: Exception) {

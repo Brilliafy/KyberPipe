@@ -14,9 +14,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.*
@@ -391,4 +394,32 @@ fun MainScreen(
 
     // Pairing feature modals (deep-link confirm + SAS first-connect).
     PairingModals(pairing, initialPairingConfig, onClearInitialPairingConfig)
+
+    // AUDIT P4-1(b) (MEDIUM): phone-side consent for remote media actions.
+    // The desktop's `pending_media_action` used to be fired automatically on
+    // the next poll — a compromised desktop renderer could trigger "Reply" /
+    // "Send" / "Approve" actions of foreign media apps on the phone with zero
+    // phone-side consent. Now the request is surfaced as a confirmation dialog
+    // and the foreign PendingIntent is fired only on explicit user approval.
+    val pendingMedia = media.pendingTrigger
+    if (pendingMedia != null) {
+        AlertDialog(
+            onDismissRequest = { media.dismissPending() },
+            title = { Text("Trigger media action?") },
+            text = {
+                Text(
+                    "The desktop wants to fire \"${pendingMedia.actionTitle}\" " +
+                        "on ${pendingMedia.packageName}.\n\n" +
+                        "This controls the media app on this phone. Allow only " +
+                        "if you initiated this from the desktop."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { media.confirmPending() }) { Text("Allow") }
+            },
+            dismissButton = {
+                TextButton(onClick = { media.dismissPending() }) { Text("Deny") }
+            },
+        )
+    }
 }

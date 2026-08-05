@@ -564,10 +564,29 @@ mod tests {
             stream_type: 0x04,
             body: b"hello".to_vec(),
         };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("valid frame encodes");
         let decoded = QuicFrame::decode(&encoded).expect("valid frame decodes");
         assert_eq!(decoded.stream_type, 0x04);
         assert_eq!(decoded.body, b"hello");
+        // AUDIT P1-4: the PRODUCER side must refuse to encode an oversized
+        // body too — the legacy `body.len() as u32` silently wrapped at
+        // >= 4 GiB. An oversized encode fails loudly instead of emitting a
+        // length-wrapped frame.
+        let oversized = QuicFrame {
+            stream_type: 0x04,
+            body: vec![0u8; MAX_MESSAGE_SIZE + 1],
+        };
+        assert!(
+            oversized.encode().is_err(),
+            "encode must reject a body larger than MAX_MESSAGE_SIZE (audit P1-4)"
+        );
+        // A body EXACTLY at the cap still encodes (the consumer accepts <= cap).
+        let at_cap = QuicFrame {
+            stream_type: 0x04,
+            body: vec![0u8; MAX_MESSAGE_SIZE],
+        };
+        let encoded_at_cap = at_cap.encode().expect("at-cap body encodes");
+        assert_eq!(encoded_at_cap.len(), 5 + MAX_MESSAGE_SIZE);
     }
 
     /// Audit finding #8: the binary TLV round-trip of a ratchet message (the

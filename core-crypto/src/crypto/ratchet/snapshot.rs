@@ -12,7 +12,13 @@ use crate::error::KyberError;
 use std::collections::{HashMap, VecDeque};
 use zeroize::Zeroizing;
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// AUDIT P2-3 (LOW): the DTO holds the session's full secret material (root
+/// key, chain keys, ML-KEM/X25519 secret halves, skip keys). It derives
+/// `Zeroize`/`ZeroizeOnDrop` so every clone — including the `RatchetSnapshot`
+/// materialized by the import path (`ratchet_import_session_impl` →
+/// `serde_json::from_slice`) — is wiped from heap on drop instead of
+/// surviving in freed memory.
+#[derive(Clone, serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct RatchetSnapshot {
     pub root_key: [u8; 32],
     pub sending_chain_key: [u8; 32],
@@ -98,9 +104,11 @@ pub struct RatchetSnapshot {
     /// Cumulative forward advancement budget consumed by resyncs (audit #4).
     #[serde(default)]
     pub resync_forward_total: u64,
-    /// Whether this side initiated the session (desktop = initiator). Used as
-    /// the deterministic tie-break for the two-sided rekey race (audit #5):
-    /// the initiator's proposal always takes precedence over the responder's.
+    /// Whether this side initiated the session (desktop = initiator).
+    /// INFORMATIONAL ONLY (audit P1-3): persisted for diagnostics; it is NOT
+    /// the two-sided rekey race tie-break — that is the payload-anchored
+    /// public-key comparison in `resolve_rekey_race_and_ack` (audit #3
+    /// replaced the initiator-wins parity heuristic).
     #[serde(default)]
     pub is_initiator: bool,
     /// Rekey payload (x25519 pk, mlkem pk, KEM ciphertext) of the pending
@@ -274,6 +282,11 @@ impl DoubleRatchetState {
             .enumerate()
             .map(|(idx, s)| RekeyCarrier {
                 carrier_seq: *s,
+                // A persisted confirm-queue entry was attached to a wire message
+                // before serialization — it is always a SENT carrier (audit
+                // P1-2: only `dh_ratchet_rekey` stages `sent=false` carriers,
+                // and those are attached before the snapshot can be taken).
+                sent: true,
                 // Monotonic stamp starts at "now" (Instant cannot be restored);
                 // the persisted wall-clock `attached_at_unix` below is what
                 // keeps the carrier aging across restarts (audit finding #8).

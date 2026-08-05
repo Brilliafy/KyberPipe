@@ -22,6 +22,22 @@ static CLIPBOARD_CACHE: LazyLock<Mutex<Option<ClipboardCacheEntry>>> =
 pub(crate) static FORCE_EMPTY_CLIPBOARD: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// AUDIT P1-1 (HIGH): the single producer-side clipboard bound. The phone's
+/// QUIC frame consumer hard-rejects any poll-response body over
+/// `MAX_MESSAGE_SIZE` (1 MiB) at the header — the legacy producer had NO cap
+/// (the OS clipboard ceiling is 10 MiB), so a clipboard beyond ~780 KB
+/// produced a response the phone rejected on EVERY retry: the poll loop
+/// stayed dead until the user cleared the clipboard. This constant is the
+/// largest plaintext whose ratchet TLV (plaintext + 16 AEAD tag + 12 nonce +
+/// ~22 B framing + up to ~2.3 KiB rekey payload at a rekey boundary) still
+/// base64-encodes into a response body comfortably below 1 MiB: 3/4 × 1 MiB
+/// is the base64 expansion of the plaintext alone; the 8 KiB slack covers the
+/// TLV overhead AND the JSON wrapper plus the poll response's other fields.
+/// (Worst case: 778,240 B plaintext → ~780.6 KiB TLV → ~1,040.8 KiB base64 +
+/// ~350 B JSON < 1 MiB.) The Android companion enforces the same bound via
+/// the shared UniFFI-exported `max_message_size()`.
+const MAX_POLL_CLIPBOARD_PLAINTEXT: usize = core_crypto::quic_app::MAX_MESSAGE_SIZE * 3 / 4 - 8192;
+
 /// Read the real clipboard through a 1s cache so the (potentially
 /// multi-second) OS clipboard read never runs on the accept-loop workers more
 /// than once per second, regardless of poll frequency.
@@ -75,6 +91,24 @@ fn select_encryption_method(peer_id: &str) -> EncryptionMethod {
 /// Encrypt clipboard data using the selected method. Returns a JSON Value
 /// or Null if encryption fails or is unavailable.
 fn encrypt_clipboard_data(method: &EncryptionMethod, latest_clip: &[u8]) -> serde_json::Value {
+    // AUDIT P1-1 (HIGH): enforce the producer-side frame bound HERE, at the
+    // single place clipboard plaintext enters the wire. The phone's
+    // `recv_frame_header` rejects any poll-response body > 1 MiB; an
+    // oversized payload made EVERY retry fail identically (the desktop-side
+    // dedup is inbound-only, so the clipboard never changed) — a permanent
+    // poll-loop outage that also re-encrypted the oversized payload every 30s
+    // on both ends. Skipping the payload (Null = "no new clipboard") keeps the
+    // poll loop alive; the payload stays in the OS clipboard for a future
+    // small copy, and the transfer is observable via the log.
+    if latest_clip.len() > MAX_POLL_CLIPBOARD_PLAINTEXT {
+        tracing::warn!(
+            "[Poll] Skipping clipboard payload of {} bytes (producer cap {} bytes, audit P1-1) — \
+             the phone's QUIC frame consumer would reject the >1 MiB response and wedge the poll loop",
+            latest_clip.len(),
+            MAX_POLL_CLIPBOARD_PLAINTEXT
+        );
+        return serde_json::Value::Null;
+    }
     match method {
         EncryptionMethod::Ratchet { peer_id } => {
             // Audit finding #12: the ratchet payload is serialized as a single
@@ -178,10 +212,18 @@ fn peer_rekey_ack_packet(body: &[u8]) -> Option<Vec<u8>> {
 /// Dirty-flag gate for ratchet persistence (audit finding #11). The legacy
 /// code rewrote the whole `ratchet_sessions.json` AND performed the keyring
 /// watermark RPC on EVERY 2.5s poll — ~240k keyring writes/day even when
-/// nothing changed. This tracks the last-persisted (generation, send, recv)
-/// high-water mark per peer and only persists when a ratchet actually mutated.
-/// (Type alias keeps the clippy::type_complexity lint happy.)
-type LastPersistedState = std::collections::HashMap<String, (u32, u64, u64)>;
+/// nothing changed. This tracks the last-persisted FULL watermark tuple
+/// (epoch, generation, send, recv) per peer and only persists when a ratchet
+/// actually mutated. (Type alias keeps the clippy::type_complexity lint happy.)
+///
+/// AUDIT P1-2: the tuple INCLUDES `pairing_epoch`. A re-pair's fresh session
+/// starts at (epoch 1, 0, 0, 0); without the epoch component, a re-pair that
+/// happened while this process had no prior entry for the peer (restart
+/// between re-pair and the first post-re-pair poll) compared (0,0,0) against
+/// (0,0,0) and skipped the persist — leaving the OLD pre-re-pair snapshot in
+/// the store, which the epoch-aware restore guard then accepted at the next
+/// boot and silently desynced against the phone's fresh session.
+type LastPersistedState = std::collections::HashMap<String, (u64, u32, u64, u64)>;
 static LAST_PERSISTED_STATE: LazyLock<Mutex<LastPersistedState>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
@@ -202,7 +244,8 @@ fn ratchet_dirty_since_last_persist(peer: &str) -> bool {
         Ok(Some(w)) => w,
         _ => return false,
     };
-    let (gen, send, recv) = (
+    let (epoch, gen, send, recv) = (
+        wm.pairing_epoch,
         wm.ratchet_generation,
         wm.send_message_count,
         wm.recv_message_count,
@@ -210,10 +253,10 @@ fn ratchet_dirty_since_last_persist(peer: &str) -> bool {
     let mut guard = LAST_PERSISTED_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let last = guard.get(peer).copied().unwrap_or((0, 0, 0));
-    let dirty = (gen, send, recv) != last;
+    let last = guard.get(peer).copied().unwrap_or((0, 0, 0, 0));
+    let dirty = (epoch, gen, send, recv) != last;
     if dirty {
-        guard.insert(peer.to_string(), (gen, send, recv));
+        guard.insert(peer.to_string(), (epoch, gen, send, recv));
     }
     dirty
 }

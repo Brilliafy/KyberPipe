@@ -74,21 +74,74 @@ fn has_display_session() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("DISPLAY").is_ok()
 }
 
-/// Run `f` in a thread with a hard timeout, returning None on timeout. The
-/// underlying thread is detached (and dies with the process); this guarantees a
-/// blocking clipboard backend can never wedge the caller.
+/// A job submitted to the bounded clipboard worker pool (audit P2-1).
+type ClipboardJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// Bounded worker pool for BLOCKING OS-clipboard operations (audit P2-1,
+/// MEDIUM). The legacy `with_timeout` spawned a DETACHED `std::thread` per
+/// call and leaked it on timeout — arboard's platform backends block
+/// indefinitely on a half-dead Wayland/X11 compositor, so every cache miss
+/// against a wedged backend (>= 1/s) leaked one permanently-blocked thread
+/// (each an 8 MiB stack VA reservation) and the process eventually hit the
+/// system thread cap. The pool is exactly ONE persistent worker thread behind
+/// a bounded (sync) queue: at most one clipboard op is ever blocked at a
+/// time, surplus requests are DROPPED (never queued unboundedly), and no
+/// thread is ever spawned per call. Callers still observe the same
+/// `recv_timeout` semantics — a wedged backend returns None after the timeout
+/// instead of hanging the caller.
+///
+/// Queue depth: 8. A wedged backend (one blocked op in the worker + 8 queued)
+/// bounds worst-case memory to a handful of small closures; requests beyond
+/// that are dropped. The worker itself is created once per process.
+const CLIPBOARD_POOL_QUEUE_DEPTH: usize = 8;
+
+fn clipboard_pool_tx() -> Option<std::sync::mpsc::SyncSender<ClipboardJob>> {
+    static POOL: std::sync::LazyLock<Option<std::sync::mpsc::SyncSender<ClipboardJob>>> =
+        std::sync::LazyLock::new(|| {
+            let (tx, rx) =
+                std::sync::mpsc::sync_channel::<ClipboardJob>(CLIPBOARD_POOL_QUEUE_DEPTH);
+            let spawned = std::thread::Builder::new()
+                .name("clipboard-worker".into())
+                .spawn(move || {
+                    // Drain until the channel disconnects. The sender lives
+                    // for the process lifetime, so the worker runs for the
+                    // process lifetime too. Jobs run serially — the OS
+                    // clipboard is a single shared resource, so serialization
+                    // is correct AND bounds concurrency to one.
+                    while let Ok(job) = rx.recv() {
+                        job();
+                    }
+                })
+                .is_ok();
+            if spawned {
+                Some(tx)
+            } else {
+                None
+            }
+        });
+    POOL.clone()
+}
+
+/// Run `f` on the bounded clipboard worker pool with a hard timeout, returning
+/// None on timeout or when the pool is saturated. The pool's single persistent
+/// worker means a blocking clipboard backend can never wedge the caller AND
+/// can never leak an unbounded number of threads (audit P2-1).
 pub(crate) fn with_timeout<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("clipboard-read".into())
-        .spawn(move || {
-            let _ = tx.send(f());
-        })
-        .ok()?;
-    rx.recv_timeout(timeout).ok()
+    let tx = clipboard_pool_tx()?;
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<T>();
+    // Enqueue (bounded): if the worker is wedged and the queue is full, the
+    // job is DROPPED — the caller sees None, and no additional thread or
+    // unbounded queue growth ever occurs.
+    let job: ClipboardJob = Box::new(move || {
+        let _ = res_tx.send(f());
+    });
+    if tx.try_send(job).is_err() {
+        return None;
+    }
+    res_rx.recv_timeout(timeout).ok()
 }
 
 #[tauri::command]

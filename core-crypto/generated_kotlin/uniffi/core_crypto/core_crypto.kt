@@ -960,6 +960,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_listen_for_beacons(`timeoutSecs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_core_crypto_fn_func_max_message_size(uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     fun uniffi_core_crypto_fn_func_perform_stun_hole_punch(`stunHost`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_quic_bind_server(`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
@@ -1042,8 +1044,6 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_session_derivation_salt(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_core_crypto_fn_func_session_key_create(`keyBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
     fun uniffi_core_crypto_fn_func_session_key_decrypt(`handle`: Long,`nonce`: RustBuffer.ByValue,`ciphertext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_core_crypto_fn_func_session_key_destroy(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1242,6 +1242,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_core_crypto_checksum_func_listen_for_beacons(
     ): Short
+    fun uniffi_core_crypto_checksum_func_max_message_size(
+    ): Short
     fun uniffi_core_crypto_checksum_func_perform_stun_hole_punch(
     ): Short
     fun uniffi_core_crypto_checksum_func_quic_bind_server(
@@ -1323,8 +1325,6 @@ internal interface UniffiLib : Library {
     fun uniffi_core_crypto_checksum_func_ratchet_synchronize_packet_binary(
     ): Short
     fun uniffi_core_crypto_checksum_func_session_derivation_salt(
-    ): Short
-    fun uniffi_core_crypto_checksum_func_session_key_create(
     ): Short
     fun uniffi_core_crypto_checksum_func_session_key_decrypt(
     ): Short
@@ -1461,6 +1461,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_core_crypto_checksum_func_listen_for_beacons() != 2020.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_core_crypto_checksum_func_max_message_size() != 5019.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_core_crypto_checksum_func_perform_stun_hole_punch() != 33648.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1582,9 +1585,6 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_session_derivation_salt() != 59222.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_core_crypto_checksum_func_session_key_create() != 40835.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_core_crypto_checksum_func_session_key_decrypt() != 6625.toShort()) {
@@ -2454,6 +2454,22 @@ sealed class KyberException: kotlin.Exception() {
             get() = "expected=${ `expected` }, got=${ `got` }"
     }
     
+    /**
+     * AUDIT F4: a message carrying a rekey payload was routed through the
+     * NON-rekey-aware decrypt entry point. The carrier is AEAD-bound to its
+     * rekey parameters (empty-AAD decryption cannot authenticate), so
+     * routing it through the plain path silently drops the peer's rekey
+     * proposal — the distinct error makes the misrouting loud instead of a
+     * confusing "decryption failed".
+     */
+    class CarrierMisrouted(
+        
+        val v1: kotlin.String
+        ) : KyberException() {
+        override val message
+            get() = "v1=${ v1 }"
+    }
+    
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<KyberException> {
         override fun lift(error_buf: RustBuffer.ByValue): KyberException = FfiConverterTypeKyberError.lift(error_buf)
@@ -2503,6 +2519,9 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
             11 -> KyberException.InvalidKeyLength(
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
+                )
+            12 -> KyberException.CarrierMisrouted(
+                FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
@@ -2566,6 +2585,11 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 + FfiConverterULong.allocationSize(value.`expected`)
                 + FfiConverterULong.allocationSize(value.`got`)
             )
+            is KyberException.CarrierMisrouted -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
     }
 
@@ -2625,6 +2649,11 @@ public object FfiConverterTypeKyberError : FfiConverterRustBuffer<KyberException
                 buf.putInt(11)
                 FfiConverterULong.write(value.`expected`, buf)
                 FfiConverterULong.write(value.`got`, buf)
+                Unit
+            }
+            is KyberException.CarrierMisrouted -> {
+                buf.putInt(12)
+                FfiConverterString.write(value.v1, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -3284,6 +3313,26 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     }
     
 
+        /**
+         * The maximum QUIC frame body size the wire contract permits (1 MiB, see
+         * `quic_app::MAX_MESSAGE_SIZE`). AUDIT P1-1: the frame consumer
+         * (`recv_frame_header`) hard-rejects any body over this bound, so every
+         * PRODUCER — the desktop poll handler (10 MiB clipboard ceiling) and any
+         * future file-transfer feature — must enforce the same cap before
+         * encrypting/serializing. Exported through UniFFI (like `kem_sizes`) so the
+         * Android companion enforces the IDENTICAL bound on its side: the two ends
+         * compile independently and a shared constant prevents the producer/consumer
+         * asymmetry that permanently wedged the poll loop.
+         */ fun `maxMessageSize`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_max_message_size(
+        _status)
+}
+    )
+    }
+    
+
     @Throws(KyberException::class) fun `performStunHolePunch`(`stunHost`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(KyberException) { _status ->
@@ -3867,16 +3916,6 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_derivation_salt(
         _status)
-}
-    )
-    }
-    
-
-    @Throws(KyberException::class) fun `sessionKeyCreate`(`keyBytes`: kotlin.ByteArray): kotlin.ULong {
-            return FfiConverterULong.lift(
-    uniffiRustCallWithError(KyberException) { _status ->
-    UniffiLib.INSTANCE.uniffi_core_crypto_fn_func_session_key_create(
-        FfiConverterByteArray.lower(`keyBytes`),_status)
 }
     )
     }

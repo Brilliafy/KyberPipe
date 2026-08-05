@@ -593,7 +593,7 @@ fn test_session_derivation_salt_kat() {
 fn test_sas_code_generation() {
     let sas1 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
     let sas2 = generate_sas_code(b"host_pk_123", b"client_pk_456", b"shared_secret_789").unwrap();
-    assert_eq!(sas1.len(), 7);
+    assert_eq!(sas1.len(), 12, "60-bit SAS (audit P4-1)");
     assert_eq!(sas1, sas2);
 }
 

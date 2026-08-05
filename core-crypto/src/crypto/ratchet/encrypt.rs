@@ -55,6 +55,11 @@ impl DoubleRatchetState {
         // stale — the two consumers disagreed about the same object.
         let now = std::time::Instant::now();
         let mut resend: Option<RekeyCarrier> = None;
+        // AUDIT P1-2: a carrier staged by an API entry point (`dh_ratchet_rekey`)
+        // but never attached to a wire message (`sent == false`) must be
+        // transmitted on THIS message — a staged proposal must never sit
+        // invisible while `should_rekey` is blocked by its own pending proposal.
+        let mut unsent: Option<RekeyCarrier> = None;
         // AUDIT #2 (stale-carrier poison): DROP EVERY stale carrier, not just
         // the first. All queue entries belong to the single pending proposal, so
         // keeping a second stale entry (then re-pushing a fresh one) produced a
@@ -63,7 +68,12 @@ impl DoubleRatchetState {
         // Retaining only the first stale entry as the resend source keeps the
         // queue at exactly one carrier per proposal.
         self.rekey_pending_confirm_queue.retain(|carrier| {
-            if carrier_effective_age(carrier) >= REKEY_RETRY_TTL {
+            if !carrier.sent {
+                if unsent.is_none() {
+                    unsent = Some(carrier.clone());
+                }
+                false
+            } else if carrier_effective_age(carrier) >= REKEY_RETRY_TTL {
                 if resend.is_none() {
                     resend = Some(carrier.clone());
                 }
@@ -99,6 +109,29 @@ impl DoubleRatchetState {
             // stay "fresh" forever by re-sending every `REKEY_RETRY_TTL`.
             self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
                 carrier_seq: seq,
+                sent: true,
+                attached_at: now,
+                attached_at_unix: now_unix_secs(),
+                first_attached_at: carrier.first_attached_at,
+                first_attached_at_unix: carrier.first_attached_at_unix,
+                rekey_x25519_pk: carrier.rekey_x25519_pk.clone(),
+                rekey_mlkem_pk: carrier.rekey_mlkem_pk.clone(),
+                rekey_ciphertext: carrier.rekey_ciphertext.clone(),
+            });
+            (
+                Some(carrier.rekey_x25519_pk),
+                Some(carrier.rekey_mlkem_pk),
+                Some(carrier.rekey_ciphertext),
+            )
+        } else if let Some(carrier) = unsent {
+            // AUDIT P1-2: FIRST transmission of an API-staged carrier that was
+            // never attached (e.g. `dh_ratchet_rekey`). Same payload, live
+            // carrier seq, retry budget starts now; the FIRST-staged wall-clock
+            // floor is preserved so the resync-path staleness window still
+            // measures from the original staging (AUDIT F2).
+            self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
+                carrier_seq: seq,
+                sent: true,
                 attached_at: now,
                 attached_at_unix: now_unix_secs(),
                 first_attached_at: carrier.first_attached_at,
@@ -150,6 +183,9 @@ impl DoubleRatchetState {
                 ));
                 self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
                     carrier_seq: seq,
+                    // The boundary path attaches the payload on the very same
+                    // message that stages the proposal — the carrier is sent.
+                    sent: true,
                     attached_at: now,
                     attached_at_unix: now_unix_secs(),
                     // AUDIT F2: first staging — first-attached == attached.

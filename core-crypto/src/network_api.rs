@@ -10,6 +10,21 @@ use crate::{
 
 // ── QUIC Transport ──
 
+/// The maximum QUIC frame body size the wire contract permits (1 MiB, see
+/// `quic_app::MAX_MESSAGE_SIZE`). AUDIT P1-1: the frame consumer
+/// (`recv_frame_header`) hard-rejects any body over this bound, so every
+/// PRODUCER — the desktop poll handler (10 MiB clipboard ceiling) and any
+/// future file-transfer feature — must enforce the same cap before
+/// encrypting/serializing. Exported through UniFFI (like `kem_sizes`) so the
+/// Android companion enforces the IDENTICAL bound on its side: the two ends
+/// compile independently and a shared constant prevents the producer/consumer
+/// asymmetry that permanently wedged the poll loop.
+#[uniffi::export]
+pub fn max_message_size() -> u64 {
+    ensure_panic_hook_installed();
+    crate::quic_app::MAX_MESSAGE_SIZE as u64
+}
+
 #[uniffi::export]
 pub fn quic_bind_server(port: u16) -> Result<(), KyberError> {
     ensure_panic_hook_installed();

@@ -11,17 +11,77 @@
 //! strings, ciphertexts — ever crosses the FFI boundary.
 
 use crate::error::KyberError;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Bounds on the opaque-handle registries. Handles are disposable — the
 /// pairing keypair and the KEM shared secret are re-generated per pairing — so
-/// a bounded cap + LRU-free "drop the oldest" keeps a buggy caller from
-/// growing them without limit.
+/// a bounded cap + FIFO "drop the oldest" keeps a buggy caller from growing
+/// them without limit.
 const MAX_KEYPAIR_HANDLES: usize = 64;
 const MAX_KEM_HANDLES: usize = 256;
+
+/// Insertion-ordered handle registry (audit P2-1). The `order` queue makes
+/// the cap eviction a TRUE FIFO ("drop the OLDEST handle") — the legacy
+/// `HashMap::keys().next()` eviction selected an ARBITRARY entry, which could
+/// silently destroy a live, persisted handle (e.g. the Android per-install
+/// pairing keypair) under cap pressure and produce nondeterministic
+/// "Invalid keypair handle" pairing failures.
+struct OrderedRegistry<T> {
+    secrets: HashMap<u64, T>,
+    /// Insertion order — the front is the oldest handle. Kept in sync with
+    /// `secrets` (an entry appears exactly once; removal deletes it).
+    order: VecDeque<u64>,
+}
+
+impl<T> OrderedRegistry<T> {
+    fn new() -> Self {
+        Self {
+            secrets: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Insert `handle -> value`, evicting the OLDEST handle when at `cap`
+    /// capacity. Returns the evicted handle (if any); the evicted value's
+    /// secret material is zeroized when it drops out of the map. The newly
+    /// inserted handle is appended to the order queue.
+    fn insert_bounded(&mut self, handle: u64, value: T, cap: usize) -> Option<u64> {
+        let mut evicted = None;
+        if self.secrets.len() >= cap {
+            // FIFO eviction from the front — never a HashMap-arbitrary entry
+            // (audit P2-1).
+            while let Some(oldest) = self.order.pop_front() {
+                if self.secrets.remove(&oldest).is_some() {
+                    evicted = Some(oldest);
+                    break;
+                }
+            }
+        }
+        self.secrets.insert(handle, value);
+        self.order.push_back(handle);
+        evicted
+    }
+
+    fn remove(&mut self, handle: u64) -> Option<T> {
+        let removed = self.secrets.remove(&handle);
+        if removed.is_some() {
+            self.order.retain(|&h| h != handle);
+        }
+        removed
+    }
+
+    fn get(&self, handle: u64) -> Option<&T> {
+        self.secrets.get(&handle)
+    }
+
+    fn clear(&mut self) {
+        self.secrets.clear();
+        self.order.clear();
+    }
+}
 
 /// A secret-bearing pairing keypair retained in Rust. Zeroized on drop.
 /// Stores the internal [`crate::SecretKeypair`] (audit F14) whose private
@@ -38,12 +98,12 @@ impl Drop for KeypairSecret {
     }
 }
 
-static KEYPAIR_HANDLE_REGISTRY: LazyLock<Mutex<HashMap<u64, KeypairSecret>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static KEYPAIR_HANDLE_REGISTRY: LazyLock<Mutex<OrderedRegistry<KeypairSecret>>> =
+    LazyLock::new(|| Mutex::new(OrderedRegistry::new()));
 static NEXT_KEYPAIR_HANDLE: AtomicU64 = AtomicU64::new(1);
 
-static KEM_SECRET_REGISTRY: LazyLock<Mutex<HashMap<u64, Zeroizing<Vec<u8>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static KEM_SECRET_REGISTRY: LazyLock<Mutex<OrderedRegistry<Zeroizing<Vec<u8>>>>> =
+    LazyLock::new(|| Mutex::new(OrderedRegistry::new()));
 static NEXT_KEM_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// Generate a hybrid keypair and return only an opaque handle. The private
@@ -60,14 +120,11 @@ pub fn generate_pq_keypair_handle_impl() -> Result<u64, KyberError> {
     let mut reg = KEYPAIR_HANDLE_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if reg.len() >= MAX_KEYPAIR_HANDLES {
-        // Drop the oldest handle (its private halves are zeroized on drop).
-        if let Some(oldest) = reg.keys().next().copied() {
-            reg.remove(&oldest);
-        }
-    }
+    // AUDIT P2-1: FIFO eviction of the OLDEST handle (never HashMap-arbitrary),
+    // so a live, persisted handle cannot be silently destroyed. The evicted
+    // entry's private halves are zeroized on drop.
     let handle = NEXT_KEYPAIR_HANDLE.fetch_add(1, Ordering::AcqRel);
-    reg.insert(handle, KeypairSecret { pair: keypair });
+    let _ = reg.insert_bounded(handle, KeypairSecret { pair: keypair }, MAX_KEYPAIR_HANDLES);
     Ok(handle)
 }
 
@@ -78,7 +135,7 @@ pub fn get_pq_keypair_public_impl(handle: u64) -> Result<crate::PqPairingPublic,
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let secret = reg
-        .get(&handle)
+        .get(handle)
         .ok_or_else(|| KyberError::CryptoError(format!("Invalid keypair handle {handle}")))?;
     Ok(secret.pair.public())
 }
@@ -89,7 +146,7 @@ pub fn destroy_pq_keypair_handle_impl(handle: u64) -> bool {
     let mut reg = KEYPAIR_HANDLE_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    reg.remove(&handle).is_some()
+    reg.remove(handle).is_some()
 }
 
 /// Destroy EVERY keypair handle (zeroizing all private halves). Wired into the
@@ -110,7 +167,7 @@ fn keypair_secret(handle: u64) -> Result<crate::SecretKeypair, KyberError> {
     let reg = KEYPAIR_HANDLE_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    reg.get(&handle)
+    reg.get(handle)
         .map(|s| s.pair.clone())
         .ok_or_else(|| KyberError::CryptoError(format!("Invalid keypair handle {handle}")))
 }
@@ -174,13 +231,13 @@ pub fn encapsulate_pq_secret_handle_impl(
     let mut reg = KEM_SECRET_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if reg.len() >= MAX_KEM_HANDLES {
-        if let Some(oldest) = reg.keys().next().copied() {
-            reg.remove(&oldest); // drop zeroizes the shared secret
-        }
-    }
+    // AUDIT P2-1: FIFO eviction of the OLDEST KEM secret handle.
     let handle = NEXT_KEM_HANDLE.fetch_add(1, Ordering::AcqRel);
-    reg.insert(handle, Zeroizing::new(res.combined_shared_secret.clone()));
+    let _ = reg.insert_bounded(
+        handle,
+        Zeroizing::new(res.combined_shared_secret.clone()),
+        MAX_KEM_HANDLES,
+    );
     Ok((handle, res.ciphertext_bytes.clone()))
 }
 
@@ -202,13 +259,9 @@ pub fn decapsulate_pq_secret_handle_impl(
     let mut reg = KEM_SECRET_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if reg.len() >= MAX_KEM_HANDLES {
-        if let Some(oldest) = reg.keys().next().copied() {
-            reg.remove(&oldest); // drop zeroizes the shared secret
-        }
-    }
+    // AUDIT P2-1: FIFO eviction of the OLDEST KEM secret handle.
     let handle = NEXT_KEM_HANDLE.fetch_add(1, Ordering::AcqRel);
-    reg.insert(handle, Zeroizing::new(secret));
+    let _ = reg.insert_bounded(handle, Zeroizing::new(secret), MAX_KEM_HANDLES);
     Ok(handle)
 }
 
@@ -261,7 +314,7 @@ fn kem_secret(kem_handle: u64) -> Result<Zeroizing<Vec<u8>>, KyberError> {
     let reg = KEM_SECRET_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    reg.get(&kem_handle)
+    reg.get(kem_handle)
         .cloned()
         .ok_or_else(|| KyberError::CryptoError(format!("Invalid KEM secret handle {kem_handle}")))
 }
@@ -272,7 +325,7 @@ pub fn destroy_kem_handle_impl(kem_handle: u64) -> bool {
     let mut reg = KEM_SECRET_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    reg.remove(&kem_handle).is_some()
+    reg.remove(kem_handle).is_some()
 }
 
 /// Destroy every KEM shared-secret handle.
@@ -415,5 +468,59 @@ mod tests {
         assert!(destroy_pq_keypair_handle_impl(bob_handle));
         assert!(destroy_kem_handle_impl(kem_ab));
         assert!(destroy_kem_handle_impl(kem_ba));
+    }
+}
+
+/// AUDIT P2-1: cap eviction must drop the OLDEST handle (FIFO), never an
+/// arbitrary HashMap entry — an arbitrary eviction can destroy a live,
+/// persisted handle (e.g. the Android per-install pairing keypair) under
+/// cap pressure, producing nondeterministic pairing failures.
+#[test]
+fn registry_evicts_oldest_first() {
+    let mut reg = OrderedRegistry::<u64>::new();
+    for i in 0..5u64 {
+        reg.insert_bounded(i, i * 10, 5);
+    }
+    // At capacity: inserting a sixth handle evicts handle 0 (the oldest).
+    let evicted = reg.insert_bounded(5, 50, 5);
+    assert_eq!(evicted, Some(0), "oldest handle must be evicted first");
+    assert!(reg.get(0).is_none());
+    assert!(reg.get(1).is_some());
+    assert!(reg.get(5).is_some());
+
+    // Removing an entry keeps the queue consistent: with 4 entries and a
+    // cap of 5, inserting 6 does NOT evict (below capacity); the FOLLOWING
+    // insert evicts the oldest REMAINING handle (1), never a stale/deleted
+    // one (2).
+    let _ = reg.remove(2);
+    let evicted = reg.insert_bounded(6, 60, 5);
+    assert_eq!(evicted, None, "below capacity — no eviction");
+    assert!(reg.get(2).is_none());
+    assert!(reg.get(6).is_some());
+    let evicted = reg.insert_bounded(7, 70, 5);
+    assert_eq!(evicted, Some(1), "next-oldest surviving handle is evicted");
+    assert!(reg.get(7).is_some());
+
+    // End-to-end with the real keypair registry: at cap, the OLDEST live
+    // handle is destroyed first and the newest survives.
+    let mut handles = Vec::new();
+    for _ in 0..MAX_KEYPAIR_HANDLES {
+        handles.push(generate_pq_keypair_handle_impl().expect("handle"));
+    }
+    let first = handles[0];
+    let last = *handles.last().unwrap();
+    let newest = generate_pq_keypair_handle_impl().expect("over-cap handle");
+    assert!(
+        get_pq_keypair_public_impl(first).is_err(),
+        "the oldest handle must be evicted at cap (audit P2-1)"
+    );
+    assert!(
+        get_pq_keypair_public_impl(last).is_ok(),
+        "a recently inserted handle must survive"
+    );
+    assert!(get_pq_keypair_public_impl(newest).is_ok());
+    destroy_pq_keypair_handle_impl(newest);
+    for h in handles {
+        let _ = destroy_pq_keypair_handle_impl(h);
     }
 }

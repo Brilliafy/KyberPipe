@@ -332,16 +332,13 @@ impl DoubleRatchetState {
                 // material — keep it in a Zeroizing buffer so error paths cannot
                 // leave it in freed heap memory.
                 let mut ss: Option<Zeroizing<Vec<u8>>> = None;
-                let mut ss_source: Option<usize> = None;
-                for (idx, pair) in std::iter::once(&self.our_hybrid_pair)
-                    .chain(self.previous_keypairs.iter())
-                    .enumerate()
+                for pair in
+                    std::iter::once(&self.our_hybrid_pair).chain(self.previous_keypairs.iter())
                 {
                     if let Ok(decapsulated) =
                         decapsulate_hybrid(ct, &pair.x25519_sk, &pair.mlkem_sk)
                     {
                         ss = Some(Zeroizing::new(decapsulated));
-                        ss_source = Some(idx);
                         break;
                     }
                 }
@@ -351,7 +348,6 @@ impl DoubleRatchetState {
                             .into(),
                     )
                 })?;
-                let _ = ss_source;
                 // AUDIT F2 FIX: a NEWER-generation carrier that REPLACES an
                 // older pending proposal must not inherit the old proposal's
                 // age. `stamp_incoming_proposal_attached_at` is idempotent

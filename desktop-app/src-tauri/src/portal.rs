@@ -60,6 +60,21 @@ pub async fn send_notification(title: &str, body: &str) -> Result<(), String> {
 
 /// Dynamic clipboard sync dispatcher
 pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
+    // AUDIT P1-1 (HIGH, inbound mirror): the phone→desktop clipboard path was
+    // unbounded inbound — the desktop's QUIC frame cap bounds the WIRE body,
+    // but the DECRYPTED text (up to ~768 KB of a 1 MiB base64'd TLV) was then
+    // written straight to the OS clipboard with no size check. A
+    // compromised/repackaged phone app could push an oversized blob into the
+    // desktop clipboard. The consumer side of the wire contract enforces the
+    // same 1 MiB frame bound, so refuse anything beyond what the producer
+    // could legitimately send (same constant as the desktop producer cap).
+    if text.len() > core_crypto::quic_app::MAX_MESSAGE_SIZE * 3 / 4 - 8192 {
+        tracing::warn!(
+            "[Clipboard] Rejecting inbound clipboard payload of {} bytes — exceeds the wire-contract bound (audit P1-1)",
+            text.len()
+        );
+        return Err(format!("Clipboard payload too large: {} bytes", text.len()));
+    }
     if is_flatpak() {
         info!("Flatpak sandbox detected: Syncing clipboard via Portal/fallbacks");
         let _ = crate::commands::write_clipboard_fallback(text);

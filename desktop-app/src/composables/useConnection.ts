@@ -90,7 +90,16 @@ export function useConnection() {
 
   const handleMediaAction = async (actionIndex: number) => {
     try {
-      await invoke("trigger_desktop_media_action", { actionIndex });
+      // AUDIT P4-1(c)/P5-2: Tier-2 — requires a fresh native user-gesture
+      // token (the command drives a remote side effect on the phone).
+      const confirmed = window.confirm(
+        "Trigger this media action on the paired phone?"
+      );
+      if (!confirmed) return;
+      const token = await invoke<string>("request_privilege_token", {
+        action: "trigger_desktop_media_action",
+      });
+      await invoke("trigger_desktop_media_action", { actionIndex, token });
     } catch (e) {
       console.error("Failed to trigger media action:", e);
     }
