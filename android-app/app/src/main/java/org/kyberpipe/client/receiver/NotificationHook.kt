@@ -40,6 +40,13 @@ class NotificationHook : NotificationListenerService() {
         private var activeMediaPackage: String? = null
         @Volatile
         private var activeMediaActions: List<Pair<Int, android.app.PendingIntent>>? = null
+        /// AUDIT P4-1(b): lightweight retained (index → action-title) map for
+        /// the SAME capture as [activeMediaActions], so the phone-side
+        /// confirmation dialog can render "Desktop wants to fire 'Play' on
+        /// Spotify?" without holding the full StatusBarNotification. Titles are
+        /// public metadata — no PendingIntent or Context retained here.
+        @Volatile
+        private var activeMediaActionTitles: List<Pair<Int, String>>? = null
         /// AUDIT F8: wall-clock capture time of the active media action set.
         /// Media notifications are re-posted continuously while a player is
         /// active, so a TTL sweep can safely drop a stale capture that survived
@@ -65,6 +72,7 @@ class NotificationHook : NotificationListenerService() {
             synchronized(this) {
                 activeMediaPackage = null
                 activeMediaActions = null
+                activeMediaActionTitles = null
                 activeMediaCapturedAt = 0L
             }
         }
@@ -138,6 +146,33 @@ class NotificationHook : NotificationListenerService() {
             }
         }
 
+        /// AUDIT P4-1(b): peek the currently captured media action WITHOUT
+        /// firing it — used to render the phone-side confirmation dialog
+        /// ("The desktop wants to fire '<title>' on <package>?"). Returns
+        /// (actionTitle, packageName) for the desktop's requested index, or
+        /// null when the capture is stale/absent/index-out-of-range. The
+        /// actual [triggerMediaAction] fire happens only after the phone user
+        /// approves in the dialog.
+        fun peekPendingMediaAction(actionIndex: Int): Pair<String, String>? {
+            return synchronized(this) {
+                if (!activeMediaIsFresh()) {
+                    if (activeMediaActions != null) {
+                        Log.d(
+                            "KyberpipeMedia",
+                            "Stale media action capture (older than ${MEDIA_ACTIVE_TTL_MS}ms) invalidated — audit F8"
+                        )
+                    }
+                    invalidateActiveMedia()
+                    return@synchronized null
+                }
+                val titles = activeMediaActionTitles ?: return@synchronized null
+                val pkg = activeMediaPackage ?: return@synchronized null
+                val (_, title) = titles.firstOrNull { it.first == actionIndex }
+                    ?: return@synchronized null
+                Pair(title, pkg)
+            }
+        }
+
         /// Send media payload over QUIC via UniFFI bindings instead of HTTP/TCP.
         /// Uses stream type 0x03 (STREAM_MEDIA).
         fun quicSendMedia(scope: CoroutineScope, hostIp: String, payload: String) {
@@ -157,6 +192,11 @@ class NotificationHook : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        // AUDIT #9/P2-4: open the Keystore-backed SettingsManager ONCE here so
+        // the consent gate (notificationForwardingEnabled) can be consulted on
+        // the binder thread for EVERY notification without rebuilding the
+        // EncryptedSharedPreferences instance (two Keystore ops) per post.
+        cachedSettings = org.kyberpipe.client.utils.SettingsManager(applicationContext)
     }
 
     override fun onDestroy() {
@@ -171,12 +211,17 @@ class NotificationHook : NotificationListenerService() {
         val packageName = sbn.packageName ?: return
         val extras = sbn.notification?.extras ?: return
 
-        // Intercept Media Notifications
+        // Intercept Media Notifications. AUDIT P4-1(a) (MEDIUM): the heuristic
+        // was package-name SUBSTRING matching (`packageName.contains("player")`
+        // / `"music"` / `"audio"`) — any app whose package merely contained one
+        // of those substrings (common in OEM build variants) had its
+        // notification PendingIntents captured and made fireable by the desktop
+        // within one poll cycle. Media capture is now restricted to
+        // notifications that carry a REAL MediaSession.Token
+        // (`android.mediaSession` extra) — the only reliable signal that the
+        // notification actually drives a media session. Spotify / YouTube Music
+        // etc. all post that extra, so no legitimate player is lost.
         val isMedia = extras.containsKey("android.mediaSession")
-            || packageName == "com.spotify.music"
-            || packageName.contains("music")
-            || packageName.contains("player")
-            || packageName.contains("audio")
 
         if (isMedia) {
             handleMediaNotification(sbn)
@@ -247,6 +292,21 @@ class NotificationHook : NotificationListenerService() {
         // scope here). Per the audit's allowed option, the dead serialization
         // path is REMOVED; the phone continues to mirror the event locally so
         // the in-app NotificationsTab (the current consumer) still works.
+        //
+        // AUDIT P2-4 (LOW): the capture was previously UNCONDITIONAL — Signal /
+        // WhatsApp message text was parsed and retained in the process-global
+        // flow (buffer 64) even when `notificationForwardingEnabled == false`,
+        // and the consent gate was only ever consulted on the QUIC-forward path.
+        // Gate the CAPTURE (not just the send) on the consent flag: when the
+        // user has not enabled notification forwarding, no messaging-app
+        // content is intercepted or retained in memory at all.
+        if (cachedSettings?.notificationForwardingEnabled != true) {
+            Log.d(
+                "KyberpipeNotifHook",
+                "Notification capture gated off (notificationForwardingEnabled=false, audit P2-4) — dropping $packageName"
+            )
+            return
+        }
         _notificationEvents.tryEmit(
             NotificationEvent(
                 title = title,
@@ -291,6 +351,12 @@ class NotificationHook : NotificationListenerService() {
         activeMediaPackage = sbn.packageName
         activeMediaActions = sbn.notification.actions?.mapIndexed { i, action ->
             i to action.actionIntent
+        }
+        // AUDIT P4-1(b): retain the PUBLIC action titles alongside the
+        // PendingIntents so the phone-side confirmation dialog can name the
+        // action the desktop wants to fire.
+        activeMediaActionTitles = sbn.notification.actions?.mapIndexed { i, action ->
+            i to (action.title?.toString() ?: "Action $i")
         }
         // AUDIT F8: stamp the capture so the TTL sweep can drop a stale set
         // whose removal event was missed (listener restart / binder death).

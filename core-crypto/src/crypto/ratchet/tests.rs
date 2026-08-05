@@ -1670,3 +1670,114 @@ fn resend_refreshed_proposal_ages_out_of_fresh_for_resync() {
         "a fresh pending outgoing proposal must still refuse resync"
     );
 }
+
+// AUDIT P5-1 (MEDIUM): model-based property test over RANDOMIZED
+// interleavings of the full rekey cycle — encrypt, deliver/decrypt (both
+// directions), rekey-ack, commit, cancel. The rekey protocol is a 10-file
+// state machine whose cross-module invariants (single proposal slot,
+// one-carrier confirm queue, epoch monotonicity) used to be enforced only by
+// scattered `debug_assert`s; this model drives the machine against random
+// operation orderings and asserts `assert_confirm_queue_invariant` after
+// EVERY transition, so a future change that violates the invariant in one
+// module is caught at the offending transition instead of surfacing days
+// later in the field as stale-carrier poison.
+//
+// The op set is delivery-dominant on purpose: in the real protocol the send
+// chain and the peer's receive chain advance within a small window of each
+// other (every poll delivers exactly one message per direction), so the
+// model's pure-encrypt ops (rare) only ever open a sub-`max_skip` gap — the
+// state the skip-key cache is built for.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+    #[test]
+    fn rekey_confirm_queue_invariant_holds_under_random_interleavings(
+        ops in proptest::collection::vec(0u8..8, 1..120),
+    ) {
+        let (mut alice, mut bob) = alice_bob();
+        let mut a_seq = 1000u64;
+        let mut b_seq = 1000u64;
+
+        /// Deliver every pending RekeyAck `recv_side` queued into `send_side`
+        /// (the ack of the send side's outgoing proposal). Mirrors the
+        /// poll-loop ack flow: the ack rides the receiver's NEXT message, so
+        /// it only exists after `recv_side` consumed the carrier — the chains
+        /// are aligned at that point.
+        fn drain_ack(
+            recv_side: &mut DoubleRatchetState,
+            send_side: &mut DoubleRatchetState,
+        ) {
+            while let Some(ack_seq) = recv_side.take_pending_rekey_ack_seq() {
+                let ack = recv_side.generate_rekey_ack(ack_seq).expect("ack");
+                let pt = send_side
+                    .ratchet_decrypt(
+                        &<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(),
+                        &ack.ciphertext,
+                    )
+                    .expect("send side decrypts the peer's ack");
+                let decoded = crate::packets::safe_decode_packet(&pt).unwrap();
+                if let crate::packets::KyberMessage::RekeyAck { seq } = decoded {
+                    if !send_side.rekey_pending_confirm_queue.is_empty() {
+                        assert!(send_side.process_rekey_ack(seq), "ack must commit");
+                    }
+                }
+            }
+        }
+
+        for op in ops {
+            match op % 8 {
+                // 0/1: one-sided encrypt WITHOUT delivery — exercises the
+                // carrier re-send / queue path with a tiny (<= max_skip) gap.
+                0 => {
+                    let _ = alice
+                        .ratchet_encrypt(format!("a{a_seq}").as_bytes())
+                        .expect("alice encrypt");
+                    a_seq += 1;
+                }
+                1 => {
+                    let _ = bob
+                        .ratchet_encrypt(format!("b{b_seq}").as_bytes())
+                        .expect("bob encrypt");
+                    b_seq += 1;
+                }
+                // 2/3: full deliver + decrypt in one direction.
+                2 => {
+                    a2b(&mut alice, &mut bob, a_seq);
+                    a_seq += 1;
+                }
+                3 => {
+                    b2a(&mut alice, &mut bob, b_seq);
+                    b_seq += 1;
+                }
+                // 4/5: deliver then drain the ack the delivery queued.
+                4 => {
+                    a2b(&mut alice, &mut bob, a_seq);
+                    a_seq += 1;
+                    drain_ack(&mut bob, &mut alice);
+                }
+                5 => {
+                    b2a(&mut alice, &mut bob, b_seq);
+                    b_seq += 1;
+                    drain_ack(&mut alice, &mut bob);
+                }
+                // 6/7: cancel stale outgoing proposals (the resync eviction).
+                6 => alice.cancel_outgoing_rekey(),
+                7 => bob.cancel_outgoing_rekey(),
+                _ => unreachable!(),
+            }
+            // The invariant under test must hold after EVERY transition.
+            alice.assert_confirm_queue_invariant();
+            bob.assert_confirm_queue_invariant();
+        }
+
+        // The machine must still be functional after the random walk: drain
+        // any residual acks and run a clean bidirectional exchange.
+        drain_ack(&mut bob, &mut alice);
+        drain_ack(&mut alice, &mut bob);
+        for i in 0..10u64 {
+            a2b(&mut alice, &mut bob, 9000 + i);
+            b2a(&mut alice, &mut bob, 9000 + i);
+        }
+        alice.assert_confirm_queue_invariant();
+        bob.assert_confirm_queue_invariant();
+    }
+}

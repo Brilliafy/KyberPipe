@@ -74,6 +74,63 @@ object KyberPipePollEngine {
     private var loopScope: CoroutineScope? = null
     private var currentSettings: SettingsManager? = null
 
+    /// AUDIT P2-2 (MEDIUM): dirty-gate for snapshot persistence, mirroring the
+    /// desktop's `ratchet_dirty_since_last_persist` (audit #11). The legacy
+    /// loop exported the AEAD-wrapped snapshot (Rust serialize + wrap) and
+    /// wrote BOTH EncryptedSharedPreferences entries — snapshot + watermark,
+    /// each a Keystore AES-GCM transaction — on EVERY 2.5s poll (~34,500
+    /// serialized exports + ~69,000 Keystore writes/day), on the same IO
+    /// thread the poll loop runs on. This tracks the last-persisted
+    /// (epoch, generation, send, recv) watermark per peer and only
+    /// exports+persists when the ratchet actually mutated.
+    private val lastPersistedWatermark =
+        java.util.concurrent.ConcurrentHashMap<String, LongArray>()
+
+    /// Whether the ratchet for `peer` mutated past what was last PERSISTED.
+    /// Reads the live watermark (non-mutating FFI accessor) and compares the
+    /// full 4-tuple. Epoch-aware (audit P1-2): a re-pair's fresh session
+    /// (epoch bump, counters reset) must force a persist even though
+    /// gen/send/recv all reset to 0. Purely a comparison — the "last
+    /// persisted" mark is only advanced by [markRatchetPersisted] AFTER the
+    /// write succeeds, so a failed persist is retried on the next poll
+    /// instead of being skipped as "not dirty" (the desktop's optimistic mark
+    /// has that retry gap; here the dirty gate is write-accurate).
+    private fun ratchetDirtySinceLastPersist(peer: String): Boolean {
+        val wm = try {
+            uniffi.core_crypto.ratchetSessionWatermark(peer)
+        } catch (_: Exception) {
+            return false
+        } ?: return false
+        val live = longArrayOf(
+            wm.pairingEpoch.toLong(),
+            wm.ratchetGeneration.toLong(),
+            wm.sendMessageCount.toLong(),
+            wm.recvMessageCount.toLong(),
+        )
+        val last = lastPersistedWatermark[peer]
+        return last == null || !last.contentEquals(live)
+    }
+
+    /// Record the live watermark as the last successfully PERSISTED one.
+    /// Called only after the snapshot export + both prefs writes succeeded, so
+    /// the in-memory high-water mark can never run ahead of the on-disk state
+    /// (the exact rollback hazard the store-level watermark guard exists to
+    /// prevent).
+    private fun markRatchetPersisted(peer: String) {
+        try {
+            val wm = uniffi.core_crypto.ratchetSessionWatermark(peer) ?: return
+            lastPersistedWatermark[peer] = longArrayOf(
+                wm.pairingEpoch.toLong(),
+                wm.ratchetGeneration.toLong(),
+                wm.sendMessageCount.toLong(),
+                wm.recvMessageCount.toLong(),
+            )
+        } catch (_: Exception) {
+            // Leave the previous mark — a transient accessor failure must not
+            // clear the high-water (a subsequent successful read still retries).
+        }
+    }
+
     /// AUDIT F5 (MEDIUM): shared per-peer QUIC round-trip gate. The poll loop
     /// and the SMS forwarder both acquire this BEFORE their QUIC round-trip, so
     /// only ONE QUIC round-trip per peer can exist at a time at the Android
@@ -356,7 +413,15 @@ object KyberPipePollEngine {
                 // Persist the ratchet snapshot after any mutation (AEAD-wrapped
                 // INSIDE Rust — audit finding #5/#13: no raw session key bytes
                 // ever cross the FFI boundary into the JVM heap).
-                if (peer.isNotEmpty()) {
+                //
+                // AUDIT P2-2 (MEDIUM): the persistence is now gated by the same
+                // dirty-flag the desktop uses (audit #11). The legacy code
+                // exported + wrote EncryptedSharedPreferences on EVERY poll —
+                // ~69,000 Keystore AES-GCM transactions/day on this IO thread.
+                // The watermark accessor is non-mutating; only when
+                // (epoch, gen, send, recv) actually changed does the expensive
+                // export + wrap + two-prefs-write path run.
+                if (peer.isNotEmpty() && ratchetDirtySinceLastPersist(peer)) {
                     try {
                         // ratchetExportSessionWrapped serializes + wraps in Rust;
                         // we only need the peer identity (the wrap key lives in
@@ -388,6 +453,11 @@ object KyberPipePollEngine {
                                 uniffi.core_crypto.ratchetSessionWatermark(peer)?.let { wm ->
                                     RatchetWatermarkStore.update(settings, peer, wm)
                                 }
+                                // AUDIT P2-2: only now — after the snapshot AND
+                                // the rollback watermark both landed — is the
+                                // in-memory dirty-gate mark advanced, so a
+                                // failed persist is retried on the next poll.
+                                markRatchetPersisted(peer)
                             }
                         }
                     } catch (e: Exception) {

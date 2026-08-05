@@ -164,7 +164,18 @@ pub fn session_derivation_salt() -> Vec<u8> {
 // ── Session Key Handle API ──
 // Raw key bytes never cross the FFI boundary.
 
-#[uniffi::export]
+/// AUDIT P3-1 (MEDIUM): this was the LAST raw-key-across-the-boundary export
+/// — the raw-param pairing exports were correctly removed (generate_pq_keypair,
+/// encapsulate_pq_secret, derive_session_key are crate-internal), but
+/// `session_key_create(Vec<u8>)` still accepted a full 32-byte key from the
+/// JVM/C-ABI side, exposing it to the Android app process (which links the
+/// same .so) with no trust-tier distinction from the desktop-internal caller.
+/// The desktop legitimately needs it for keyring restore (F11) — but the
+/// desktop calls it as a same-process CRATE function, so the export is
+/// removed while the function stays `pub`: no UniFFI export accepts a raw key
+/// anymore, and the generated Kotlin binding no longer exposes
+/// `sessionKeyCreate`. The internal copy is zeroized by
+/// [`session_handle::session_key_create`]'s Zeroizing wrapper.
 pub fn session_key_create(key_bytes: Vec<u8>) -> Result<u64, KyberError> {
     ensure_panic_hook_installed();
     session_handle::session_key_create(key_bytes)

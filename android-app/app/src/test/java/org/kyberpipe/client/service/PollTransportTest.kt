@@ -104,6 +104,32 @@ class PollTransportTest {
         assertFalse(settings.pendingPairingConfirmation)
     }
 
+    /**
+     * AUDIT P1-1 (HIGH): the phone mirrors the producer-side frame cap — a clip
+     * TLV whose size exceeds the shared UniFFI-exported MAX_MESSAGE_SIZE is
+     * refused BEFORE it reaches the ratchet. The producer (desktop poll
+     * handler) now refuses to encrypt clipboard payloads whose framing would
+     * exceed the bound, so a payload beyond it can only come from a
+     * broken/foreign producer.
+     */
+    @Test
+    fun oversizedClipTlvIsRefusedBeforeRatchet() = runBlocking {
+        val flow = MutableSharedFlow<KyberPipePollEngine.PollUpdate>(replay = 1)
+        val settings = FakeSettings()
+        val transport = PollTransport(settings = settings, updates = flow, requestSync = {})
+
+        // The shared bound (1 MiB) is the UniFFI-exported constant; in the JVM
+        // test it falls back to the documented value via runCatching.
+        assertTrue(
+            "a TLV at MAX_MESSAGE_SIZE + 1 must be refused",
+            transport.refusesOversizedTlv(PollTransport.MAX_FRAME_BODY_SIZE + 1)
+        )
+        assertFalse(
+            "a TLV exactly at MAX_MESSAGE_SIZE is still accepted",
+            transport.refusesOversizedTlv(PollTransport.MAX_FRAME_BODY_SIZE)
+        )
+    }
+
     /** The two-phase pairing commit (audit #6): a rejection must NOT commit. */
     @Test
     fun pairingRejectedWhenDesktopRefuses() = runBlocking {
