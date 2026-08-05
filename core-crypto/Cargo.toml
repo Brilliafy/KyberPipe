@@ -23,6 +23,10 @@ zxing-cpp = "0.4"
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
 
+[features]
+default = []
+experimental = []
+
 [dependencies]
 # Async runtime engine
 tokio = { version = "1.0", features = ["full"] }
@@ -39,6 +43,7 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 # Key derivation and hashing
 hkdf = "0.12"
 sha2 = "0.10"
+hmac = "0.12"
 # Fast local symmetric encryption layer once key exchange completes
 chacha20poly1305 = "0.10"
 # Serialization
@@ -51,9 +56,14 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.5"
 tracing = "0.1"
 rand = "0.8"
+crc32fast = "1.4"
 # Pure-Rust QR code decoder (detect + decode from greyscale bytes)
 rqrr = "0.10"
 # JNI bindings for Android (manual JNI, not UniFFI, for the QR scanner function)
 jni = "0.21"
 # Cross-platform library layout helper to bridge Rust into Android Kotlin
 uniffi = { version = "0.28", features = ["cli", "tokio"] }
+# Cross-platform project directory resolver for cert persistence
+directories = "5.0"
+# OS secure keyring for storing certificate hashes and session metadata
+keyring = "3.6"

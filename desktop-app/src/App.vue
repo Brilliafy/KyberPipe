@@ -1,6 +1,23 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useSettings } from "./composables/useSettings";
+import { usePairing } from "./composables/usePairing";
+import { useMedia } from "./composables/useMedia";
+import { useTelemetry } from "./composables/useTelemetry";
+import { useConnectionPolling } from "./composables/useConnectionPolling";
+import { useNotifications } from "./composables/useNotifications";
+import { useFlatpak } from "./composables/useFlatpak";
+import { useAutomation } from "./composables/useAutomation";
+import { usePanic } from "./composables/usePanic";
+import { useClipboardHistory } from "./composables/useClipboardHistory";
+import { usePairingDialogs } from "./composables/usePairingDialogs";
+import { useBackgroundSync } from "./composables/useBackgroundSync";
+import { useHeartbeat } from "./composables/useHeartbeat";
+// AUDIT F18: feature-level orchestration hooks (extracted from the composition
+// root so the shell stays thin and each feature owns its own lifecycle).
+import { useLogs } from "./composables/useLogs";
+import { useKeyPairOrchestration } from "./composables/useKeyPairOrchestration";
 
 // Import Refactored Sub-Components
 import Sidebar from "./components/Sidebar.vue";
@@ -11,594 +28,64 @@ import AutomationManager from "./components/AutomationManager.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
-import QRCode from 'qrcode';
-import { CheckCircle2, Loader2, XCircle, Terminal, Play, Pause, SkipForward, SkipBack, Music, ShieldAlert } from "@lucide/vue";
+import { CheckCircle2, Loader2, XCircle, Terminal, ShieldAlert } from "@lucide/vue";
 
+// ── Composable imports (deps-free first) ────────────────────────────────
 
-interface SystemInfo {
-  is_flatpak: boolean;
-  platform: string;
-  app_version: string;
-  pqc_algorithm: string;
-}
+const {
+  deviceName, devicePicture, pairedDeviceName, pairedDevicePicture,
+  ddnsHostname, enableUpnp, enableDdns, isPaired,
+  fileAccessGrantedDesktop, fileAccessGrantedPhone,
+  themeMode, beaconDiscoveryEnabled, loadSettings, saveSettings,
+  currentThemeClass
+} = useSettings();
 
-interface KeyPair {
-  x25519_pk_hex: string;
-  x25519_sk_hex: string;
-  mlkem_pk_hex: string;
-  mlkem_sk_hex: string;
-}
+const {
+  connectionStatus, connectionMethod, connectionColor, isConnected,
+  showFirewallModal,
+  checkConnectionState, triggerConnectionAttempt
+} = useConnectionPolling();
 
-interface ScriptResult {
-  success: boolean;
-  output: string;
-  logs: string[];
-}
+// ── Feature-level orchestration hooks (AUDIT F18) ───────────────────────
 
-interface ClipboardRecord {
-  id: string;
-  text: string;
-  source: "pc" | "phone";
-  timestamp: number;
-}
+// Diagnostic logs + crash-log surface.
+const {
+  logs, crashLog,
+  refreshLogs, checkCrashLog,
+  copyStacktrace, exportDiagnosticLogs, exportCrashLog,
+} = useLogs();
 
-interface UnifiedNotification {
-  id: string;
-  source: string;
-  title: string;
-  body: string;
-  appPackage: string;
-  timestamp: string;
-  type: "local" | "remote";
-  updatedAt?: number;
-}
+// Identity keypair + pairing-config orchestration (token-gated
+// get_pairing_config fetch).
+const {
+  keyPair, pairingConfigJson,
+  handleGenerateKeyPair, loadPairingConfig,
+} = useKeyPairOrchestration({ refreshLogs });
+
+// ── Local state (not extracted to composables) ──────────────────────────
 
 const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "notifications" | "light" | "logs" | "settings">("dashboard");
 
-const systemInfo = ref<SystemInfo | null>(null);
-const keyPair = ref<KeyPair | null>(null);
-const logs = ref<string[]>([]);
-const crashLog = ref<string | null>(null);
-
-const checkCrashLog = async () => {
-  try {
-    crashLog.value = await invoke<string | null>("get_latest_crash_log");
-  } catch (e) {
-    console.error("Failed to check crash log:", e);
-  }
-};
-
-const copyStacktrace = async () => {
-  if (crashLog.value) {
-    try {
-      await navigator.clipboard.writeText(crashLog.value);
-      alert("Anonymized stacktrace copied to clipboard!");
-    } catch (err) {
-      console.error("Failed to copy stacktrace:", err);
-    }
-  }
-};
-
-const exportDiagnosticLogs = () => {
-  const text = logs.value.join("\n");
-  const blob = new Blob([text], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "diagnostic_logs.txt";
-  a.click();
-  URL.revokeObjectURL(url);
-};
-
-const exportCrashLog = () => {
-  if (crashLog.value) {
-    const blob = new Blob([crashLog.value], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "anonymous_crash_log.txt";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-};
-
-// Connectivity State Machine
-const connectionStatus = ref("DISCONNECTED");
-const connectionMethod = ref("None");
-const connectionColor = ref("red"); // "green", "yellow", "red"
-const isConnected = computed(() => connectionColor.value === "green");
-
-interface MediaAction {
-  title: string;
-  index: number;
-}
-
-interface MediaState {
-  title: string;
-  artist: string;
-  album_art: string;
-  is_playing: boolean;
-  actions: MediaAction[];
-}
-
-const mediaState = ref<MediaState | null>(null);
-
-const fetchMediaState = async () => {
-  if (!isPaired.value) return;
-  try {
-    const state = await invoke<MediaState>("get_media_state");
-    mediaState.value = state;
-  } catch (e) {
-    console.error("Failed to fetch media state:", e);
-  }
-};
-
-const handleMediaAction = async (actionIndex: number) => {
-  try {
-    await invoke("trigger_desktop_media_action", { actionIndex });
-  } catch (e) {
-    console.error("Failed to trigger media action:", e);
-  }
-};
-
-const getMediaIcon = (title: string) => {
-  const t = title.toLowerCase();
-  if (t.includes("play")) return Play;
-  if (t.includes("pause")) return Pause;
-  if (t.includes("next") || t.includes("forward") || t.includes("skip")) return SkipForward;
-  if (t.includes("prev") || t.includes("back")) return SkipBack;
-  return Music;
-};
-
-const pairingConfigJson = ref("");
-
-// Latency for top-bar display
-const currentLatency = ref(0);
-const latencyColor = computed(() => {
-  const ms = currentLatency.value;
-  if (ms < 50) return '#22c55e';
-  if (ms < 100) return '#84cc16';
-  if (ms < 200) return '#facc15';
-  if (ms < 500) return '#f97316';
-  return '#ef4444';
-});
-
-// Settings / Storage
-const deviceName = ref("My Linux Workstation");
-const devicePicture = ref("");
-const pairedDeviceName = ref("");
-const pairedDevicePicture = ref("");
-const ddnsHostname = ref("");
-const enableUpnp = ref(false);
-const enableDdns = ref(false);
-const isPaired = ref(false);
-const fileAccessGrantedDesktop = ref(false);
-const fileAccessGrantedPhone = ref(false);
-const pathwayOrder = ref<string[]>(["wifi_direct", "mdns_lan", "wireguard_wan"]);
-
-// Ambient Light Sandbox State
-const currentLux = ref(250.0);
-const scriptResult = ref<ScriptResult | null>(null);
-
-// Clipboard State (Real)
-const lastSyncStatus = ref("");
-const clipboardItems = ref<ClipboardRecord[]>([]);
-
-// Notifications & SMS State (Real)
-const notifList = ref<UnifiedNotification[]>([]);
-const optimisticStatus = ref<string | null>(null);
-const autoPurgeDays = ref(7);
+// Pairing-related state kept local (passed as deps to usePairing)
+const pairingQrData = ref("");
+const pairingQrUrl = ref("");
+const showPairingQr = ref(false);
+const showManualIpDialog = ref(false);
 const localMethod = ref("");
 const remoteMethod = ref("");
 const localActive = ref(false);
 const remoteActive = ref(false);
 const localPriority = ref(true);
-const pairingQrData = ref("");
-const pairingQrUrl = ref("");
-const showPairingQr = ref(false);
-const showManualIpDialog = ref(false);
-const manualIpInput = ref("");
-const manualPortInput = ref("9876");
-const showSasVerification = ref(false);
-const sasWords = ref(["", "", "", ""]);
-
-const sasCode = ref("");
-const neuralAnomalyEnabled = ref(false);
-const flightRecorderEnabled = ref(false);
-const themeMode = ref("auto");
-const isSystemDark = ref(window.matchMedia("(prefers-color-scheme: dark)").matches);
-
-const currentThemeClass = computed(() => {
-  if (themeMode.value === "light") return "theme-daylight";
-  if (themeMode.value === "dark") return ""; // Default dark theme
-  return isSystemDark.value ? "" : "theme-daylight";
-});
-
-watch(currentThemeClass, (newClass) => {
-  document.documentElement.className = newClass;
-}, { immediate: true });
-
-watch(currentTab, (newTab) => {
-  if (newTab === "logs") {
-    checkCrashLog();
-    refreshLogs();
-  }
-});
-
-// Methods
-
-const loadSettings = async () => {
-  try {
-    const settings = await invoke<any>("get_settings");
-    deviceName.value = settings.device_name || "My Linux Workstation";
-    devicePicture.value = settings.device_picture || "";
-    pairedDeviceName.value = settings.paired_device_name || "";
-    pairedDevicePicture.value = settings.paired_device_picture || "";
-    ddnsHostname.value = settings.ddns_hostname || "";
-    enableUpnp.value = settings.enable_upnp || false;
-    enableDdns.value = settings.enable_ddns || false;
-    isPaired.value = settings.is_paired || false;
-    fileAccessGrantedDesktop.value = settings.file_access_granted_desktop || false;
-    fileAccessGrantedPhone.value = settings.file_access_granted_phone || false;
-    themeMode.value = settings.theme_mode || "auto";
-    pathwayOrder.value = settings.pathway_order || ["wifi_direct", "mdns_lan", "wireguard_wan"];
-  } catch (e) {
-    console.error("Load settings error:", e);
-  }
-};
-
-const saveSettings = async () => {
-  try {
-    await invoke("save_settings", {
-      deviceName: deviceName.value,
-      devicePicture: devicePicture.value,
-      pairedDeviceName: pairedDeviceName.value,
-      pairedDevicePicture: pairedDevicePicture.value,
-      ddnsHostname: ddnsHostname.value,
-      enableUpnp: enableUpnp.value,
-      enableDdns: enableDdns.value,
-      isPaired: isPaired.value,
-      themeMode: themeMode.value,
-      pathwayOrder: pathwayOrder.value,
-    });
-  } catch (e) {
-    console.error("Save settings error:", e);
-  }
-};
-
-const showFlatpakModal = ref(false);
-const flatpakCopyStatus = ref("");
-
-const verifyFlatpakPermissions = async () => {
-  try {
-    const sysInfo = await invoke<SystemInfo>("get_system_info");
-    systemInfo.value = sysInfo;
-    if (sysInfo.is_flatpak) {
-      const granted = await invoke<boolean>("check_flatpak_permissions");
-      if (!granted) {
-        showFlatpakModal.value = true;
-      }
-    }
-  } catch (e) {
-    console.error("Flatpak verify error:", e);
-  }
-};
-
-const copyFlatpakCommand = async () => {
-  try {
-    await navigator.clipboard.writeText("flatpak override --user --share=network --socket=wayland --socket=fallback-x11 --socket=pulseaudio --talk-name=org.freedesktop.portal.Desktop io.github.brilliafy.kyberpipe");
-    flatpakCopyStatus.value = "Override command copied!";
-    setTimeout(() => { flatpakCopyStatus.value = ""; }, 2500);
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const handleFlatpakVerifyProceed = async () => {
-  const sysInfo = systemInfo.value;
-  if (sysInfo?.is_flatpak) {
-    const granted = await invoke<boolean>("check_flatpak_permissions");
-    if (granted) {
-      showFlatpakModal.value = false;
-    } else {
-      flatpakCopyStatus.value = "Permissions still not granted. Run the command above and click Verify.";
-      setTimeout(() => { flatpakCopyStatus.value = ""; }, 3000);
-    }
-  }
-};
-
-const pollClipboard = async () => {
-  try {
-    const text = await invoke<string>("read_real_clipboard");
-    if (text && text.trim() !== "") {
-      const exists = clipboardItems.value.some(item => item.text === text);
-      if (!exists) {
-        const newRecord: ClipboardRecord = {
-          id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-          text: text,
-          source: "pc",
-          timestamp: Date.now()
-        };
-        clipboardItems.value.unshift(newRecord);
-        await invoke("sync_clipboard", { text });
-      }
-    }
-  } catch (e) {
-    // Ignore clipboard read errors (e.g. empty or binary content)
-  }
-};
-
-const handleAddClipboard = async (text: string) => {
-  const newRecord: ClipboardRecord = {
-    id: "clip_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-    text: text,
-    source: "pc",
-    timestamp: Date.now()
-  };
-  clipboardItems.value.unshift(newRecord);
-  try {
-    await invoke("write_real_clipboard", { text });
-    await invoke("sync_clipboard", { text });
-    lastSyncStatus.value = "Synced item locally & pushed remote";
-    await refreshLogs();
-  } catch (e) {
-    lastSyncStatus.value = "Sync warning: " + e;
-  }
-};
-
-const handleCopyClipboard = async (text: string) => {
-  try {
-    await invoke("write_real_clipboard", { text });
-    lastSyncStatus.value = "Copied to desktop clipboard";
-  } catch (e) {
-    lastSyncStatus.value = "Copy failed: " + e;
-  }
-};
-
-const handleRemoveClipboard = (id: string) => {
-  clipboardItems.value = clipboardItems.value.filter(item => item.id !== id);
-  lastSyncStatus.value = "Item removed";
-};
-
-const handleSaveEditClipboard = async (payload: { id: string; text: string }) => {
-  const idx = clipboardItems.value.findIndex(item => item.id === payload.id);
-  if (idx !== -1) {
-    clipboardItems.value[idx].text = payload.text;
-    try {
-      await invoke("write_real_clipboard", { text: payload.text });
-      await invoke("sync_clipboard", { text: payload.text });
-      lastSyncStatus.value = "Updated and synced item";
-      await refreshLogs();
-    } catch (e) {
-      lastSyncStatus.value = "Update warning: " + e;
-    }
-  }
-};
-
-
-
-const displayNotifications = computed<UnifiedNotification[]>(() => {
-  return [...notifList.value].sort((a, b) => {
-    const ta = a.updatedAt || new Date(a.timestamp).getTime();
-    const tb = b.updatedAt || new Date(b.timestamp).getTime();
-    return tb - ta;
-  });
-});
-
-const removeNotification = (id: string) => {
-  const notif = notifList.value.find(n => n.id === id);
-  notifList.value = notifList.value.filter(n => n.id !== id);
-  if (notif) notifySyncChannel(notif);
-};
-
-const notifySyncChannel = (notif: UnifiedNotification) => {
-  try {
-    invoke("push_notification_packet", {
-      title: notif.title || '',
-      text: notif.body || '',
-      appPackage: notif.appPackage || '',
-      timestamp: Date.now(),
-    });
-  } catch (e) {
-  }
-};
-
-const purgeOldNotifications = (days: number) => {
-  const cutoff = Date.now() - days * 86400000;
-  notifList.value = notifList.value.filter(n => {
-    const t = n.updatedAt || new Date(n.timestamp).getTime();
-    return t > cutoff;
-  });
-  try { localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value)); } catch {}
-};
-
-const loadPersistedNotifications = () => {
-  try {
-    const raw = localStorage.getItem('kyberpipe_notifications');
-    if (raw) {
-      const parsed = JSON.parse(raw) as UnifiedNotification[];
-      notifList.value = parsed;
-    }
-  } catch {}
-};
-
-const persistNotifications = () => {
-  try {
-    localStorage.setItem('kyberpipe_notifications', JSON.stringify(notifList.value));
-  } catch {}
-};
-
-const refreshLogs = async () => {
-  try {
-    logs.value = await invoke<string[]>("get_app_logs");
-  } catch (e) {
-    console.error(e);
-  }
-};
-const attemptCount = ref(0);
-
-const triggerConnectionAttempt = async () => {
-  if (!isPaired.value) {
-    await invoke("set_connection_status_full", {
-      status: "DISCONNECTED (No paired device)",
-      method: "None",
-      color: "red"
-    });
-    await checkConnectionState();
-    return;
-  }
-
-  const res = await invoke<any>("get_connection_status_full");
-  if (res.color === "green") {
-    return;  // Already connected
-  }
-
-  await invoke("set_connection_status_full", {
-    status: "WAITING FOR COMPANION",
-    method: "None",
-    color: "yellow"
-  });
-  await checkConnectionState();
-  await refreshLogs();
-};
-
-const checkConnectionState = async () => {
-  try {
-    const res = await invoke<any>("get_connection_status_full");
-    connectionStatus.value = res.status;
-    connectionMethod.value = res.method;
-    connectionColor.value = res.color;
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const firewallStatus = ref<{ firewalld_active: boolean; ufw_active: boolean; port_open: boolean; commands: string[] } | null>(null);
-const showFirewallModal = ref(false);
-const firewallBusy = ref(false);
-const firewallResult = ref("");
-
-const checkFirewall = async () => {
-  try {
-    const res = await invoke<any>("check_firewall");
-    firewallStatus.value = res;
-  } catch (e) {
-    console.error("Firewall check failed:", e);
-  }
-};
-
-const requestFirewallOpen = async () => {
-  firewallBusy.value = true;
-  firewallResult.value = "";
-  try {
-    const result = await invoke<string>("request_firewall_open");
-    if (result) {
-      firewallResult.value = result;
-      setTimeout(() => { showFirewallModal.value = false; }, 2000);
-    } else {
-      firewallResult.value = "Could not open firewall automatically. Use the commands below.";
-    }
-  } catch (e) {
-    firewallResult.value = "Failed: " + e;
-  }
-  firewallBusy.value = false;
-};
-
-const handleManualRetry = () => {
-  attemptCount.value = 0;
-  triggerConnectionAttempt();
-};
-
-const loadPairingConfig = async () => {
-  if (!keyPair.value) return;
-  try {
-    const config = await invoke<any>("get_pairing_config", {
-      hostPkHex: keyPair.value.mlkem_pk_hex,
-      wireguardPkHex: keyPair.value.x25519_pk_hex,
-    });
-    pairingConfigJson.value = JSON.stringify(config);
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-async function handleGenerateKeyPair() {
-  try {
-    keyPair.value = await invoke<KeyPair>("generate_keypair");
-    await refreshLogs();
-    await loadPairingConfig();
-  } catch (e) {
-    console.error("Key generation error: ", e);
-  }
-}
-
-async function handleRunScript(code: string, isSandboxed: boolean, feedSourceCommand: string, onCompletionCode?: string) {
-  try {
-    const res = await invoke<ScriptResult>("execute_boa_script", {
-      scriptCode: code,
-      isSandboxed: isSandboxed,
-      lux: Number(currentLux.value),
-      feedSourceCommand: feedSourceCommand
-    });
-    scriptResult.value = res;
-    await refreshLogs();
-
-    if (res.success && onCompletionCode && onCompletionCode.trim()) {
-      await invoke("execute_boa_script", {
-        scriptCode: onCompletionCode,
-        isSandboxed: false,
-        lux: Number(currentLux.value),
-        feedSourceCommand: ""
-      });
-      await refreshLogs();
-    }
-  } catch (e) {
-    console.error("Execution failed: ", e);
-  }
-}
-
-const handleToggleFlightRecorder = async (val: boolean) => {
-  flightRecorderEnabled.value = val;
-  try {
-    await invoke("toggle_flight_recorder", { enabled: val });
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const handleToggleNeuralAnomaly = async (val: boolean) => {
-  neuralAnomalyEnabled.value = val;
-  try {
-    await invoke("toggle_neural_anomaly_engine", { enabled: val });
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const triggerSelfDestruct = async () => {
-  if (confirm("CRITICAL WARNING: This will zeroize all active cryptographic ratchets and purge hardware keys. Proceed with Emergency Panic Destruction?")) {
-    try {
-      await invoke("trigger_panic_self_destruct");
-      await refreshLogs();
-      await checkConnectionState();
-    } catch (e) {
-      console.error(e);
-    }
-  }
-};
-
-const handleCompletePairing = async (name: string, pic: string) => {
-  pairedDeviceName.value = name;
-  pairedDevicePicture.value = pic;
-  isPaired.value = true;
-  await saveSettings();
-  handleManualRetry();
-};
 
 const handleDeleteConnection = async () => {
+  // Destructive backend action — request a single-use user-gesture token after
+  // surfacing a native confirmation (audit finding #9).
+  if (!window.confirm("Delete this connection? This clears the session key, ratchet state, and all pairing data on this desktop.")) {
+    return;
+  }
+  const token = await invoke<string>("request_privilege_token", {
+    action: "delete_connection",
+  });
   isPaired.value = false;
   pairedDeviceName.value = "";
   pairedDevicePicture.value = "";
@@ -606,6 +93,7 @@ const handleDeleteConnection = async () => {
   remoteMethod.value = "";
   localActive.value = false;
   remoteActive.value = false;
+  await invoke("delete_connection", { token });
   await invoke("set_connection_status_full", {
     status: "DISCONNECTED",
     method: "None",
@@ -614,130 +102,140 @@ const handleDeleteConnection = async () => {
   await saveSettings();
 };
 
-const handlePairLocally = async (method: string) => {
-  localMethod.value = method;
-  localActive.value = true;
-  if (method === "wifi_direct") {
-    try {
-      const p2pInfo = await invoke<any>("create_p2p_group");
-      pairingQrData.value = JSON.stringify({
-        method: "p2p", ssid: p2pInfo.ssid, pass: p2pInfo.passphrase,
-        p2p_ip: p2pInfo.ip, wifi_direct_mac: p2pInfo.mac,
-        pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-        x25519_pub: keyPair.value?.x25519_pk_hex || ""
-      });
-      pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
-      showPairingQr.value = true;
-    } catch (e) {
-      console.error("P2P group creation failed:", e);
-    }
-  } else if (method === "mdns") {
-    pairingQrData.value = JSON.stringify({
-      method: "mdns", service: "_kyberpipe._tcp.local",
-      name: deviceName.value, pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-      x25519_pub: keyPair.value?.x25519_pk_hex || ""
-    });
-    pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
-    showPairingQr.value = true;
-  } else if (method === "manual_ip") {
-    showManualIpDialog.value = true;
+// ── Composable imports (with deps) ──────────────────────────────────────
+
+// SAS pairing dialog state + backend pairing event listeners (F21: replaces
+// the old 1.5 s SAS poller with pairing::sas-ready/complete/timeout events).
+const {
+  showSasVerification, sasCode, sasInput,
+  pollPairingStatus, startSasListeners, stopSasListeners,
+} = usePairingDialogs({ isPaired, checkConnectionState });
+
+// Clipboard history: gesture-gated read (F6-renderer) + record helpers (F21).
+const {
+  clipboardItems, lastSyncStatus,
+  startClipboardSync, stopClipboardSync,
+  addRecord, copyToClipboard, removeRecord, updateRecord,
+} = useClipboardHistory({ onSynced: refreshLogs });
+
+const {
+  flightRecorderEnabled, neuralAnomalyEnabled,
+  handleToggleFlightRecorder, handleToggleNeuralAnomaly
+} = useTelemetry(refreshLogs);
+
+// Pairing deps for usePairing
+const pairingDeps = {
+  keyPair,
+  isPaired,
+  pairedDeviceName,
+  pairedDevicePicture,
+  deviceName,
+  devicePicture,
+  localMethod,
+  remoteMethod,
+  localActive,
+  remoteActive,
+  pairingConfigJson,
+  pairingQrData,
+  pairingQrUrl,
+  showPairingQr,
+  showManualIpDialog,
+  showSasVerification,
+  sasCode,
+  isConnected,
+  connectionStatus,
+  connectionMethod,
+  connectionColor,
+  saveSettings,
+  handleGenerateKeyPair,
+  handleDeleteConnection,
+  loadPairingConfig,
+  checkConnectionState,
+  refreshLogs,
+};
+
+const {
+  manualIpInput,
+  manualPortInput,
+  handleCompletePairing,
+  handlePairLocally,
+  handlePairExternally,
+  submitManualPairing,
+  confirmSas,
+  rejectSas,
+  checkFirewall,
+  requestFirewallOpen,
+  handleFixFirewall,
+  firewallStatus,
+  firewallBusy,
+  firewallResult,
+} = usePairing(pairingDeps);
+
+const {
+  mediaState, currentLatency, latencyColor,
+  fetchMediaState, handleMediaAction, getMediaIcon
+} = useMedia(isPaired);
+
+// ── Extracted composables ──────────────────────────────────────────────
+
+const {
+  optimisticStatus,
+  displayNotifications, removeNotification,
+} = useNotifications();
+
+const {
+  showFlatpakModal, flatpakCopyStatus, systemInfo,
+  verifyFlatpakPermissions, copyFlatpakCommand, handleFlatpakVerifyProceed,
+} = useFlatpak();
+
+const { currentLux, scriptResult, handleRunScript } = useAutomation(refreshLogs);
+
+const { triggerSelfDestruct } = usePanic(refreshLogs, checkConnectionState);
+
+// Background reconciliation poller — the single 2 s settings tick (F21).
+const {
+  startBackgroundSync, stopBackgroundSync,
+} = useBackgroundSync({
+  isPaired,
+  deviceName,
+  devicePicture,
+  pairedDeviceName,
+  pairedDevicePicture,
+  isConnected,
+  triggerConnectionAttempt,
+  fetchMediaState,
+  pollPairingStatus,
+  showSasVerification,
+});
+
+// AUDIT F7: latency reset for the top-bar display subscribes to the SHARED
+// renderer heartbeat — no third private interval racing the connection poller
+// and the background settings sync. The handle is stored so onUnmounted can
+// drop the subscription explicitly (the shared ticker also stops on its own
+// when the last subscriber leaves).
+let unsubscribeLatency: (() => void) | null = null;
+
+// ── Lifecycle hooks ─────────────────────────────────────────────────────
+
+watch(currentTab, (newTab) => {
+  if (newTab === "logs") {
+    checkCrashLog();
+    refreshLogs();
   }
-};
-
-const handlePairExternally = async (method: string) => {
-  remoteMethod.value = method;
-  remoteActive.value = true;
-  if (method === "wormhole") {
-    try {
-      const code = await invoke<string>("generate_wormhole_code");
-      pairingQrData.value = JSON.stringify({
-        method: "wormhole", code: code,
-        pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-        x25519_pub: keyPair.value?.x25519_pk_hex || ""
-      });
-      pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
-      showPairingQr.value = true;
-    } catch (e) {
-      console.error("Wormhole code generation failed:", e);
-    }
-  } else if (method === "tor") {
-    try {
-      const onion = await invoke<any>("create_tor_onion");
-      if (onion.onion_address) {
-        pairingQrData.value = JSON.stringify({
-          method: "tor", onion: onion.onion_address, auth_key: onion.auth_key,
-          pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-          x25519_pub: keyPair.value?.x25519_pk_hex || ""
-        });
-        pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
-        showPairingQr.value = true;
-      }
-    } catch (e) {
-      console.error("Tor onion creation failed:", e);
-    }
-  }
-};
-
-const submitManualPairing = async () => {
-  const ip = manualIpInput.value.trim();
-  if (!ip) return;
-  pairingQrData.value = JSON.stringify({
-    method: "manual_ip", host: ip, port: parseInt(manualPortInput.value) || 9876,
-    pqc_pub: keyPair.value?.mlkem_pk_hex || "",
-    x25519_pub: keyPair.value?.x25519_pk_hex || ""
-  });
-  pairingQrUrl.value = await QRCode.toDataURL(pairingQrData.value, { margin: 2, scale: 6, errorCorrectionLevel: 'L' });
-  showManualIpDialog.value = false;
-  showPairingQr.value = true;
-};
-
-const confirmSas = (confirmed: boolean) => {
-  if (confirmed) {
-    localActive.value = true;
-    localMethod.value = "manual_ip";
-  }
-  showSasVerification.value = false;
-};
-
-const handleFixFirewall = async () => {
-  try {
-    await invoke<string>("request_firewall_open");
-  } catch (e) {
-    console.error("Firewall fix failed:", e);
-  }
-};
-
-let clipPoller: any = null;
-let connPoller: any = null;
-let mediaQueryListener: ((e: MediaQueryListEvent) => void) | null = null;
+});
 
 onMounted(async () => {
   await loadSettings();
   await handleGenerateKeyPair();
-  await checkConnectionState();
+  // checkConnectionState is auto-called by useConnectionPolling's onMounted
   await verifyFlatpakPermissions();
   checkFirewall(); // Silent check, modal shows on connection failure
-  
-  // Load persisted notifications and purge old ones
-  loadPersistedNotifications();
-  purgeOldNotifications(autoPurgeDays.value);
 
-  // Auto-persist on tab switch and interval
-  watch(notifList, () => persistNotifications(), { deep: true });
-  setInterval(() => purgeOldNotifications(autoPurgeDays.value), 3600000);
-  
-  // Latency for top-bar display
-  setInterval(() => {
+  // Latency for top-bar display (AUDIT F7: shared heartbeat, aligned with the
+  // connection poller and background settings tick).
+  unsubscribeLatency = useHeartbeat(() => {
     currentLatency.value = 0;
-  }, 2000);
-
-
-  // Load system info
-  try {
-    systemInfo.value = await invoke<SystemInfo>("get_system_info");
-  } catch (e) {
-    console.error(e);
-  }
+  });
 
   // Register mDNS service for Zeroconf discovery
   try {
@@ -753,47 +251,25 @@ onMounted(async () => {
     console.error("mDNS registration failed:", e);
   }
 
-  // Real clipboard poller (1.5s interval)
-  clipPoller = setInterval(pollClipboard, 1500);
+  // Clipboard polling is gesture-driven (F6-renderer): read_real_clipboard
+  // requires a user-gesture privilege token, so no raw 1.5 s timer runs.
+  startClipboardSync();
 
-  // Connection auto-retry poller and status sync (2s interval)
-  connPoller = setInterval(async () => {
-    try {
-      const res = await invoke<any>("get_connection_status_full");
-      connectionStatus.value = res.status;
-      connectionMethod.value = res.method;
-      connectionColor.value = res.color;
+  // Single settings/status reconciliation poller (2 s).
+  startBackgroundSync();
 
-      const settings = await invoke<any>("get_settings");
-      isPaired.value = settings.is_paired || false;
-      deviceName.value = settings.device_name || "Linux Workstation";
-      devicePicture.value = settings.device_picture || "";
-      pairedDeviceName.value = settings.paired_device_name || "";
-      pairedDevicePicture.value = settings.paired_device_picture || "";
-
-      if (isPaired.value && !isConnected.value) {
-        triggerConnectionAttempt();
-      }
-      
-      await fetchMediaState();
-    } catch (e) {
-      console.error("Poll status error:", e);
-    }
-  }, 2000);
-
-  // OS theme preferences change observer
-  const media = window.matchMedia("(prefers-color-scheme: dark)");
-  mediaQueryListener = (e: MediaQueryListEvent) => {
-    isSystemDark.value = e.matches;
-  };
-  media.addEventListener("change", mediaQueryListener);
+  // SAS pairing state arrives via backend events (pairing::sas-ready /
+  // pairing::complete / pairing::timeout) — no separate SAS poller (F21).
+  await startSasListeners();
 });
 
 onUnmounted(() => {
-  if (clipPoller) clearInterval(clipPoller);
-  if (connPoller) clearInterval(connPoller);
-  if (mediaQueryListener) {
-    window.matchMedia("(prefers-color-scheme: dark)").removeEventListener("change", mediaQueryListener);
+  stopClipboardSync();
+  stopBackgroundSync();
+  stopSasListeners();
+  if (unsubscribeLatency) {
+    unsubscribeLatency();
+    unsubscribeLatency = null;
   }
 });
 </script>
@@ -889,10 +365,10 @@ onUnmounted(() => {
             :clipboardItems="clipboardItems" 
             :lastSyncStatus="lastSyncStatus"
             :isConnected="isConnected"
-            @add="handleAddClipboard"
-            @copy="handleCopyClipboard"
-            @remove="handleRemoveClipboard"
-            @saveEdit="handleSaveEditClipboard"
+            @add="addRecord"
+            @copy="copyToClipboard"
+            @remove="removeRecord"
+            @saveEdit="updateRecord"
             @connectDevice="currentTab = 'dashboard'"
           />
 
@@ -938,6 +414,7 @@ onUnmounted(() => {
             v-else-if="currentTab === 'settings'" 
             :flightRecorderEnabled="flightRecorderEnabled"
             :neuralAnomalyEnabled="neuralAnomalyEnabled"
+            :beaconDiscoveryEnabled="beaconDiscoveryEnabled"
             :keyPair="keyPair"
             :deviceName="deviceName"
             :devicePicture="devicePicture"
@@ -951,6 +428,7 @@ onUnmounted(() => {
             :themeMode="themeMode"
             @update:flightRecorderEnabled="handleToggleFlightRecorder"
             @update:neuralAnomalyEnabled="handleToggleNeuralAnomaly"
+            @update:beaconDiscoveryEnabled="beaconDiscoveryEnabled = $event"
             @update:deviceName="deviceName = $event"
             @update:devicePicture="devicePicture = $event"
             @update:ddnsHostname="ddnsHostname = $event"
@@ -1042,18 +520,27 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- SAS Verification Modal -->
+    <!-- SAS Verification Modal (audit finding #7: requires the user to TYPE the
+         SAS shown on the phone — the old rubber-stamp modal was dead code) -->
     <div class="flatpak-modal-overlay" v-if="showSasVerification" @click.self="showSasVerification = false">
       <div class="flatpak-modal-card" style="max-width: 420px; text-align: center;">
         <h3>Verify Security Code</h3>
-        <p class="card-desc" style="margin: 0.5rem 0;">Confirm these 4 words match what's shown on your Android device:</p>
-        <div style="display: flex; gap: 0.75rem; justify-content: center; margin: 1.5rem 0; flex-wrap: wrap;">
-          <span v-for="(word, i) in sasWords" :key="i" class="sas-word" style="background: var(--bg-dark); padding: 0.5rem 0.75rem; border-radius: 8px; font-weight: bold; color: var(--accent-cyan);">{{ word }}</span>
+        <p class="card-desc" style="margin: 0.5rem 0;">Your Android device displays a short code. Type it here exactly:</p>
+        <div style="margin: 1.5rem 0;">
+          <input
+            v-model="sasInput"
+            type="text"
+            placeholder="e.g. ABCDEFG"
+            autocomplete="off"
+            spellcheck="false"
+            style="width: 100%; padding: 0.75rem 1rem; font-size: 1.1rem; text-align: center; letter-spacing: 0.25rem; text-transform: uppercase; background: var(--bg-dark); color: var(--text-primary); border: 1px solid var(--border, #2a3350); border-radius: 8px;"
+            @keyup.enter="confirmSas(sasInput)"
+          />
         </div>
-        <p class="card-desc">If the words match, your connection is secure.</p>
+        <p class="card-desc">If the code matches the one on your phone, pairing proceeds securely.</p>
         <div class="modal-actions" style="margin-top: 1rem;">
-          <button class="btn btn-danger" @click="confirmSas(false); showSasVerification = false">Don't Match</button>
-          <button class="btn btn-primary" @click="confirmSas(true); showSasVerification = false">Words Match!</button>
+          <button class="btn btn-danger" @click="rejectSas">Don't Match</button>
+          <button class="btn btn-primary" @click="confirmSas(sasInput)">Verify & Pair</button>
         </div>
       </div>
     </div>
@@ -1079,7 +566,7 @@ onUnmounted(() => {
         <h3>🛡️ Allow Android to connect?</h3>
         <p class="card-desc" style="margin: 0.75rem 0;">KyberPipe needs to open port <strong>9876/tcp</strong> on your firewall so your Android device can pair and sync with this desktop.</p>
         <p class="card-desc" style="margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-secondary);">
-          If you skip this, Android won't be able to discover or connect to this desktop over the local network. Wi-Fi Direct and USB tethering will still work.
+          If you skip this, Android won't be able to discover or connect to this desktop over the local network.
         </p>
         <div v-if="firewallResult" style="margin: 0.75rem 0; padding: 0.5rem; background: #1e293b; border-radius: 6px; font-size: 0.8rem;">
           {{ firewallResult }}

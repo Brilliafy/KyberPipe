@@ -5,7 +5,7 @@ KyberPipe is a zero-trust, post-quantum cryptography (PQC) peer-to-peer (P2P) sy
 ## 🚀 Key Features
 
 *   **Post-Quantum Hybrid Security**: Combines NIST-approved **ML-KEM-768** key encapsulation with classical **X25519** elliptic curve Diffie-Hellman (ECDH) keys for hybrid key exchange.
-*   **3-Tier Connection Hierarchy**: Automatic failover between ultra-low-latency **Wi-Fi Direct**, **Local LAN (mDNS)**, and encrypted **WireGuard WAN tunnels**.
+*   **2-Tier Connection Hierarchy**: Automatic failover between **Local LAN (mDNS)** and encrypted **WireGuard WAN tunnels**. (The Wi-Fi Direct tier was removed — audit finding #1.)
 *   **Zero-Trust Local Diagnostics**: Bypasses centralized error logging (Firebase/Sentry) with an entirely local, anonymized crash reporting and diagnostics pipeline.
 *   **Sandboxed Automation Engine**: Executes lightweight JavaScript scripts inside a secure, resource-limited **Boa engine** sandbox triggered by local events (e.g. ambient light changes).
 
