@@ -30,13 +30,27 @@ pub struct QuicFrame {
 }
 
 impl QuicFrame {
-    pub fn encode(&self) -> Vec<u8> {
+    /// Encode the frame to wire bytes. AUDIT P1-4: the length field is u32 on
+    /// the wire and the consumer (`decode`/`recv_frame_header`) rejects bodies
+    /// over [`MAX_MESSAGE_SIZE`], so the producer MUST enforce the same bound
+    /// here — the legacy `body.len() as u32` silently wrapped for any body ≥
+    /// 4 GiB, and the send side was the only direction without a size
+    /// assertion. Returns an error instead of emitting a length-wrapped frame
+    /// the peer would reject (or, on a matching wrap, use to desynchronize
+    /// the stream).
+    pub fn encode(&self) -> Result<Vec<u8>, KyberError> {
+        if self.body.len() > MAX_MESSAGE_SIZE {
+            return Err(KyberError::NetworkError(format!(
+                "Frame body too large to encode: {} > {MAX_MESSAGE_SIZE}",
+                self.body.len()
+            )));
+        }
         let len = self.body.len() as u32;
         let mut buf = Vec::with_capacity(5 + self.body.len());
         buf.push(self.stream_type);
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&self.body);
-        buf
+        Ok(buf)
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, KyberError> {
@@ -64,7 +78,10 @@ impl QuicFrame {
 
 /// Write a frame to a QUIC stream.
 pub async fn send_frame(send: &mut SendStream, frame: &QuicFrame) -> Result<(), KyberError> {
-    let data = frame.encode();
+    // AUDIT P1-4: the producer-side size cap now lives in `encode` — an
+    // oversized frame fails HERE (before any bytes hit the wire) instead of
+    // being length-wrapped and desynchronizing the peer's stream.
+    let data = frame.encode()?;
     send.write_all(&data)
         .await
         .map_err(|e| KyberError::NetworkError(format!("Send frame failed: {e}")))

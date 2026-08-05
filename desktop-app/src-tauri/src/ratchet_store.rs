@@ -507,43 +507,31 @@ pub fn persist_all_ratchet_sessions(snapshot_key_hex: &str) {
         return;
     }
     if let Ok(json) = serde_json::to_string_pretty(&map) {
-        // AUDIT F19: ATOMIC store write. The legacy `fs::write(store_path())`
+        // AUDIT F19 + P4-2: ATOMIC store write. The legacy `fs::write(store_path())`
         // wrote in place — a crash mid-write left a truncated
         // `ratchet_sessions.json` that `restore_all_ratchet_sessions` failed
         // to parse, silently discarding EVERY persisted session (full re-pair
-        // for every device). Now the bytes go to a temp file, are fsynced,
-        // and are renamed over the real path; the previous good store is
+        // for every device). The write goes through the SHARED
+        // `atomic_write` helper (temp file → fsync → rename, extracted into
+        // `state::persist` so settings.json and the ratchet store cannot
+        // drift apart in durability discipline); the previous good store is
         // rotated to `.bak` first so the next restore can recover it.
-        let tmp = store_tmp_path();
-        let mut write_ok = false;
-        if std::fs::write(&tmp, &json).is_ok() {
-            // fsync before rename so a power loss cannot leave an empty file
-            // at the temp path that then gets renamed over the good store.
-            write_ok = std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
+        // Rotate the current good store to .bak before replacing it.
+        if store_path().exists() {
+            let _ = std::fs::rename(store_path(), store_bak_path());
         }
-        if write_ok {
-            // Rotate the current good store to .bak before replacing it.
-            if store_path().exists() {
-                let _ = std::fs::rename(store_path(), store_bak_path());
-            }
-            match std::fs::rename(&tmp, store_path()) {
-                Ok(()) => {
-                    // The store file is durably in place — NOW advance the
-                    // watermark file (a crash between the two is recovered by
-                    // the watermark/rollback guard on the next restore).
-                    save_watermarks(&fresh_watermarks);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[RatchetStore] Atomic rename failed ({e}) — restoring previous store from .bak"
-                    );
-                    let _ = std::fs::rename(store_bak_path(), store_path());
-                }
-            }
+        if crate::state::persist::atomic_write(&store_path(), json.as_bytes()) {
+            // The store file is durably in place — NOW advance the watermark
+            // file (a crash between the two is recovered by the
+            // watermark/rollback guard on the next restore).
+            save_watermarks(&fresh_watermarks);
         } else {
-            tracing::warn!("[RatchetStore] Store write failed — previous store left untouched");
+            tracing::warn!(
+                "[RatchetStore] Store write failed — restoring previous store from .bak"
+            );
+            let _ = std::fs::rename(store_bak_path(), store_path());
         }
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(store_tmp_path());
     }
 }
 
@@ -580,19 +568,17 @@ pub fn remove_ratchet_session_for_peer(peer_id: &str) {
         if let Ok(mut map) = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&data) {
             if map.remove(peer_id).is_some() {
                 if let Ok(json) = serde_json::to_string_pretty(&map) {
-                    let tmp = store_tmp_path();
-                    let mut ok = std::fs::write(&tmp, &json).is_ok()
-                        && std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
-                    if ok {
-                        if store_path().exists() {
-                            let _ = std::fs::rename(store_path(), store_bak_path());
-                        }
-                        ok = std::fs::rename(&tmp, store_path()).is_ok();
-                        if !ok {
-                            let _ = std::fs::rename(store_bak_path(), store_path());
-                        }
+                    if store_path().exists() {
+                        let _ = std::fs::rename(store_path(), store_bak_path());
                     }
-                    let _ = std::fs::remove_file(&tmp);
+                    // Shared atomic-write discipline (audit P4-2): temp file →
+                    // fsync → rename, so an unpair can never truncate the
+                    // store of OTHER peers.
+                    let ok = crate::state::persist::atomic_write(&store_path(), json.as_bytes());
+                    if !ok {
+                        let _ = std::fs::rename(store_bak_path(), store_path());
+                    }
+                    let _ = std::fs::remove_file(store_tmp_path());
                 }
             }
         }
@@ -803,6 +789,118 @@ mod tests {
         assert!(snapshot_watermark(empty).is_none());
         let garbage = b"not json";
         assert!(snapshot_watermark(garbage).is_none());
+    }
+
+    /// AUDIT P1-2 (MEDIUM, one-sided pairing-epoch bump): the desktop's
+    /// restore guard (`is_rollback`) refuses a SAME-epoch snapshot whose
+    /// counters are behind the recorded high-water. The Android flow bumps the
+    /// fresh re-pair session to epoch 1 so a stale pre-re-pair snapshot can
+    /// never be mistaken for the fresh one; the desktop did NOT, so a re-pair
+    /// followed by a restart refused the fresh epoch-0/0/0/0 snapshot against
+    /// the old high-water (epoch 0, send≥1, recv≥1) whenever the watermark
+    /// survived the unpair — silent session loss, "paired but nothing syncs".
+    ///
+    /// This regression test drives the FULL store sequence the audit named:
+    /// first pairing (advanced counters) → persist → re-pair (fresh session +
+    /// `ratchet_bump_pairing_epoch`) → persist → "restart" (clear registry,
+    /// restore from store) → the fresh epoch-1 session must be restored.
+    #[test]
+    fn re_pair_epoch_bump_restores_fresh_session_after_restart() {
+        let dir = directories::ProjectDirs::from("io", "github", "KyberPipe")
+            .map(|p| p.data_dir().to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let cleanup = || {
+            let _ = std::fs::remove_file(dir.join("ratchet_sessions.json"));
+            let _ = std::fs::remove_file(dir.join("ratchet_sessions.json.bak"));
+            let _ = std::fs::remove_file(dir.join("ratchet_sessions.json.tmp"));
+            let _ = std::fs::remove_file(dir.join("ratchet_watermarks.json"));
+            let _ = keyring::Entry::new("kyberpipe", KEYRING_RATCHET_WATERMARK)
+                .and_then(|e| e.delete_password());
+        };
+        cleanup();
+
+        let peer = "p1-2-repair-peer";
+        let sk = hex::encode([7u8; 32]);
+        let shared = b"p1-2-repair-master-secret-0123456789abcdef";
+
+        // 1) FIRST pairing: a long-lived session with advanced counters.
+        core_crypto::ratchet_ffi::ratchet_init_session_impl(
+            peer,
+            shared,
+            true,
+            Some(&[1u8; 32]),
+            Some(&[2u8; 1184]),
+        )
+        .expect("first pairing init");
+        for i in 0..40u64 {
+            core_crypto::ratchet_ffi::ratchet_encrypt_message_impl(
+                peer,
+                format!("m{i}").as_bytes(),
+            )
+            .expect("advance send chain");
+        }
+        // Persist: high-water (epoch 0, gen 0, send 40, recv 0).
+        persist_all_ratchet_sessions(&sk);
+
+        // 2) RE-PAIR: remove the session and init a FRESH one, then bump the
+        //    pairing epoch exactly as `perform_sas_confirmation` now does
+        //    (audit P1-2). Without the bump the fresh session would sit at
+        //    epoch 0 and the restart below would refuse it — the regression
+        //    this test guards.
+        assert!(
+            core_crypto::ratchet_remove_session(peer.to_string()),
+            "re-pair removes the stale session first"
+        );
+        core_crypto::ratchet_ffi::ratchet_init_session_impl(
+            peer,
+            shared,
+            true,
+            Some(&[3u8; 32]),
+            Some(&[4u8; 1184]),
+        )
+        .expect("fresh re-pair init");
+        let new_epoch = core_crypto::ratchet_bump_pairing_epoch(peer.to_string())
+            .expect("bump: live session exists");
+        assert_eq!(new_epoch, 1, "fresh session must be epoch 1 after the bump");
+        // Persist the fresh session — the first post-re-pair poll does this.
+        persist_all_ratchet_sessions(&sk);
+
+        // 3) RESTART: remove ONLY this peer's live session (the registry is
+        //    process-wide and SHARED with other tests in this binary — the
+        //    e2e keeps live sessions there, so `ratchet_clear_all_sessions`
+        //    must never be used by a unit test) and restore from the store.
+        assert!(
+            core_crypto::ratchet_remove_session(peer.to_string()),
+            "drop the live fresh session to simulate this peer's cold start"
+        );
+        let restored = restore_all_ratchet_sessions(&sk);
+        // The store may also carry OTHER tests' peers (persist_all serializes
+        // every live registry session); what matters is that THIS peer's fresh
+        // epoch-1 session came back — the pre-fix code refused it outright.
+        assert!(restored >= 1, "the fresh session must restore");
+        let wm = core_crypto::ratchet_session_watermark(peer.to_string())
+            .expect("watermark accessor")
+            .expect("session restored");
+        assert_eq!(
+            wm.pairing_epoch, 1u64,
+            "restored session must be the fresh epoch-1 session, not the stale pre-re-pair one"
+        );
+        assert_eq!(
+            wm.send_message_count, 0u64,
+            "fresh session counters are reset (re-pair)"
+        );
+
+        // Assert the INVARIANT the fix guarantees: without the epoch bump, the
+        // fresh (0,0,0,0) snapshot is a rollback against the old (0,0,40,0)
+        // high-water — proving the pre-fix failure class this test guards.
+        assert!(
+            is_rollback(&(0, 0, 0, 0), &(0, 0, 40, 0)),
+            "precondition: an unbumped fresh session would be refused against the old high-water"
+        );
+
+        // Cleanup: remove only our peer; never clear the shared registry.
+        core_crypto::ratchet_remove_session(peer.to_string());
+        cleanup();
     }
 }
 

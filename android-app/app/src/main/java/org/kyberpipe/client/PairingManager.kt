@@ -227,9 +227,10 @@ object PairingManager {
                     settingsManager.pendingPairingNonce = pairingNonce
                 }
                 // QR-bound server cert hash (audit finding #5/#15): pass it down
-                // to sendCiphertext's bootstrap QUIC connect so the server cert
-                // is pinned from the QR, not blindly accepted. Empty when the QR
-                // carried no hash (legacy accept-any bootstrap).
+                // to PairingController.sendCiphertextAndGetStatus's bootstrap
+                // QUIC connect so the server cert is pinned from the QR, not
+                // blindly accepted. Empty when the QR carried no hash (legacy
+                // accept-any bootstrap).
                 settingsManager.pendingServerCertHash = qrServerCertHash
                 // The paired desktop's ML-DSA beacon signing public key (audit
                 // finding #5): persisted at pairing so the mDNS listener can
@@ -294,77 +295,4 @@ object PairingManager {
         }
     }
 
-    /// Send the pairing ciphertext to the host over QUIC.
-    /// Establishes the QUIC bridge first (the transport plane that all streams
-    /// use) and returns the response status string, or null on failure.
-    fun sendCiphertext(hostIp: String, deviceName: String, kemCiphertext: String, clientPkHex: String, x25519PkHex: String, context: android.content.Context? = null): String? {
-        return try {
-            val settings = context?.let { SettingsManager(it) }
-            // Audit finding #15: the QR-bound server certificate pin is MANDATORY
-            // for the bootstrap connection. Without it the desktop's certificate
-            // would be accepted blindly and a LAN MITM could terminate TLS,
-            // forward the KEM, and hold every session key while the SAS still
-            // matches. Fail loudly instead of proceeding.
-            val pin = settings?.pendingServerCertHash ?: ""
-            if (pin.isEmpty()) {
-                Log.e(TAG, "Pairing aborted: the QR carried no server certificate pin — refusing unverified bootstrap (MITM protection)")
-                return null
-            }
-            // AUDIT FINDING #1 (CRITICAL): the bootstrap connection MUST present
-            // the per-install client identity certificate. The desktop pins the
-            // TLS-OBSERVED client cert at pairing time; a cert-less bootstrap
-            // leaves the pin empty, skips the mTLS rebind, and rejects every
-            // post-pairing stream ("paired but nothing syncs"). Generate the
-            // identity BEFORE connecting and present it on the SAME connection
-            // that carries the KEM — single connect path, no cert-less pairing
-            // variant.
-            val identity = ensureClientIdentityCert(context ?: return null)
-            if (identity.isEmpty()) {
-                Log.e(TAG, "Pairing aborted: failed to generate the client identity certificate")
-                return null
-            }
-            val settings2 = SettingsManager(context!!)
-            if (settings2.clientIdentityCert.isEmpty() || settings2.clientIdentityKey.isEmpty()) {
-                Log.e(TAG, "Pairing aborted: client identity certificate not persisted")
-                return null
-            }
-            val certDer = android.util.Base64.decode(settings2.clientIdentityCert, android.util.Base64.NO_WRAP)
-            val keyDer = android.util.Base64.decode(settings2.clientIdentityKey, android.util.Base64.NO_WRAP)
-            // Establish the QUIC bridge to the desktop before sending any stream.
-            // Presents the client identity cert (audit finding #1) AND pins the
-            // QR-bound server cert (audit finding #15).
-            try {
-                uniffi.core_crypto.quicConnectWithClientCert(
-                    hostIp,
-                    9876.toUShort(),
-                    pin,
-                    certDer,
-                    keyDer
-                )
-            } catch (connectErr: Exception) {
-                Log.e(TAG, "QUIC connect failed: ${connectErr.message}")
-                return null
-            }
-            var certHash = identity
-            var nonceHex = ""
-            if (settings != null) {
-                nonceHex = settings.pendingPairingNonce
-            }
-            val json = JSONObject().apply {
-                put("type", "pairing")
-                put("ciphertext_hex", kemCiphertext)
-                put("client_pk_hex", clientPkHex)
-                put("client_x25519_pk_hex", x25519PkHex)
-                put("name", deviceName)
-                put("cert_hash_hex", certHash)
-                if (nonceHex.isNotEmpty()) {
-                    put("pairing_nonce_hex", nonceHex)
-                }
-            }
-            uniffi.core_crypto.quicSendAndRecv(0x01.toUByte(), json.toString())
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send ciphertext: ${e.message}")
-            null
-        }
-    }
 }
