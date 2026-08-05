@@ -31,17 +31,35 @@ type HeartbeatFn = () => void | Promise<void>;
 const listeners = new Set<HeartbeatFn>();
 let timer: HeartbeatTimer | null = null;
 
+/// Subscribers whose previous tick has NOT completed yet (audit P2-2). The
+/// legacy heartbeat fired every subscriber fire-and-forget, so an async tick
+/// that took longer than `TICK_MS` (e.g. `useBackgroundSync.syncTick`'s
+/// multi-IPC `triggerConnectionAttempt` during a QUIC reconnect) overlapped
+/// the next tick — duplicate connection attempts, doubled IPC volume and
+/// re-entrant writes to the same Vue refs (the yellow/green flicker the F7
+/// alignment was meant to eliminate). A subscriber in flight is skipped on
+/// later ticks until its promise settles, giving every subscriber a
+/// single-flight guarantee.
+const inFlight = new Set<HeartbeatFn>();
+
 function tick() {
   // Snapshot so a subscriber that unsubscribes mid-tick cannot skip others.
   for (const fn of [...listeners]) {
+    if (inFlight.has(fn)) {
+      // Previous invocation still running — skip this tick (single-flight).
+      continue;
+    }
+    inFlight.add(fn);
     try {
       // Fire-and-forget, like the legacy intervals: one slow IPC invoke must
-      // not delay the other subscribers' ticks.
-      Promise.resolve(fn()).catch((e) =>
-        console.error("Heartbeat tick failed:", e)
-      );
+      // not delay the other subscribers' ticks. The in-flight set clears when
+      // the promise settles, so the NEXT tick after completion may fire again.
+      Promise.resolve(fn())
+        .catch((e) => console.error("Heartbeat tick failed:", e))
+        .finally(() => inFlight.delete(fn));
     } catch (e) {
       console.error("Heartbeat tick failed:", e);
+      inFlight.delete(fn);
     }
   }
 }

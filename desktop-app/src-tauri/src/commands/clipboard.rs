@@ -130,9 +130,7 @@ pub(crate) fn with_timeout<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    let Some(tx) = clipboard_pool_tx() else {
-        return None;
-    };
+    let tx = clipboard_pool_tx()?;
     let (res_tx, res_rx) = std::sync::mpsc::channel::<T>();
     // Enqueue (bounded): if the worker is wedged and the queue is full, the
     // job is DROPPED — the caller sees None, and no additional thread or

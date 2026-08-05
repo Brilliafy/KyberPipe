@@ -73,10 +73,7 @@ pub fn sync_clipboard_text(text: &str) -> Result<(), String> {
             "[Clipboard] Rejecting inbound clipboard payload of {} bytes — exceeds the wire-contract bound (audit P1-1)",
             text.len()
         );
-        return Err(format!(
-            "Clipboard payload too large: {} bytes",
-            text.len()
-        ));
+        return Err(format!("Clipboard payload too large: {} bytes", text.len()));
     }
     if is_flatpak() {
         info!("Flatpak sandbox detected: Syncing clipboard via Portal/fallbacks");

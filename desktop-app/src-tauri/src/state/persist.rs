@@ -25,17 +25,15 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> bool {
         // that then gets renamed over the good target.
         write_ok = std::fs::File::open(&tmp).and_then(|f| f.sync_all()).is_ok();
     }
-    if write_ok {
-        if std::fs::rename(&tmp, path).is_ok() {
-            // fsync the containing directory so the rename itself is durable
-            // (best-effort; not supported on every platform/filesystem).
-            if let Some(dir) = path.parent() {
-                if let Ok(d) = std::fs::File::open(dir) {
-                    let _ = d.sync_all();
-                }
+    if write_ok && std::fs::rename(&tmp, path).is_ok() {
+        // fsync the containing directory so the rename itself is durable
+        // (best-effort; not supported on every platform/filesystem).
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
             }
-            return true;
         }
+        return true;
     }
     let _ = std::fs::remove_file(&tmp);
     false

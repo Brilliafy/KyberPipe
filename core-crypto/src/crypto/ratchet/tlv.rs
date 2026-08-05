@@ -120,3 +120,88 @@ impl RatchetEncryptedMessage {
         })
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+
+    /// AUDIT P3-2: pin the EXACT wire layout of the ratchet TLV so any future
+    /// change to the codec (or a cross-platform drift between the independently
+    /// compiled Rust/Tauri and Android/UniFFI consumers) fails the build with a
+    /// golden-byte diff instead of producing a silent AEAD/parse desync.
+    ///
+    /// Wire format (length-prefixed, big-endian):
+    ///   [0x01] version
+    ///   [has_rekey: 1B]
+    ///   [nonce_len: 4B][nonce]
+    ///   [ciphertext_len: 4B][ciphertext]
+    ///   [if has_rekey] [x_len:4B][rekey_x][m_len:4B][rekey_m][ct_len:4B][rekey_ct]
+    #[test]
+    fn golden_bytes_pin_the_wire_format() {
+        let msg = RatchetEncryptedMessage {
+            nonce: vec![
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+            ],
+            ciphertext: vec![0xde, 0xad, 0xbe, 0xef],
+            rekey_x25519_pk: Some(vec![0x01; 32]),
+            rekey_mlkem_pk: Some(vec![0x02; 1184]),
+            rekey_ciphertext: Some(vec![0x03; 1088]),
+        };
+        let bytes = msg.to_binary().expect("encode");
+        let mut expected = Vec::new();
+        expected.push(0x01); // version
+        expected.push(0x01); // has_rekey
+        expected.extend_from_slice(&12u32.to_be_bytes());
+        expected.extend_from_slice(&msg.nonce);
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(&msg.ciphertext);
+        expected.extend_from_slice(&32u32.to_be_bytes());
+        expected.extend_from_slice(&[0x01; 32]);
+        expected.extend_from_slice(&1184u32.to_be_bytes());
+        expected.extend_from_slice(&[0x02; 1184]);
+        expected.extend_from_slice(&1088u32.to_be_bytes());
+        expected.extend_from_slice(&[0x03; 1088]);
+        assert_eq!(
+            bytes, expected,
+            "wire layout must match the pinned golden bytes"
+        );
+
+        // Round-trip and a NO-rekey message must keep the same framing.
+        let decoded = RatchetEncryptedMessage::from_binary(&bytes).expect("decode");
+        assert_eq!(decoded.nonce, msg.nonce);
+        assert_eq!(decoded.ciphertext, msg.ciphertext);
+        assert_eq!(decoded.rekey_x25519_pk, msg.rekey_x25519_pk);
+
+        let plain = RatchetEncryptedMessage {
+            nonce: vec![0x11; 12],
+            ciphertext: vec![0x22; 8],
+            rekey_x25519_pk: None,
+            rekey_mlkem_pk: None,
+            rekey_ciphertext: None,
+        };
+        let plain_bytes = plain.to_binary().expect("encode plain");
+        assert_eq!(&plain_bytes[..2], &[0x01, 0x00], "no-rekey flag is 0");
+        let plain_decoded = RatchetEncryptedMessage::from_binary(&plain_bytes).expect("decode");
+        assert!(plain_decoded.rekey_x25519_pk.is_none());
+        assert!(plain_decoded.rekey_mlkem_pk.is_none());
+        assert!(plain_decoded.rekey_ciphertext.is_none());
+    }
+
+    /// AUDIT P3-2: length-prefixed fields must be rejected when truncated,
+    /// versioned out, or carrying empty rekey fields (finding #23).
+    #[test]
+    fn golden_parser_rejects_malformed_frames() {
+        // Truncated after the version.
+        assert!(RatchetEncryptedMessage::from_binary(&[0x01]).is_err());
+        // Unsupported version.
+        assert!(RatchetEncryptedMessage::from_binary(&[0x02, 0x00, 0, 0, 0, 0]).is_err());
+        // has_rekey=1 but an empty rekey field.
+        let mut bytes = vec![0x01, 0x01];
+        bytes.extend_from_slice(&12u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 12]);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 0]);
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // empty rekey_x
+        assert!(RatchetEncryptedMessage::from_binary(&bytes).is_err());
+    }
+}

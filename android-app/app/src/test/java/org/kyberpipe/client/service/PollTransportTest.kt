@@ -31,7 +31,7 @@ class PollTransportTest {
         override var pairedDeviceName: String = ""
     }
 
-    private class FakeFfi : PollFfi {
+    open class FakeFfi : PollFfi {
         override fun synchronizePacketBinary(peer: String): ByteArray = byteArrayOf(1)
         override fun generateRekeyAckBinaryPeek(peer: String): ByteArray? = null
         override fun processRekeyAckBinary(peer: String, tlv: ByteArray) {}
@@ -147,5 +147,47 @@ class PollTransportTest {
         assertFalse("must not commit on rejection", update.pairingConfirmed)
         assertFalse(settings.pendingPairingConfirmation)
         assertTrue("explicit rejection still surfaces unpairSignal", update.unpairSignal)
+    }
+
+    /**
+     * AUDIT P3-1 (MEDIUM): `buildRequestBody` must surface ratchet health —
+     * a Synchronize/RekeyAck FFI failure (missing/unusable session) sets
+     * `ratchetHealthy=false` so the engine skips the round-trip instead of
+     * emitting a green-but-dead poll.
+     */
+    @Test
+    fun failingRatchetFfiMarksRequestUnhealthy() {
+        val transport = PollTransport(
+            settings = FakeSettings(),
+            updates = MutableSharedFlow(extraBufferCapacity = 32),
+            requestSync = {},
+            ffi = FakeFfi(),
+        )
+        // Healthy path: a peer whose session works produces a healthy request.
+        val healthy = transport.buildRequestBody("peer", needSync = true)
+        assertTrue("healthy session — request must be healthy", healthy.ratchetHealthy)
+        assertTrue(healthy.body.contains("need_sync"))
+
+        // Broken path: a peer whose session throws on EVERY ratchet call.
+        val brokenFfi = object : FakeFfi() {
+            override fun synchronizePacketBinary(peer: String): ByteArray =
+                throw IllegalStateException("no session")
+            override fun generateRekeyAckBinaryPeek(peer: String): ByteArray? =
+                throw IllegalStateException("no session")
+        }
+        val broken = PollTransport(
+            settings = FakeSettings(),
+            updates = MutableSharedFlow(extraBufferCapacity = 32),
+            requestSync = {},
+            ffi = brokenFfi,
+        )
+        val req = broken.buildRequestBody("peer", needSync = true)
+        assertFalse(
+            "a failed ratchet attach must mark the request unhealthy (audit P3-1)",
+            req.ratchetHealthy,
+        )
+        // The body still carries need_sync (the flag is not dropped) so a
+        // recovered session re-requests alignment on the next poll.
+        assertTrue(req.body.contains("need_sync"))
     }
 }

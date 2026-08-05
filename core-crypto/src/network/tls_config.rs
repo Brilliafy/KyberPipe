@@ -73,6 +73,38 @@ impl PinnedCertVerifier {
                 && bool::from(pinned_bytes.ct_eq(cert_hash.as_bytes()))
         });
         if match_found {
+            // AUDIT P4-2: a matched PIN is only half the identity — the pinned
+            // self-signed certificate must also be within its validity period.
+            // The legacy verifier checked the hash alone, so a captured
+            // key+cert pair (keyring dump, backup restore) remained a valid
+            // identity forever with no expiry. Best-effort parse via rcgen (the
+            // same crate that issues these self-signed certs); an unparseable
+            // cert is logged and rejected rather than silently accepted —
+            // under a pin we cannot vouch for an identity we cannot even parse.
+            match rcgen::CertificateParams::from_ca_cert_der(end_entity) {
+                Ok(parsed) => {
+                    let now = time::OffsetDateTime::now_utc();
+                    let not_before = parsed.not_before;
+                    let not_after = parsed.not_after;
+                    if now < not_before || now > not_after {
+                        warn!(
+                            "Peer certificate hash authorized but OUTSIDE its validity period \
+                             ([{not_before}] ..= [{not_after}], now [{now}]) — rejecting connection"
+                        );
+                        return Err(rustls::Error::InvalidCertificate(
+                            rustls::CertificateError::Expired,
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Pinned certificate cannot be parsed for validity check ({e}) — rejecting"
+                    );
+                    return Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    ));
+                }
+            }
             Ok(())
         } else {
             warn!(
@@ -433,4 +465,42 @@ mod tests {
             "the single-pin verifier cannot admit a second device (the defect audit finding #4 fixes)"
         );
     }
+}
+
+/// AUDIT P4-2: a pinned certificate that is outside its validity period
+/// must be REJECTED even when its hash matches the allowlist — a captured
+/// key+cert pair must not remain a valid identity forever.
+#[test]
+fn pinned_cert_outside_validity_is_rejected() {
+    // Build a self-signed cert that expired yesterday.
+    use rcgen::{CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+    let mut params = CertificateParams::new(vec!["expired.local".to_string()]).expect("params");
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::days(30);
+    params.not_after = now - time::Duration::days(1);
+    params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    let key_pair = KeyPair::generate().expect("keypair");
+    let expired = params
+        .self_signed(&key_pair)
+        .expect("expired self-signed cert");
+    let der = expired.der().clone();
+    let hash = hex::encode(sha2::Sha256::digest(der.as_ref()));
+    let verifier = PinnedCertVerifier::single(hash, true);
+    assert!(
+        verifier.verify_cert(&der).is_err(),
+        "an expired pinned cert must be rejected (audit P4-2)"
+    );
+
+    // A fresh cert with the SAME code path must pass.
+    let fresh_der = CertificateDer::from(generate_client_identity_cert().expect("fresh").0);
+    let fresh_hash = hex::encode(sha2::Sha256::digest(fresh_der.as_ref()));
+    let verifier = PinnedCertVerifier::single(fresh_hash, true);
+    assert!(
+        verifier.verify_cert(&fresh_der).is_ok(),
+        "a current pinned cert must pass"
+    );
 }

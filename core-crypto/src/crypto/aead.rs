@@ -83,13 +83,28 @@ pub fn decrypt_chacha20(
 /// is unique because a generation is bumped only on a committed rekey that
 /// resets both counters — so (key, generation, seq) is never repeated.
 pub fn generate_nonce_from_seq(seq: u64, sid_or_generation: u32) -> [u8; 12] {
-    debug_assert!(
-        sid_or_generation < u32::MAX,
-        "Ratchet generation {} exceeds u32::MAX — nonce domain separation compromised",
+    // AUDIT P4-3: the bound must hold in RELEASE builds too — the debug_assert
+    // compiles out, so any future call site passing an out-of-domain generation
+    // would silently collide with the reserved domain. Clamp the generation to
+    // `u32::MAX - 1` (a domain no legitimate generation can occupy, since the
+    // ratchet refuses to encrypt at `u32::MAX`) and surface the violation
+    // loudly instead of emitting a nonce whose generation prefix could collide.
+    let generation = if sid_or_generation == u32::MAX {
+        tracing::error!(
+            "Nonce generation {} is out of the valid domain (< u32::MAX) — clamping to {}; nonce domain separation otherwise compromised",
+            sid_or_generation,
+            u32::MAX - 1
+        );
+        debug_assert!(
+            false,
+            "Ratchet generation {sid_or_generation} exceeds u32::MAX — nonce domain separation compromised"
+        );
+        u32::MAX - 1
+    } else {
         sid_or_generation
-    );
+    };
     let mut nonce = [0u8; 12];
-    nonce[0..4].copy_from_slice(&sid_or_generation.to_be_bytes());
+    nonce[0..4].copy_from_slice(&generation.to_be_bytes());
     let seq_bytes = seq.to_be_bytes();
     nonce[4..12].copy_from_slice(&seq_bytes);
     nonce

@@ -30,8 +30,16 @@ pub(crate) static REKEY_QUEUE_INVARIANT_VIOLATIONS: std::sync::atomic::AtomicU64
 #[derive(Clone)]
 pub struct RekeyCarrier {
     /// Send-space sequence number of the message that currently carries the
-    /// rekey payload. The peer's RekeyAck carries this value back.
+    /// rekey payload. The peer's RekeyAck carries this value back. Provisional
+    /// (0) until the carrier is first attached by `ratchet_encrypt`.
     pub carrier_seq: u64,
+    /// Whether the carrier's payload has ever been ATTACHED to a wire message.
+    /// An API-staged carrier (`dh_ratchet_rekey`) is created with `sent=false`
+    /// so the very next `ratchet_encrypt` attaches it — a staged proposal must
+    /// never sit invisible while `should_rekey` is blocked by its own pending
+    /// proposal (audit P1-2). Restored carriers are always `sent=true` (a
+    /// persisted confirm-queue entry was attached before serialization).
+    pub sent: bool,
     /// Monotonic time the payload was attached. An entry older than
     /// `REKEY_RETRY_TTL` is re-sent (see encrypt.rs). NOT persisted (Instant
     /// is not serializable); the effective age is the MAX of this and the
@@ -293,10 +301,16 @@ pub struct DoubleRatchetState {
     /// Cleared by take_pending_rekey_ack_seq().
     #[zeroize(skip)]
     pub pending_rekey_ack_seq: Option<u64>,
-    /// Whether this side initiated the session. Deterministic tie-break for
-    /// the two-sided rekey race: the initiator's proposal always wins, so the
-    /// responder cancels its own outgoing proposal when the initiator's is
-    /// received (see ratchet_decrypt_with_rekey in decrypt.rs).
+    /// Whether this side initiated the session. INFORMATIONAL ONLY (audit
+    /// P1-3): this field is persisted and surfaced for diagnostics, but it is
+    /// NO LONGER the two-sided rekey race tie-break. The deterministic
+    /// tie-break is the payload-anchored comparison in
+    /// [`DoubleRatchetState::resolve_rekey_race_and_ack`] (the lexicographic
+    /// ordering of the rekey x25519/mlkem public keys, both AEAD-bound into
+    /// the carrier) — the legacy initiator-wins parity heuristic was removed
+    /// by audit finding #3 because generation drift could flip parity
+    /// asymmetrically. Do NOT re-introduce an initiator bias into the race
+    /// resolution.
     pub is_initiator: bool,
     /// Cumulative number of sequence positions advanced by explicit resyncs
     /// (`resync_receiving_chain`) over this session's lifetime. Persisted in the
