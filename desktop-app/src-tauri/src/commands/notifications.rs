@@ -154,10 +154,7 @@ pub fn trigger_desktop_media_action(
     // actions on the phone with zero phone-side consent. A fresh native
     // user-gesture token is now required, exactly like every other
     // destructive/remote-action command.
-    if !crate::commands::security::consume_privilege_token(
-        "trigger_desktop_media_action",
-        &token,
-    ) {
+    if !crate::commands::security::consume_privilege_token("trigger_desktop_media_action", &token) {
         return Err(
             "Triggering a media action on the phone requires a fresh user-gesture token (audit P4-1)"
                 .into(),

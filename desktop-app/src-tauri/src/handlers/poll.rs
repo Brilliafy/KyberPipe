@@ -36,8 +36,7 @@ pub(crate) static FORCE_EMPTY_CLIPBOARD: std::sync::atomic::AtomicBool =
 /// (Worst case: 778,240 B plaintext → ~780.6 KiB TLV → ~1,040.8 KiB base64 +
 /// ~350 B JSON < 1 MiB.) The Android companion enforces the same bound via
 /// the shared UniFFI-exported `max_message_size()`.
-const MAX_POLL_CLIPBOARD_PLAINTEXT: usize =
-    core_crypto::quic_app::MAX_MESSAGE_SIZE * 3 / 4 - 8192;
+const MAX_POLL_CLIPBOARD_PLAINTEXT: usize = core_crypto::quic_app::MAX_MESSAGE_SIZE * 3 / 4 - 8192;
 
 /// Read the real clipboard through a 1s cache so the (potentially
 /// multi-second) OS clipboard read never runs on the accept-loop workers more

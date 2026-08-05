@@ -174,9 +174,7 @@ pub async fn perform_sas_confirmation(
                 // first persist, mirroring the phone exactly. The epoch-aware
                 // dirty-gate in the poll handler then persists the fresh
                 // (epoch 1) snapshot + watermark on the next poll.
-                if let Some(new_epoch) =
-                    core_crypto::ratchet_bump_pairing_epoch(peer_id.clone())
-                {
+                if let Some(new_epoch) = core_crypto::ratchet_bump_pairing_epoch(peer_id.clone()) {
                     tracing::info!(
                         "[Pairing] Fresh ratchet session for {peer_id} bumped to pairing epoch {new_epoch} (audit P1-2)"
                     );

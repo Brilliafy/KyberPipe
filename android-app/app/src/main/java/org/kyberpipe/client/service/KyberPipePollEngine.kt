@@ -368,7 +368,36 @@ object KyberPipePollEngine {
                 // AUDIT FINDING #20: the wire protocol lives in the extracted
                 // [PollTransport]; the engine owns only the loop.
                 val transport = this.transport ?: return@withLock
-                val requestBody = transport.buildRequestBody(peer, wantSync)
+                val request = transport.buildRequestBody(peer, wantSync)
+                // AUDIT P3-1: a poll request whose authenticated ratchet
+                // payloads could not be built (missing/unusable session) must
+                // NOT proceed against the desktop — a blind round-trip would
+                // still "succeed" and emit a green update while nothing ever
+                // decrypts (the silent "paired but nothing syncs" class).
+                // Attempt a re-restore (the snapshot import may have failed at
+                // cold start) and surface a DISTINCT status so the failure is
+                // observable and self-healing.
+                if (!request.ratchetHealthy) {
+                    Log.w(TAG, "Ratchet session unavailable — attempting re-restore (audit P3-1)")
+                    try {
+                        RatchetSessionRestorer.restoreIfNeeded(settings)
+                    } catch (_: Exception) {}
+                    _updates.tryEmit(
+                        PollUpdate(
+                            connected = false,
+                            status = "RATCHET_UNAVAILABLE",
+                            method = "None",
+                            color = "red",
+                            isPaired = settings.isPaired,
+                            remoteClipboard = null,
+                            pendingMediaAction = null,
+                            pairingConfirmed = false,
+                            unpairSignal = false,
+                        )
+                    )
+                    return@withLock
+                }
+                val requestBody = request.body
 
                 // Audit finding F10: route by peer key so a multi-peer mesh
                 // never hits the wrong connection. Fall back to the legacy
