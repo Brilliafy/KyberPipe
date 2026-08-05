@@ -218,6 +218,12 @@ pub async fn perform_sas_confirmation(
         if !peer_id.is_empty() {
             state.register_peer_cert_mapping(&peer_id, &cert_hash);
         }
+        // AUDIT F1 FIX: persist the pairing identity NOW so a desktop restart
+        // can rebuild the mTLS allowlist + peer routing map (public data only:
+        // cert hashes + peer public keys). Without this, the allowlist and map
+        // were process-global/in-memory and every restart severed the data
+        // plane while `is_paired` stayed true.
+        state.persist_pairing_identity();
         core_crypto::quic_app::set_pinned_client_cert(cert_hash.clone());
         // AUDIT FINDING #4 (multi-device): registering the per-peer mapping
         // must ALSO extend the TLS-layer allowlist so a SECOND paired device's

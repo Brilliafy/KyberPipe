@@ -156,6 +156,10 @@ impl PairingService {
         self.set_pending_pairing_nonce(String::new());
         old
     }
+    /// The legacy single-slot paired cert hash (AUDIT F13: authorization now
+    /// goes through `is_authorized_peer_cert`, which covers the multi-device
+    /// map too). Retained for the e2e test that asserts the pairing flow.
+    #[cfg(test)]
     pub fn get_paired_client_cert_hash(&self) -> String {
         lock_state(&self.inner).paired_client_cert_hash.clone()
     }
@@ -202,6 +206,16 @@ impl PairingService {
         lock_state(&self.inner)
             .peer_by_cert_hash
             .insert(cert_hash.to_string(), peer_id.to_string());
+    }
+    /// AUDIT F13: drop a SINGLE peer's cert→ratchet-id mapping (per-peer
+    /// unpair). The global unpair/self-destruct path clears the whole map via
+    /// `clear_all_pairing`; a SECOND device's unpair must only remove ITS
+    /// entry so the primary (and any other peer) keeps routing.
+    pub fn remove_peer_cert_mapping(&self, cert_hash: &str) {
+        if cert_hash.is_empty() {
+            return;
+        }
+        lock_state(&self.inner).peer_by_cert_hash.remove(cert_hash);
     }
     /// AUDIT F12: resolve the ratchet peer id for a connection's TLS-observed
     /// client certificate hash. Falls back to the single global pairing id for
@@ -254,5 +268,49 @@ impl PairingService {
     #[allow(dead_code)] // service API surface
     pub fn lock(&self) -> std::sync::MutexGuard<'_, PairingState> {
         lock_state(&self.inner)
+    }
+
+    /// Snapshot the PAIRED identity (public data only: the TLS-observed
+    /// client-cert hash, the peer's public key halves and the per-peer
+    /// cert→ratchet map) so it can be persisted across restarts (audit F1).
+    /// Returns `(paired_client_cert_hash, initiator_pk, initiator_x25519_pk,
+    /// peer_by_cert_hash)`.
+    pub fn identity_snapshot(
+        &self,
+    ) -> (
+        String,
+        String,
+        String,
+        std::collections::HashMap<String, String>,
+    ) {
+        let p = lock_state(&self.inner);
+        (
+            p.paired_client_cert_hash.clone(),
+            p.initiator_pk.clone(),
+            p.initiator_x25519_pk.clone(),
+            p.peer_by_cert_hash.clone(),
+        )
+    }
+
+    /// Restore the PAIRED identity from persisted settings at startup (audit
+    /// F1). Public data only. No-op for empty values.
+    pub fn restore_identity(
+        &self,
+        paired_client_cert_hash: &str,
+        initiator_pk: &str,
+        initiator_x25519_pk: &str,
+        peer_by_cert_hash: &std::collections::HashMap<String, String>,
+    ) {
+        let mut p = lock_state(&self.inner);
+        if !paired_client_cert_hash.is_empty() {
+            p.paired_client_cert_hash = paired_client_cert_hash.to_string();
+        }
+        if !initiator_pk.is_empty() {
+            p.initiator_pk = initiator_pk.to_string();
+        }
+        if !initiator_x25519_pk.is_empty() {
+            p.initiator_x25519_pk = initiator_x25519_pk.to_string();
+        }
+        p.peer_by_cert_hash = peer_by_cert_hash.clone();
     }
 }

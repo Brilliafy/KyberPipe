@@ -15,9 +15,6 @@ impl ClipboardService {
             notifications_path,
         }
     }
-    pub fn is_suppressed_duplicate(&self, text: &str) -> bool {
-        lock_state(&self.inner).dedup.is_suppressed(text)
-    }
     pub fn record_clipboard_text(&self, text: &str) {
         lock_state(&self.inner).dedup.record_text(text);
     }

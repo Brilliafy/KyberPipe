@@ -13,6 +13,11 @@ import { usePanic } from "./composables/usePanic";
 import { useClipboardHistory } from "./composables/useClipboardHistory";
 import { usePairingDialogs } from "./composables/usePairingDialogs";
 import { useBackgroundSync } from "./composables/useBackgroundSync";
+import { useHeartbeat } from "./composables/useHeartbeat";
+// AUDIT F18: feature-level orchestration hooks (extracted from the composition
+// root so the shell stays thin and each feature owns its own lifecycle).
+import { useLogs } from "./composables/useLogs";
+import { useKeyPairOrchestration } from "./composables/useKeyPairOrchestration";
 
 // Import Refactored Sub-Components
 import Sidebar from "./components/Sidebar.vue";
@@ -24,11 +29,6 @@ import SettingsPanel from "./components/SettingsPanel.vue";
 import ConnectivityManager from "./components/ConnectivityManager.vue";
 import FileManager from "./components/FileManager.vue";
 import { CheckCircle2, Loader2, XCircle, Terminal, ShieldAlert } from "@lucide/vue";
-
-interface KeyPair {
-  x25519_pk_hex: string;
-  mlkem_pk_hex: string;
-}
 
 // ── Composable imports (deps-free first) ────────────────────────────────
 
@@ -46,58 +46,27 @@ const {
   checkConnectionState, triggerConnectionAttempt
 } = useConnectionPolling();
 
+// ── Feature-level orchestration hooks (AUDIT F18) ───────────────────────
+
+// Diagnostic logs + crash-log surface.
+const {
+  logs, crashLog,
+  refreshLogs, checkCrashLog,
+  copyStacktrace, exportDiagnosticLogs, exportCrashLog,
+} = useLogs();
+
+// Identity keypair + pairing-config orchestration (token-gated
+// get_pairing_config fetch).
+const {
+  keyPair, pairingConfigJson,
+  handleGenerateKeyPair, loadPairingConfig,
+} = useKeyPairOrchestration({ refreshLogs });
+
 // ── Local state (not extracted to composables) ──────────────────────────
 
 const currentTab = ref<"dashboard" | "connectivity" | "files" | "clipboard" | "notifications" | "light" | "logs" | "settings">("dashboard");
 
-const keyPair = ref<KeyPair | null>(null);
-const logs = ref<string[]>([]);
-const crashLog = ref<string | null>(null);
-
-const checkCrashLog = async () => {
-  try {
-    crashLog.value = await invoke<string | null>("get_latest_crash_log");
-  } catch (e) {
-    console.error("Failed to check crash log:", e);
-  }
-};
-
-const copyStacktrace = async () => {
-  if (crashLog.value) {
-    try {
-      await navigator.clipboard.writeText(crashLog.value);
-      alert("Anonymized stacktrace copied to clipboard!");
-    } catch (err) {
-      console.error("Failed to copy stacktrace:", err);
-    }
-  }
-};
-
-const exportDiagnosticLogs = () => {
-  const text = logs.value.join("\n");
-  const blob = new Blob([text], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "diagnostic_logs.txt";
-  a.click();
-  URL.revokeObjectURL(url);
-};
-
-const exportCrashLog = () => {
-  if (crashLog.value) {
-    const blob = new Blob([crashLog.value], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "anonymous_crash_log.txt";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-};
-
 // Pairing-related state kept local (passed as deps to usePairing)
-const pairingConfigJson = ref("");
 const pairingQrData = ref("");
 const pairingQrUrl = ref("");
 const showPairingQr = ref(false);
@@ -107,48 +76,6 @@ const remoteMethod = ref("");
 const localActive = ref(false);
 const remoteActive = ref(false);
 const localPriority = ref(true);
-
-// ── Local functions (needed by composable deps, defined BEFORE calls) ───
-
-const refreshLogs = async () => {
-  try {
-    logs.value = await invoke<string[]>("get_app_logs");
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const handleGenerateKeyPair = async () => {
-  try {
-    keyPair.value = await invoke<KeyPair>("generate_keypair");
-    await refreshLogs();
-    await loadPairingConfig();
-  } catch (e) {
-    console.error("Key generation error: ", e);
-  }
-};
-
-const loadPairingConfig = async () => {
-  if (!keyPair.value) return;
-  try {
-    // AUDIT F9: `get_pairing_config` is token-gated (KYP-2026-02 #6
-    // hardening) — the renderer MUST mint a single-use token for this exact
-    // action and pass it through, or every call fails and the pairing config
-    // is silently dropped.
-    const token = await invoke<string>("request_privilege_token", {
-      action: "get_pairing_config",
-    });
-    const config = await invoke<Record<string, unknown>>("get_pairing_config", {
-      hostPkHex: keyPair.value.mlkem_pk_hex,
-      wireguardPkHex: keyPair.value.x25519_pk_hex,
-      token,
-    });
-    pairingConfigJson.value = JSON.stringify(config);
-    await refreshLogs();
-  } catch (e) {
-    console.error(e);
-  }
-};
 
 const handleDeleteConnection = async () => {
   // Destructive backend action — request a single-use user-gesture token after
@@ -281,8 +208,12 @@ const {
   showSasVerification,
 });
 
-// Latency reset for the top-bar display.
-let latencyPoller: ReturnType<typeof setInterval> | null = null;
+// AUDIT F7: latency reset for the top-bar display subscribes to the SHARED
+// renderer heartbeat — no third private interval racing the connection poller
+// and the background settings sync. The handle is stored so onUnmounted can
+// drop the subscription explicitly (the shared ticker also stops on its own
+// when the last subscriber leaves).
+let unsubscribeLatency: (() => void) | null = null;
 
 // ── Lifecycle hooks ─────────────────────────────────────────────────────
 
@@ -300,10 +231,11 @@ onMounted(async () => {
   await verifyFlatpakPermissions();
   checkFirewall(); // Silent check, modal shows on connection failure
 
-  // Latency for top-bar display
-  latencyPoller = setInterval(() => {
+  // Latency for top-bar display (AUDIT F7: shared heartbeat, aligned with the
+  // connection poller and background settings tick).
+  unsubscribeLatency = useHeartbeat(() => {
     currentLatency.value = 0;
-  }, 2000);
+  });
 
   // Register mDNS service for Zeroconf discovery
   try {
@@ -335,7 +267,10 @@ onUnmounted(() => {
   stopClipboardSync();
   stopBackgroundSync();
   stopSasListeners();
-  if (latencyPoller) clearInterval(latencyPoller);
+  if (unsubscribeLatency) {
+    unsubscribeLatency();
+    unsubscribeLatency = null;
+  }
 });
 </script>
 

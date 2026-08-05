@@ -51,6 +51,18 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir("src/main/jniLibs")
+            // AUDIT F9 (MEDIUM): the UniFFI-generated Kotlin binding is checked
+            // in ONCE, in core-crypto/generated_kotlin, and consumed here via a
+            // source-directory reference instead of a second copied file. The
+            // legacy layout kept a byte-identical copy under
+            // src/main/java/uniffi/core_crypto — any UniFFI change regenerated
+            // one tree and not the other, and the stale Kotlin side called
+            // UniffiLib symbols that no longer exist in the rebuilt .so
+            // (UnsatisfiedLinkError on device with no compile-time error).
+            // With this srcDir there is exactly one file; the `uniffi/`
+            // subdirectory under it maps to the `uniffi.core_crypto` package
+            // exactly as before.
+            kotlin.srcDir("../../core-crypto/generated_kotlin")
         }
     }
     packaging {

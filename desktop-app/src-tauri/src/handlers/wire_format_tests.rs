@@ -381,7 +381,10 @@ fn shared_codec_roundtrips_ratchet_wire_fields() {
     let raw: Vec<u8> = (0u8..=255u8).collect();
     let via_uniffi = core_crypto::hex_encode(raw.clone());
     let decoded_via_hex_crate = hex::decode(&via_uniffi).expect("hex::decode");
-    assert_eq!(decoded_via_hex_crate, raw, "shared hex codec must round-trip");
+    assert_eq!(
+        decoded_via_hex_crate, raw,
+        "shared hex codec must round-trip"
+    );
     // The shared codec output must be canonical lowercase hex — the exact shape
     // the desktop's `hex::decode` (and the QR-bound fields) expect.
     assert_eq!(
@@ -396,7 +399,10 @@ fn shared_codec_roundtrips_ratchet_wire_fields() {
     let kem_ct: Vec<u8> = (0u8..16u8).chain(250..=255u8).collect();
     let android_hex = core_crypto::hex_encode(kem_ct.clone());
     let desktop_bytes = hex::decode(android_hex).expect("desktop decode");
-    assert_eq!(desktop_bytes, kem_ct, "cross-platform hex chain must be lossless");
+    assert_eq!(
+        desktop_bytes, kem_ct,
+        "cross-platform hex chain must be lossless"
+    );
 
     core_crypto::ratchet_remove_session("codec-peer".to_string());
 }

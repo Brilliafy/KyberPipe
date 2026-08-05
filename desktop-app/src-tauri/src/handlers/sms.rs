@@ -26,7 +26,13 @@ pub(crate) async fn handle_sms(body: Vec<u8>, peer_id: String, s: Arc<AppState>)
         }
         None => {
             if body.is_empty() {
-                return r#"{"status":"synced"}"#.to_string().into_bytes();
+                // AUDIT F20 FIX: an empty body was previously reported as
+                // `{"status":"synced"}` — a masking branch that presented a
+                // malformed stream as a successful forward. Report it
+                // honestly; the phone's sendWithRetry ignores the response
+                // body anyway, so no retry storm is introduced.
+                tracing::warn!("[SMS] Empty body received — not a valid SMS packet");
+                return r#"{"status":"error","reason":"Empty body"}"#.to_string().into_bytes();
             }
             tracing::warn!(
                 "[SMS] Non-empty body could not be decrypted as a ratchet-TLV SmsPacket"

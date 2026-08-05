@@ -14,6 +14,7 @@ import org.kyberpipe.client.crash.CrashLogger
 import org.kyberpipe.client.deeplink.DeepLinkHandler
 import org.kyberpipe.client.service.PipeService
 import org.kyberpipe.client.utils.PermissionHelper
+import org.kyberpipe.client.utils.RatchetSessionRestorer
 import org.kyberpipe.client.utils.SettingsManager
 import org.kyberpipe.client.utils.UriUtils
 
@@ -53,6 +54,11 @@ class MainActivity : FragmentActivity() {
 
         // Restore persisted crypto state across process restarts so a kill does
         // not force a full re-pair (ratchet snapshot + session-key handle).
+        // AUDIT F1: the restore now lives in the lifecycle-agnostic
+        // RatchetSessionRestorer, invoked here AND by the background service's
+        // poll engine — a process-wide single-flight gate means whichever path
+        // fires first imports the snapshot exactly once, so a reboot that never
+        // opens the app still resumes sync.
         restorePersistedCryptoState()
 
         // Handle initial intent
@@ -102,132 +108,32 @@ class MainActivity : FragmentActivity() {
      * legacy raw-key restore is gone (audit finding F7) — the ratchet snapshot
      * alone is enough to resume.
      *
-     * AUDIT FINDING #2 (HIGH): restore is a COLD-START-ONLY, single-flight step.
-     * It must never run when a live session already exists in the Rust registry
-     * — after a RE-PAIR the fresh session (gen 0, new master secret) lives in
-     * Rust while the persisted snapshot is from the OLD pairing; importing it
-     * would revert the session to pre-pair key material (silent state rollback
-     * presenting as "paired but nothing syncs"). The Rust import guard adds the
-     * pairing-epoch watermark as a second line of defense, but the lifecycle
-     * gate here is the primary one: on a cold start the registry is empty (the
-     * snapshot is the only state), so `ratchetPeerIds()` is empty and the
-     * restore proceeds; on a warm activity recreation after re-pairing the
-     * registry is non-empty and the restore is skipped.
+     * AUDIT F1 (HIGH): the restore is delegated to the lifecycle-agnostic
+     * [RatchetSessionRestorer] — the background service's poll engine also
+     * invokes it before its first poll, so a reboot / START_STICKY restart
+     * that never opens the activity still imports the AEAD-wrapped snapshot and
+     * resumes sync. A process-wide single-flight gate (not registry emptiness)
+     * ensures MainActivity and the service can never double-import.
+     *
+     * AUDIT FINDING #2 (HIGH): the restore is a COLD-START-ONLY, single-flight
+     * step. It must never run when a live session already exists in the Rust
+     * registry — after a RE-PAIR the fresh session (gen 0, new master secret)
+     * lives in Rust while the persisted snapshot is from the OLD pairing;
+     * importing it would revert the session to pre-pair key material (silent
+     * state rollback presenting as "paired but nothing syncs"). The
+     * live-registry check plus the pairing-epoch watermark guard both remain.
+     *
+     * AUDIT #11: the snapshot restore decodes Base64, AES-GCM-decrypts with
+     * the Keystore-backed wrap key, parses the watermark JSON + the full
+     * snapshot, then `ratchetImportSession` re-parses the whole snapshot — all
+     * of it used to run on the UI thread in onCreate (cold-start jank / ANR
+     * risk on low-end hardware with large snapshots + slow Keystore). It runs
+     * on the IO dispatcher; the UI stays responsive and shows pairing state
+     * immediately.
      */
     private fun restorePersistedCryptoState() {
-        // AUDIT #11: the snapshot restore decodes Base64, AES-GCM-decrypts with
-        // the Keystore-backed wrap key, parses the watermark JSON + the full
-        // snapshot, then `ratchetImportSession` re-parses the whole snapshot —
-        // all of it used to run on the UI thread in onCreate (cold-start jank /
-        // ANR risk on low-end hardware with large snapshots + slow Keystore).
-        // Run it on the IO dispatcher; the UI stays responsive and shows
-        // pairing state immediately.
         mainScope.launch(Dispatchers.IO) {
-            restorePersistedCryptoStateBlocking()
-        }
-    }
-
-    /**
-     * The blocking half of [restorePersistedCryptoState], executed off the main
-     * thread (audit #11).
-     *
-     * Single-flight gate: never restore over a live session. On a process
-     * cold start the Rust registry is empty (nothing survives a kill), so
-     * this is the exact signal that distinguishes "cold start, restore the
-     * snapshot" from "warm recreation, keep the live session" (audit #2).
-     */
-    private fun restorePersistedCryptoStateBlocking() {
-        // Single-flight gate: never restore over a live session. On a process
-        // cold start the Rust registry is empty (nothing survives a kill), so
-        // this is the exact signal that distinguishes "cold start, restore the
-        // snapshot" from "warm recreation, keep the live session" (audit #2).
-        val livePeers = try {
-            uniffi.core_crypto.ratchetPeerIds()
-        } catch (e: Exception) {
-            emptyList()
-        }
-        if (livePeers.isNotEmpty()) {
-            android.util.Log.i(
-                "KyberpipeRestore",
-                "Ratchet restore skipped: ${livePeers.size} live session(s) in Rust registry (warm start / re-pair) — audit finding #2"
-            )
-            return
-        }
-        val peer = settingsManager.peerRatchetIdentity
-        if (peer.isNotEmpty()) {
-            val snapshot = settingsManager.ratchetSnapshot
-            if (snapshot.isNotEmpty()) {
-                try {
-                    // Audit finding #13: the snapshot is wrapped at rest with an
-                    // INDEPENDENT Keystore-backed key (not the session key).
-                    // Stored format: Base64("{nonce_hex}:{ciphertext_hex}").
-                    val wrapKeyHex = settingsManager.ratchetSnapshotKey
-                    if (wrapKeyHex.isNotEmpty()) {
-                        val stored =
-                            android.util.Base64.decode(snapshot, android.util.Base64.NO_WRAP)
-                                .toString(Charsets.UTF_8)
-                        val sep = stored.indexOf(':')
-                        if (sep > 0) {
-                            val nonce = stored.substring(0, sep).hexToByteArraySafe()
-                            val ct = stored.substring(sep + 1).hexToByteArraySafe()
-                            val wrapKey = wrapKeyHex.hexToByteArraySafe()
-                            if (nonce != null && ct != null && wrapKey != null) {
-                                val bytes = uniffi.core_crypto.decryptWithRawKey32(
-                                    wrapKey, nonce, ct
-                                )
-                                try {
-                                    restoreSnapshotFromBytes(bytes, peer)
-                                } finally {
-                                    // AUDIT #14: `bytes` is the decrypted
-                                    // snapshot — full session key material —
-                                    // wiped the moment the import (or its
-                                    // rollback refusal) completes.
-                                    bytes.fill(0)
-                                    wrapKey.fill(0)
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w("KyberpipeRestore", "Ratchet restore failed: ${e.message}")
-                }
-            }
-        }
-    }
-
-    /**
-     * Import a decrypted snapshot (rollback-checked, audit #2/#1) into the Rust
-     * registry. Split from the decode path so the caller can zeroize the
-     * decrypted bytes after the import (audit #14).
-     */
-    private fun restoreSnapshotFromBytes(bytes: ByteArray, peer: String) {
-        // AUDIT #2 (follow-up): enforce the same monotonic rollback bound the
-        // desktop store enforces. A snapshot whose watermark is STRICTLY below
-        // the recorded high-water mark (an older blob restored from a device
-        // backup, or same-user tampering) is refused — otherwise the send chain
-        // rolls back and derived message keys + nonces are reused for new
-        // plaintext. Equal = the current snapshot, accepted.
-        val snapWm = try {
-            uniffi.core_crypto.ratchetSnapshotWatermark(bytes)
-        } catch (e: Exception) {
-            null
-        }
-        if (snapWm != null && org.kyberpipe.client.utils.RatchetWatermarkStore.refuseRollback(
-                snapWm,
-                org.kyberpipe.client.utils.RatchetWatermarkStore.read(settingsManager, peer)
-            )
-        ) {
-            android.util.Log.w(
-                "KyberpipeRestore",
-                "Ratchet restore refused: snapshot watermark is below the recorded high-water mark (rollback) — audit finding #2"
-            )
-        } else {
-            uniffi.core_crypto.ratchetImportSession(peer, bytes)
-            // Record the imported watermark (max with stored) so the monotonic
-            // bound survives restarts.
-            snapWm?.let { wm ->
-                org.kyberpipe.client.utils.RatchetWatermarkStore.update(settingsManager, peer, wm)
-            }
+            RatchetSessionRestorer.restoreIfNeeded(settingsManager)
         }
     }
 
@@ -269,18 +175,6 @@ class MainActivity : FragmentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         mainScope.cancel()
-    }
-}
-
-/** Hex string → byte array, or null on malformed input (audit finding #13). */
-private fun String.hexToByteArraySafe(): ByteArray? {
-    if (length % 2 != 0) return null
-    return try {
-        ByteArray(length / 2) { i ->
-            ((Character.digit(this[i * 2], 16) shl 4) + Character.digit(this[i * 2 + 1], 16)).toByte()
-        }
-    } catch (e: Exception) {
-        null
     }
 }
 

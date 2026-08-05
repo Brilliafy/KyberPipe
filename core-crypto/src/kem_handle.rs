@@ -406,9 +406,7 @@ mod tests {
 
         let msg = crate::ratchet_ffi::ratchet_encrypt_message_impl(alice_id, b"hello-handle")
             .expect("encrypt");
-        let pt =
-            crate::ratchet_ffi::ratchet_decrypt_message_impl(bob_id, &msg.nonce, &msg.ciphertext)
-                .expect("decrypt");
+        let pt = crate::ratchet_ffi::ratchet_decrypt_message_impl(bob_id, &msg).expect("decrypt");
         assert_eq!(pt, b"hello-handle");
 
         crate::ratchet_ffi::ratchet_remove_session_impl(alice_id);

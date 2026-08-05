@@ -89,12 +89,20 @@ impl DoubleRatchetState {
             && !proposal_pending;
         let (rekey_x25519_pk, rekey_mlkem_pk, rekey_ciphertext) = if let Some(carrier) = resend {
             // Re-send the pending proposal — same payload, updated carrier seq,
-            // fresh timestamp. The peer re-derives the same pending proposal
+            // fresh retry timestamp. The peer re-derives the same pending proposal
             // (or updates its pending_rekey_ack_seq to this carrier).
+            //
+            // AUDIT F2: the FIRST-staged timestamps are carried over unchanged —
+            // only the retry budget (`attached_at*`) is refreshed. The resync-
+            // path staleness predicate measures the unacknowledged window from
+            // `first_attached_at*`, so a live-but-unacked proposal can never
+            // stay "fresh" forever by re-sending every `REKEY_RETRY_TTL`.
             self.rekey_pending_confirm_queue.push_back(RekeyCarrier {
                 carrier_seq: seq,
                 attached_at: now,
                 attached_at_unix: now_unix_secs(),
+                first_attached_at: carrier.first_attached_at,
+                first_attached_at_unix: carrier.first_attached_at_unix,
                 rekey_x25519_pk: carrier.rekey_x25519_pk.clone(),
                 rekey_mlkem_pk: carrier.rekey_mlkem_pk.clone(),
                 rekey_ciphertext: carrier.rekey_ciphertext.clone(),
@@ -144,6 +152,9 @@ impl DoubleRatchetState {
                     carrier_seq: seq,
                     attached_at: now,
                     attached_at_unix: now_unix_secs(),
+                    // AUDIT F2: first staging — first-attached == attached.
+                    first_attached_at: now,
+                    first_attached_at_unix: now_unix_secs(),
                     rekey_x25519_pk: new_x25519_pk.to_vec(),
                     rekey_mlkem_pk: new_mlkem_pk.clone(),
                     rekey_ciphertext: kem_res.ciphertext_bytes.clone(),

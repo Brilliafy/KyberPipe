@@ -50,7 +50,11 @@ export function useClipboardHistory(deps?: { onSynced?: () => void }) {
         const exists = clipboardItems.value.some((item) => item.text === text);
         if (!exists) {
           clipboardItems.value.unshift(makeRecord(text));
-          await invoke("sync_clipboard", { text });
+          // AUDIT F14: the legacy `sync_clipboard` (a second ungated
+          // clipboard-write command) is removed. The text was just READ from
+          // the OS clipboard — no write is needed; the poll response carries
+          // it to the phone, and a user action that writes uses the
+          // token-gated `write_real_clipboard`.
         }
       }
     } catch {
@@ -84,8 +88,13 @@ export function useClipboardHistory(deps?: { onSynced?: () => void }) {
   const addRecord = async (text: string) => {
     clipboardItems.value.unshift(makeRecord(text));
     try {
-      await invoke("write_real_clipboard", { text });
-      await invoke("sync_clipboard", { text });
+      // AUDIT F14: writing the host clipboard now requires a single-use
+      // native-gesture token (same as reading). Mint it right before the
+      // write; a rejected/expired token surfaces as a sync warning.
+      const token = await invoke<string>("request_privilege_token", {
+        action: "write_real_clipboard",
+      });
+      await invoke("write_real_clipboard", { text, token });
       lastSyncStatus.value = "Synced item locally & pushed remote";
       deps?.onSynced?.();
     } catch (e) {
@@ -95,7 +104,11 @@ export function useClipboardHistory(deps?: { onSynced?: () => void }) {
 
   const copyToClipboard = async (text: string) => {
     try {
-      await invoke("write_real_clipboard", { text });
+      // AUDIT F14: token-gated clipboard write.
+      const token = await invoke<string>("request_privilege_token", {
+        action: "write_real_clipboard",
+      });
+      await invoke("write_real_clipboard", { text, token });
       lastSyncStatus.value = "Copied to desktop clipboard";
     } catch (e) {
       lastSyncStatus.value = "Copy failed: " + e;
@@ -112,8 +125,11 @@ export function useClipboardHistory(deps?: { onSynced?: () => void }) {
     if (idx === -1) return;
     clipboardItems.value[idx].text = payload.text;
     try {
-      await invoke("write_real_clipboard", { text: payload.text });
-      await invoke("sync_clipboard", { text: payload.text });
+      // AUDIT F14: token-gated clipboard write.
+      const token = await invoke<string>("request_privilege_token", {
+        action: "write_real_clipboard",
+      });
+      await invoke("write_real_clipboard", { text: payload.text, token });
       lastSyncStatus.value = "Updated and synced item";
       deps?.onSynced?.();
     } catch (e) {

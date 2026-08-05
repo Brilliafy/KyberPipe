@@ -64,10 +64,24 @@ pub fn decrypt_chacha20(
 }
 
 /// Generate a 96-bit nonce from a 64-bit sequence counter and a domain/generation identifier.
-/// Bytes 0-3 encode a per-key session ID (derived from the session key via HKDF)
-/// combined with the generation number via wrapping addition. This provides domain
-/// separation across both different session keys and different rekey generations.
-/// Bytes 4-11 encode the monotonically increasing counter.
+///
+/// Wire layout (fixed, cross-platform — do NOT change without a protocol
+/// version bump):
+///   bytes 0..=3  — the `sid_or_generation` value as big-endian u32. Callers
+///                  pass the RATCHET GENERATION, giving each rekey generation
+///                  its own nonce sub-domain.
+///   bytes 4..=11 — the monotonically increasing message counter as big-endian
+///                  u64.
+///
+/// AUDIT F12 FIX: the previous doc claimed bytes 0-3 encode "a per-key session
+/// ID (derived from the session key via HKDF) combined with the generation
+/// number via wrapping addition" — the implementation never did that, and both
+/// the sync path (`sync.rs`) and the decrypt path (`decrypt.rs`) parse these
+/// bytes back as the raw generation. The doc now matches the implementation.
+/// Nonce uniqueness is still guaranteed within a session: a fresh session
+/// (re-pair) derives a NEW key, and within one key the (generation, seq) pair
+/// is unique because a generation is bumped only on a committed rekey that
+/// resets both counters — so (key, generation, seq) is never repeated.
 pub fn generate_nonce_from_seq(seq: u64, sid_or_generation: u32) -> [u8; 12] {
     debug_assert!(
         sid_or_generation < u32::MAX,

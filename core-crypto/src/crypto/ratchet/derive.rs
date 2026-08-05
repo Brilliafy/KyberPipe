@@ -127,6 +127,9 @@ impl DoubleRatchetState {
                 carrier_seq: 0,
                 attached_at: std::time::Instant::now(),
                 attached_at_unix: super::state::now_unix_secs(),
+                // AUDIT F2: first staging — first-attached == attached.
+                first_attached_at: std::time::Instant::now(),
+                first_attached_at_unix: super::state::now_unix_secs(),
                 rekey_x25519_pk: peer_x25519_pk.to_vec(),
                 rekey_mlkem_pk: peer_mlkem_pk.to_vec(),
                 rekey_ciphertext: kem_res.ciphertext_bytes.clone(),

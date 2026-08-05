@@ -1,14 +1,14 @@
 pub mod crypto;
 pub mod error;
-/// App-level utilities (clipboard dedup, cover traffic) — audit #21 moved
-/// these out of `crypto/mod.rs` so the crypto module is a pure re-export of
-/// primitives.
-pub mod utils;
 pub mod network;
 pub mod packets;
 pub mod qr_scanner;
 pub mod quic_app;
 pub mod telemetry;
+/// App-level utilities (clipboard dedup, cover traffic) — audit #21 moved
+/// these out of `crypto/mod.rs` so the crypto module is a pure re-export of
+/// primitives.
+pub mod utils;
 
 pub mod crypto_api;
 pub mod ffi;
@@ -212,7 +212,7 @@ pub fn ratchet_decrypt_message_binary(
             msg.rekey_mlkem_pk.as_deref(),
         )
     } else {
-        ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &msg.nonce, &msg.ciphertext)
+        ratchet_ffi::ratchet_decrypt_message_impl(&peer_identity, &msg)
     }
 }
 

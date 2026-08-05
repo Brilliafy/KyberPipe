@@ -1,5 +1,6 @@
 import { type ComputedRef, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useHeartbeat } from "./useHeartbeat";
 
 export interface BackgroundSyncDeps {
   isPaired: Ref<boolean>;
@@ -14,20 +15,25 @@ export interface BackgroundSyncDeps {
   showSasVerification: Ref<boolean>;
 }
 
-const SETTINGS_TICK_MS = 2000;
-
 /**
- * Single settings/status reconciliation poller (2 s tick).
+ * Single settings/status reconciliation poller.
  *
- * F21 (audit KYP-2026-02): this is the ONLY settings-interval timer left in
- * the app. It folds in the old "custom poller" from App.vue — reads
- * get_settings, auto-retries the connection while paired-but-disconnected,
- * refreshes media state, and reconciles the SAS dialog against the backend
- * while it is open. Clipboard polling is gesture-driven (F6-renderer) and SAS
- * state comes from backend events, so no other timer is needed.
+ * AUDIT F7: the tick now subscribes to the SHARED renderer heartbeat
+ * (useHeartbeat) instead of owning a private interval. The connection status
+ * poller and the latency reset run on the same ticker, so their IPC calls and
+ * ref writes are aligned in one macrotask instead of racing with arbitrary
+ * phase offsets (the yellow/green flicker source). The subscription is owned
+ * by the composable's start/stop pair; the shared ticker stops when the last
+ * subscriber leaves, so no timer leaks on unmount.
+ *
+ * It folds in the old "custom poller" from App.vue — reads get_settings,
+ * auto-retries the connection while paired-but-disconnected, refreshes media
+ * state, and reconciles the SAS dialog against the backend while it is open.
+ * Clipboard polling is gesture-driven (F6-renderer) and SAS state comes from
+ * backend events, so no other timer is needed.
  */
 export function useBackgroundSync(deps: BackgroundSyncDeps) {
-  let settingsPoller: ReturnType<typeof setInterval> | null = null;
+  let unsubscribe: (() => void) | null = null;
 
   const syncTick = async () => {
     try {
@@ -56,13 +62,13 @@ export function useBackgroundSync(deps: BackgroundSyncDeps) {
 
   const startBackgroundSync = () => {
     stopBackgroundSync();
-    settingsPoller = setInterval(syncTick, SETTINGS_TICK_MS);
+    unsubscribe = useHeartbeat(syncTick);
   };
 
   const stopBackgroundSync = () => {
-    if (settingsPoller !== null) {
-      clearInterval(settingsPoller);
-      settingsPoller = null;
+    if (unsubscribe !== null) {
+      unsubscribe();
+      unsubscribe = null;
     }
   };
 

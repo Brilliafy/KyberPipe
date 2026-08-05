@@ -1,10 +1,59 @@
 use crate::error::KyberError;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 
 use super::BEACON_MAGIC;
 use super::P2P_BEACON_PORT;
+
+/// AUDIT F15: per-receiver seen-nonce cache for discovery beacons. The ML-DSA
+/// signature proves SELF-OWNERSHIP, not freshness: a captured signed beacon
+/// can be replayed by any LAN host within the ±60 s timestamp window. The
+/// declared-IP check prevents cross-IP replay, but a LAN attacker can simply
+/// re-announce the SAME IP — the nonce cache is what closes that window.
+/// Every beacon that passes signature verification records its
+/// (signing_pk, nonce) pair for the beacon validity window; a duplicate within
+/// that window is dropped. Bounded (pruned by TTL and capped), so a
+/// discovery-phase flood of unique (pk, nonce) pairs cannot grow it
+/// unboundedly.
+/// (signing_pk, nonce) → first-seen time for the replay cache (AUDIT F15).
+type SeenBeaconKey = (Vec<u8>, Vec<u8>);
+static SEEN_BEACON_NONCES: LazyLock<Mutex<HashMap<SeenBeaconKey, std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Cap on retained (pk, nonce) pairs (AUDIT F15). Generous for real LAN
+/// discovery churn while bounding memory.
+const BEACON_NONCE_CACHE_MAX: usize = 1024;
+/// How long a seen nonce is remembered — the beacon validity window.
+const BEACON_NONCE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Returns true when `(pk, nonce)` was already accepted within the TTL
+/// (a replay), and records it otherwise.
+fn beacon_nonce_is_replay(pk: &[u8], nonce: &[u8]) -> bool {
+    let mut map = SEEN_BEACON_NONCES.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    map.retain(|_, at| now.duration_since(*at) < BEACON_NONCE_TTL);
+    if map.len() >= BEACON_NONCE_CACHE_MAX {
+        // Bounded: evict the oldest entry rather than growing.
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, at)| **at)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+    }
+    let key = (pk.to_vec(), nonce.to_vec());
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Occupied(_) => true,
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(now);
+            false
+        }
+    }
+}
 
 /// Persist the beacon signing keypair to the OS keyring (service "kyberpipe",
 /// hex-encoded). Returns true when both entries were written. The probe write
@@ -64,19 +113,26 @@ fn device_signing_key() -> (Vec<u8>, Vec<u8>) {
     }
 
     // Nothing usable anywhere: generate a fresh keypair, preferring the
-    // keyring; write the 0600 file only when the keyring is unavailable.
+    // keyring. AUDIT F16 (LOW): the legacy fallback WROTE the ML-DSA secret to
+    // a plaintext 0600 file under the app data dir whenever the OS keyring was
+    // unavailable — recoverable by any same-user process, one tier below the
+    // rest of the key material. Now, when no keyring backend exists, the
+    // keypair is kept IN MEMORY ONLY for this process (discovery works while
+    // running) and is NEVER persisted in plaintext — the audit's "refuse to
+    // persist" option. The device identity is ephemeral on keyring-less hosts,
+    // and a paired phone will reject the desktop's beacons after a restart
+    // until a keyring backend is available (headless CI only — real desktop
+    // sessions have a keyring; the Android side uses Keystore). A pre-existing
+    // legacy file is still READ and migrated into the keyring above (identity
+    // continuity for pre-keyring installs), but no NEW plaintext secret is
+    // ever written.
     let (pk, sk) = crate::crypto::generate_mldsa_keypair();
     if persist_beacon_signing_keypair(&pk, &sk) {
         return (pk, sk);
     }
-    let _ = std::fs::write(&pk_path, &pk);
-    let _ = std::fs::write(&sk_path, &sk);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&pk_path, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&sk_path, std::fs::Permissions::from_mode(0o600));
-    }
+    tracing::warn!(
+        "[Beacon] No OS keyring backend — ML-DSA signing identity is EPHEMERAL for this process (AUDIT F16); the secret is not persisted in plaintext"
+    );
     (pk, sk)
 }
 
@@ -245,6 +301,20 @@ fn parse_beacon_payload(
             &signing_pk_hex[..16.min(signing_pk_hex.len())]
         );
     }
+    // AUDIT F15: a replay within the ±60 s timestamp window (same signing key,
+    // same nonce, re-announced from the same IP) must be dropped — the
+    // signature authenticates the SENDER's key, not the freshness of the
+    // packet. Runs only after signature verification + the expected-key check,
+    // so an unauthenticated flood cannot populate the cache.
+    if let (Ok(signing_pk), Ok(nonce)) = (hex::decode(signing_pk_hex), hex::decode(nonce_hex)) {
+        if beacon_nonce_is_replay(&signing_pk, &nonce) {
+            warn!(
+                "Replayed beacon (pk+nonce already seen) from {} — dropping",
+                source_ip
+            );
+            return None;
+        }
+    }
     Some((host_pk, local_ip, "Desktop".to_string()))
 }
 
@@ -324,21 +394,33 @@ mod tests {
 
     /// Build a signed beacon payload exactly as `send_p2p_beacon` does
     /// (colon-delimited, NO sanitization). Returns the payload and the signing
-    /// keypair so a test can exercise tampering / key-mismatch paths.
+    /// keypair so a test can exercise tampering / key-mismatch paths. Each
+    /// call uses a FRESH random nonce so two payloads never collide in the
+    /// AUDIT F15 seen-nonce cache.
     fn build_signed(payload: &str) -> (String, Vec<u8>, Vec<u8>) {
         let (pk, sk) = crate::crypto::generate_mldsa_keypair();
+        let nonce: [u8; 8] = rand::random();
+        build_signed_with(payload, &pk, &sk, &nonce)
+    }
+
+    fn build_signed_with(
+        payload: &str,
+        pk: &[u8],
+        sk: &[u8],
+        nonce: &[u8; 8],
+    ) -> (String, Vec<u8>, Vec<u8>) {
         let ts = now_secs();
-        let nonce = hex::encode([0x11u8; 8]);
-        let signed_region = format!("{payload}:{ts}:{nonce}");
-        let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), &sk).unwrap();
+        let nonce_hex = hex::encode(nonce);
+        let signed_region = format!("{payload}:{ts}:{nonce_hex}");
+        let sig = crate::crypto::sign_mldsa_payload(signed_region.as_bytes(), sk).unwrap();
         (
             format!(
-                "{payload}:{ts}:{nonce}:{}:{}",
-                hex::encode(&pk),
+                "{payload}:{ts}:{nonce_hex}:{}:{}",
+                hex::encode(pk),
                 hex::encode(&sig)
             ),
-            pk,
-            sk,
+            pk.to_vec(),
+            sk.to_vec(),
         )
     }
 
@@ -346,7 +428,7 @@ mod tests {
     fn signed_beacon_roundtrip_parses() {
         let src: std::net::IpAddr = "192.168.1.50".parse().unwrap();
         // The payload is `pk_hash:local_ip` — no device name (identity-minimal).
-        let (payload, pk, _sk) = build_signed("aabbccddeeff0011:192.168.1.50");
+        let (payload, pk, sk) = build_signed("aabbccddeeff0011:192.168.1.50");
         let parsed = parse_beacon_payload(&payload, &src, None).expect("valid beacon");
         assert_eq!(
             parsed,
@@ -356,8 +438,38 @@ mod tests {
                 "Desktop".to_string()
             )
         );
-        // The same beacon with the KNOWN trusted key also parses.
-        assert!(parse_beacon_payload(&payload, &src, Some(&pk)).is_some());
+        // The SAME keypair signing a DIFFERENT nonce also parses against the
+        // known trusted key (a fresh payload — the AUDIT F15 cache must not
+        // reject a legitimate new beacon from the same device).
+        let (payload2, _, _) =
+            build_signed_with("aabbccddeeff0011:192.168.1.50", &pk, &sk, &[0x22u8; 8]);
+        assert!(parse_beacon_payload(&payload2, &src, Some(&pk)).is_some());
+    }
+
+    /// AUDIT F15: re-announcing an ALREADY-ACCEPTED signed beacon (same
+    /// signing key, same nonce) within the validity window must be dropped —
+    /// a LAN attacker that captured a legitimate beacon cannot replay it to
+    /// keep a stale/stolen candidate address alive.
+    #[test]
+    fn signed_beacon_replay_is_dropped() {
+        let src: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        let (payload, pk, sk) = build_signed("aabb:192.168.1.50");
+        // First delivery is accepted.
+        assert!(
+            parse_beacon_payload(&payload, &src, Some(&pk)).is_some(),
+            "first beacon delivery accepted"
+        );
+        // An exact replay (same keypair, same nonce, same IP) is dropped.
+        assert!(
+            parse_beacon_payload(&payload, &src, Some(&pk)).is_none(),
+            "replayed beacon must be dropped (AUDIT F15)"
+        );
+        // A FRESH nonce from the same device is still accepted.
+        let (fresh, _, _) = build_signed_with("aabb:192.168.1.50", &pk, &sk, &[0x33u8; 8]);
+        assert!(
+            parse_beacon_payload(&fresh, &src, Some(&pk)).is_some(),
+            "a fresh nonce from the same device must still be accepted"
+        );
     }
 
     #[test]

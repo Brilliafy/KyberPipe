@@ -50,6 +50,15 @@ echo -e "${GREEN}✓ Desktop app built successfully.${NC}"
 
 # 5. Android Companion App Lint & Unit Tests
 echo -e "\n${BLUE}[5/5] Running Android Companion Lint & Unit Tests...${NC}"
+
+# AUDIT F9: the UniFFI Kotlin binding must exist in exactly ONE place
+# (core-crypto/generated_kotlin, consumed via Gradle srcDir). A second copy
+# under the Android tree is the ABI-drift landmine — fail the build loudly.
+if [ -e "android-app/app/src/main/java/uniffi/core_crypto/core_crypto.kt" ]; then
+  echo -e "${RED}✗ Duplicate UniFFI Kotlin binding at android-app/app/src/main/java/uniffi/core_crypto/core_crypto.kt — single source of truth is core-crypto/generated_kotlin (AUDIT F9).${NC}" >&2
+  exit 1
+fi
+
 (
   cd android-app
   chmod +x gradlew

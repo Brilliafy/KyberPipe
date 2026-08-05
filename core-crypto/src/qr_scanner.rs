@@ -8,25 +8,56 @@ fn debug(msg: &str) {
     let _ = writeln!(&mut io::stderr(), "[qr_scanner] {msg}");
 }
 
-fn rotate_90(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+/// AUDIT F11 (LOW): single-pass rotation helpers. The legacy 180°/270°
+/// variants composed `rotate_90` calls, allocating an intermediate full-frame
+/// buffer per step (up to 3 allocations for one rotation). Each of these
+/// rotates directly into the caller-provided scratch buffer.
+fn rotate_90_into(luma: &[u8], w: usize, h: usize, out: &mut [u8]) {
+    // Output is H×W (h columns, w rows).
     for y in 0..h {
         for x in 0..w {
             out[x * h + (h - 1 - y)] = luma[y * w + x];
         }
     }
+}
+
+#[cfg(test)]
+fn rotate_90(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    rotate_90_into(luma, w, h, &mut out);
     out
 }
 
-fn rotate_180(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let r1 = rotate_90(luma, w, h);
-    rotate_90(&r1, h, w)
+fn rotate_180_into(luma: &[u8], w: usize, h: usize, out: &mut [u8]) {
+    // Output is W×H. Single pass — no intermediate allocation.
+    for y in 0..h {
+        for x in 0..w {
+            out[(h - 1 - y) * w + (w - 1 - x)] = luma[y * w + x];
+        }
+    }
 }
 
+#[cfg(test)]
+fn rotate_180(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    rotate_180_into(luma, w, h, &mut out);
+    out
+}
+
+fn rotate_270_into(luma: &[u8], w: usize, h: usize, out: &mut [u8]) {
+    // Output is H×W (270° clockwise = 90° counter-clockwise). Single pass.
+    for y in 0..w {
+        for x in 0..h {
+            out[y * h + x] = luma[x * w + (w - 1 - y)];
+        }
+    }
+}
+
+#[cfg(test)]
 fn rotate_270(luma: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let r1 = rotate_90(luma, w, h);
-    let r2 = rotate_90(&r1, h, w);
-    rotate_90(&r2, w, h)
+    let mut out = vec![0u8; w * h];
+    rotate_270_into(luma, w, h, &mut out);
+    out
 }
 
 fn try_decode(luma: &[u8], w: usize, h: usize) -> Option<String> {
@@ -136,24 +167,49 @@ pub extern "system" fn Java_org_kyberpipe_client_QrNative_decodeQrCode<'local>(
             clean
         };
 
-        let result = match rotation {
-            90 => try_decode(&rotate_90(&luma, w, h), h, w)
-                .or_else(|| try_decode(&luma, w, h))
-                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
-                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-            180 => try_decode(&rotate_180(&luma, w, h), w, h)
-                .or_else(|| try_decode(&luma, w, h))
-                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-            270 => try_decode(&rotate_270(&luma, w, h), h, w)
-                .or_else(|| try_decode(&luma, w, h))
-                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h)),
-            _ => try_decode(&luma, w, h)
-                .or_else(|| try_decode(&rotate_90(&luma, w, h), h, w))
-                .or_else(|| try_decode(&rotate_180(&luma, w, h), w, h))
-                .or_else(|| try_decode(&rotate_270(&luma, w, h), h, w)),
-        };
+        // AUDIT F11 (LOW): decode the UNROTATED frame FIRST — the common case
+        // is a single decode of the buffer the JNI layer already handed over
+        // (ZERO full-frame copies). Only on failure are the rotations
+        // attempted, and all of them share ONE scratch buffer (a single
+        // full-frame allocation instead of up to four per camera frame). The
+        // camera's rotation hint only reorders the FALLBACK attempts so a
+        // genuinely-rotated frame is found right after the first (failed)
+        // unrotated decode.
+        let mut result = try_decode(&luma, w, h);
+        if result.is_none() {
+            let mut scratch = vec![0u8; pixels];
+            type RotFn = fn(&[u8], usize, usize, &mut [u8]);
+            // (rotation function, output width, output height)
+            let order: [(RotFn, usize, usize); 3] = match rotation {
+                90 => [
+                    (rotate_90_into, h, w),
+                    (rotate_180_into, w, h),
+                    (rotate_270_into, h, w),
+                ],
+                180 => [
+                    (rotate_180_into, w, h),
+                    (rotate_90_into, h, w),
+                    (rotate_270_into, h, w),
+                ],
+                270 => [
+                    (rotate_270_into, h, w),
+                    (rotate_90_into, h, w),
+                    (rotate_180_into, w, h),
+                ],
+                _ => [
+                    (rotate_90_into, h, w),
+                    (rotate_180_into, w, h),
+                    (rotate_270_into, h, w),
+                ],
+            };
+            for (rot, ow, oh) in order {
+                rot(&luma, w, h, &mut scratch);
+                result = try_decode(&scratch, ow, oh);
+                if result.is_some() {
+                    break;
+                }
+            }
+        }
 
         match result {
             Some(text) => match env.new_string(&text) {

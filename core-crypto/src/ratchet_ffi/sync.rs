@@ -22,6 +22,69 @@ const SYNC_RATE_BURST: usize = 3;
 static LAST_SYNC_AT: std::sync::LazyLock<Mutex<HashMap<String, VecDeque<std::time::Instant>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// ── Authenticated already-applied cache (audit F4 fix) ────────────────────
+// The legacy already-applied fast-path consulted the live ratchet's replay
+// state (`seen` set / recv counter) BEFORE the AEAD gate, so ANY packet — a
+// garbage frame from an unauthenticated peer included — with a plausible
+// (gen,seq) short-circuited to `Ok(0)` without consuming the rate budget and
+// without being authenticated. This cache records the exact bytes of every
+// packet that was AEAD-authenticated AND applied; a byte-identical re-send
+// (the poll layer legitimately retries the same in-band carrier) hits the
+// cache and is a no-op success, while a modified or never-authenticated
+// packet falls through to the rate limiter and the AEAD gate.
+
+/// Max applied-sync entries remembered per peer (bounded — the cache is a
+/// same-peer idempotency hint, not a ledger).
+const APPLIED_SYNC_CACHE_MAX: usize = 16;
+/// How long an applied sync stays recognized. The desktop's poll retry window
+/// is ~2.5s and the sync rate window is 15s; 120s covers any in-band retry
+/// chain while staying bounded.
+const APPLIED_SYNC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+struct AppliedSyncEntry {
+    /// 64-bit FNV-1a digest of the exact packet bytes. Not cryptographic by
+    /// design: authenticity is established by the AEAD on first application,
+    /// and a collision only causes a spurious no-op of a packet that is
+    /// byte-identical to one already applied.
+    digest: u64,
+    at: std::time::Instant,
+}
+
+static APPLIED_SYNC_CACHE: std::sync::LazyLock<Mutex<HashMap<String, VecDeque<AppliedSyncEntry>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn sync_digest(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Whether `data` was previously AUTHENTICATED and APPLIED for this peer.
+fn already_applied_authenticated(peer: &str, data: &[u8]) -> bool {
+    let digest = sync_digest(data);
+    let mut map = APPLIED_SYNC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let queue = map.entry(peer.to_string()).or_default();
+    let now = std::time::Instant::now();
+    queue.retain(|e| now.duration_since(e.at) < APPLIED_SYNC_CACHE_TTL);
+    queue.iter().any(|e| e.digest == digest)
+}
+
+/// Record that `data` was AEAD-verified AND applied for `peer`.
+fn record_applied_sync(peer: &str, data: &[u8]) {
+    let digest = sync_digest(data);
+    let mut map = APPLIED_SYNC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let queue = map.entry(peer.to_string()).or_default();
+    let now = std::time::Instant::now();
+    queue.retain(|e| now.duration_since(e.at) < APPLIED_SYNC_CACHE_TTL);
+    queue.push_back(AppliedSyncEntry { digest, at: now });
+    while queue.len() > APPLIED_SYNC_CACHE_MAX {
+        queue.pop_front();
+    }
+}
+
 /// True when `peer` has consumed the whole authenticated-sync burst within the
 /// current window. The queue is pruned of entries older than the window first,
 /// so a window that has fully elapsed always permits a fresh sync.
@@ -99,11 +162,16 @@ pub fn ratchet_process_synchronize_impl(
     // Replays of an already-applied sync advance nothing, so treating them as
     // no-ops cannot weaken replay protection. This check runs BEFORE the rate
     // limiter so a duplicate never consumes the burst budget.
-    let already_applied = with_ratchet_session(peer_identity, |ratchet| {
-        Ok(ratchet.replay_window.seen.contains(&(sync_gen, sync_seq))
-            || (sync_gen == ratchet.ratchet_generation
-                && sync_seq < ratchet.recv.message_count))
-    })?;
+    //
+    // AUDIT F4 FIX: the fast-path is now AUTHENTICATED. The legacy position-
+    // based check (replay seen-set / below-recv-counter) fired for ANY packet
+    // before the AEAD gate and before the rate limiter, so a garbage frame
+    // from an unauthenticated peer with a plausible (gen,seq) short-circuited
+    // to Ok(0) — bypassing the per-peer burst budget and leaking a receive-
+    // position oracle. Only packets whose exact bytes were previously
+    // AEAD-authenticated AND applied are cached; a byte-identical re-send is a
+    // no-op, anything else falls through to the rate limiter + AEAD gate.
+    let already_applied = already_applied_authenticated(peer_identity, data);
     if already_applied {
         return Ok(0);
     }
@@ -200,9 +268,23 @@ pub fn ratchet_process_synchronize_impl(
             // silently swallowed the failure (the poll layer retried into the
             // 15s rate limiter forever). Surface a DISTINCT typed error the
             // poll layer can escalate to a re-pair hint.
-            match do_decrypt(ratchet) {
+            //
+            // AUDIT F3 (LOW/MEDIUM): the decrypt runs on a TRIAL CLONE, not
+            // the live state. The rekey-aware decrypt internally COMMITS a
+            // pending incoming rekey (generation bump, counter reset, seen-set
+            // clear) as a side effect of authenticating on the pending chain —
+            // running it against the live state meant an AEAD-valid-but-
+            // malformed sync (payload that is not a Synchronize, or a
+            // send_count mismatch) left the session at the new generation with
+            // no rollback while the caller was told `Ok(0)`. On the trial,
+            // decrypt + verify BOTH pass before the clone is committed to the
+            // live session — the same trial-then-commit discipline as the
+            // same-generation gap path above.
+            let mut trial = ratchet.clone();
+            match do_decrypt(&mut trial) {
                 Ok(plaintext) => {
                     verify(&plaintext)?;
+                    *ratchet = trial;
                     Ok(0)
                 }
                 Err(e) => Err(KyberError::CrossGenerationResyncRequired(format!(
@@ -225,6 +307,11 @@ pub fn ratchet_process_synchronize_impl(
     // unauthenticated payload must not consume the per-peer resync budget.
     if result.is_ok() {
         stamp_sync(peer_identity);
+        // AUDIT F4 FIX: remember the EXACT authenticated bytes so a legitimate
+        // byte-identical re-send (poll retry / lost response) is recognized by
+        // the authenticated fast-path instead of the removed position-based
+        // check. Every `Ok` here means the packet authenticated AND applied.
+        record_applied_sync(peer_identity, data);
     }
     result
 }

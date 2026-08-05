@@ -710,7 +710,10 @@ fn prev_gen_cached_key_survives_bitflip_forgery() {
     while let Some(ack_seq) = bob.take_pending_rekey_ack_seq() {
         let ack = bob.generate_rekey_ack(ack_seq).expect("ack");
         let pt = alice
-            .ratchet_decrypt(&<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(), &ack.ciphertext)
+            .ratchet_decrypt(
+                &<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(),
+                &ack.ciphertext,
+            )
             .expect("alice ack");
         if let crate::packets::KyberMessage::RekeyAck { seq } =
             crate::packets::safe_decode_packet(&pt).unwrap()
@@ -751,7 +754,10 @@ fn prev_gen_cached_key_survives_bitflip_forgery() {
     );
     assert!(forgery.is_err(), "forged copy must fail AEAD");
     assert!(
-        bob.skip_message_keys.as_ref().unwrap().contains_key(&(0, 105)),
+        bob.skip_message_keys
+            .as_ref()
+            .unwrap()
+            .contains_key(&(0, 105)),
         "the cached key must SURVIVE the failed attempt (audit #5)"
     );
 
@@ -993,6 +999,10 @@ fn snapshot_completeness_guard_roundtrips_every_field() {
         carrier_seq: 100,
         attached_at: std::time::Instant::now(),
         attached_at_unix: 1_700_000_000,
+        // AUDIT F2: first-staged wall clock distinct from the last re-send
+        // stamp so the round-trip proves the two are mirrored separately.
+        first_attached_at: std::time::Instant::now(),
+        first_attached_at_unix: 1_699_999_940,
         rekey_x25519_pk: vec![0x41; 32],
         rekey_mlkem_pk: vec![0x42; 1184],
         rekey_ciphertext: vec![0x43; 1088],
@@ -1117,6 +1127,15 @@ fn snapshot_completeness_guard_roundtrips_every_field() {
             .rekey_pending_confirm_queue
             .front()
             .map(|c| (c.carrier_seq, c.attached_at_unix))
+    );
+    assert_eq!(
+        orig.rekey_pending_confirm_queue
+            .front()
+            .map(|c| (c.carrier_seq, c.first_attached_at_unix)),
+        restored_mut
+            .rekey_pending_confirm_queue
+            .front()
+            .map(|c| (c.carrier_seq, c.first_attached_at_unix))
     );
     assert_eq!(
         orig.skip_message_keys.as_ref().map(|m| m.len()),
@@ -1479,19 +1498,30 @@ fn two_entry_confirm_queue_is_cleared_by_ack_commit() {
         .rekey_payload
         .clone()
         .expect("pending payload");
-    alice.rekey_pending_confirm_queue.push_back(super::state::RekeyCarrier {
-        carrier_seq: 130,
-        attached_at: std::time::Instant::now(),
-        attached_at_unix: super::state::now_unix_secs(),
-        rekey_x25519_pk: xpk,
-        rekey_mlkem_pk: mpk,
-        rekey_ciphertext: ct,
-    });
-    assert_eq!(alice.rekey_pending_confirm_queue.len(), 2, "precondition: 2 entries");
+    alice
+        .rekey_pending_confirm_queue
+        .push_back(super::state::RekeyCarrier {
+            carrier_seq: 130,
+            attached_at: std::time::Instant::now(),
+            attached_at_unix: super::state::now_unix_secs(),
+            first_attached_at: std::time::Instant::now(),
+            first_attached_at_unix: super::state::now_unix_secs(),
+            rekey_x25519_pk: xpk,
+            rekey_mlkem_pk: mpk,
+            rekey_ciphertext: ct,
+        });
+    assert_eq!(
+        alice.rekey_pending_confirm_queue.len(),
+        2,
+        "precondition: 2 entries"
+    );
 
     // The peer ACKs the SECOND carrier (seq 130). process_rekey_ack removes the
     // matched entry and commits — the OTHER entry must NOT survive.
-    assert!(alice.process_rekey_ack(130), "ack matches the second carrier");
+    assert!(
+        alice.process_rekey_ack(130),
+        "ack matches the second carrier"
+    );
     assert_eq!(
         alice.rekey_pending_confirm_queue.len(),
         0,
@@ -1537,22 +1567,30 @@ fn resend_evicts_all_stale_carriers_keeping_one() {
     let old = std::time::Instant::now() - std::time::Duration::from_secs(31);
     let old_unix = super::state::now_unix_secs() - 31;
     alice.rekey_pending_confirm_queue.clear();
-    alice.rekey_pending_confirm_queue.push_back(super::state::RekeyCarrier {
-        carrier_seq: 100,
-        attached_at: old,
-        attached_at_unix: old_unix,
-        rekey_x25519_pk: xpk.clone(),
-        rekey_mlkem_pk: mpk.clone(),
-        rekey_ciphertext: ct.clone(),
-    });
-    alice.rekey_pending_confirm_queue.push_back(super::state::RekeyCarrier {
-        carrier_seq: 130,
-        attached_at: old,
-        attached_at_unix: old_unix,
-        rekey_x25519_pk: xpk,
-        rekey_mlkem_pk: mpk,
-        rekey_ciphertext: ct,
-    });
+    alice
+        .rekey_pending_confirm_queue
+        .push_back(super::state::RekeyCarrier {
+            carrier_seq: 100,
+            attached_at: old,
+            attached_at_unix: old_unix,
+            first_attached_at: old,
+            first_attached_at_unix: old_unix,
+            rekey_x25519_pk: xpk.clone(),
+            rekey_mlkem_pk: mpk.clone(),
+            rekey_ciphertext: ct.clone(),
+        });
+    alice
+        .rekey_pending_confirm_queue
+        .push_back(super::state::RekeyCarrier {
+            carrier_seq: 130,
+            attached_at: old,
+            attached_at_unix: old_unix,
+            first_attached_at: old,
+            first_attached_at_unix: old_unix,
+            rekey_x25519_pk: xpk,
+            rekey_mlkem_pk: mpk,
+            rekey_ciphertext: ct,
+        });
     assert_eq!(alice.rekey_pending_confirm_queue.len(), 2);
 
     let resent = alice
@@ -1568,4 +1606,67 @@ fn resend_evicts_all_stale_carriers_keeping_one() {
         "resend must leave exactly one carrier, never two (audit #2)"
     );
     alice.assert_confirm_queue_invariant();
+}
+
+/// AUDIT F2 (MEDIUM): a live-but-unacked outgoing rekey proposal whose re-sends
+/// keep refreshing the retry TTL must still age out of "fresh" for the resync
+/// path once its FIRST-STAGED window exceeds the staleness TTL — otherwise the
+/// Synchronize recovery path is blocked forever by exactly the condition it
+/// exists to repair (peer ACK channel down, data channel still flowing).
+#[test]
+fn resend_refreshed_proposal_ages_out_of_fresh_for_resync() {
+    let (mut alice, mut _bob) = alice_bob();
+    for i in 0..100 {
+        a2b(&mut alice, &mut _bob, i);
+    }
+    alice
+        .ratchet_encrypt(b"carrier".as_ref())
+        .expect("alice stages rekey at seq 100");
+    assert_eq!(alice.rekey_pending_confirm_queue.len(), 1);
+    assert!(alice.outgoing_proposal.is_pending());
+
+    let now_unix = super::state::now_unix_secs();
+
+    // Simulate a proposal staged ~90s ago whose re-send traffic keeps
+    // refreshing the LAST-attach stamps (fresh retry budget) while the FIRST-
+    // staged window grows past the 60s staleness TTL.
+    let mut refreshed = alice.clone();
+    {
+        let c = refreshed.rekey_pending_confirm_queue.front_mut().unwrap();
+        c.first_attached_at = std::time::Instant::now() - std::time::Duration::from_secs(90);
+        c.first_attached_at_unix = now_unix - 90;
+        c.attached_at = std::time::Instant::now();
+        c.attached_at_unix = now_unix;
+    }
+
+    // The retry budget still sees a "fresh" last re-send (≤ 30s)...
+    let carrier = refreshed.rekey_pending_confirm_queue.front().unwrap();
+    assert!(
+        super::policy::carrier_effective_age(carrier)
+            < std::time::Duration::from_secs(super::policy::REKEY_RETRY_TTL_SECS),
+        "the re-send refreshed the retry TTL"
+    );
+    assert!(
+        refreshed.outgoing_proposal_is_stale(),
+        "staleness must judge the FIRST-staged window, not the last re-send (AUDIT F2)"
+    );
+
+    // ...and the resync path must EVICT the stale proposal and proceed instead
+    // of refusing forever.
+    let skipped = refreshed
+        .resync_receiving_chain(130)
+        .expect("stale outgoing proposal must be evicted, not block recovery");
+    assert_eq!(skipped, 130);
+    assert!(
+        !refreshed.outgoing_proposal.is_pending(),
+        "stale outgoing proposal must be evicted"
+    );
+
+    // Control: a genuinely fresh proposal (first-staged NOW) still refuses
+    // resync.
+    let mut fresh = alice.clone();
+    assert!(
+        fresh.resync_receiving_chain(130).is_err(),
+        "a fresh pending outgoing proposal must still refuse resync"
+    );
 }

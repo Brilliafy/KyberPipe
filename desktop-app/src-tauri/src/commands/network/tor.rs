@@ -105,6 +105,21 @@ pub fn create_tor_onion(
 ) -> Result<TorOnionInfo, String> {
     // Tier-2 destructive command — uniform user-gesture token gate (audit #20).
     crate::commands::gate_tier2("create_tor_onion", &token)?;
+
+    // AUDIT F16 FIX: a previous tor daemon may still be running (stored in
+    // AppState from an earlier `create_tor_onion`). Re-creating without
+    // tearing it down spawned a SECOND tor with a fresh DataDirectory but the
+    // SAME keyring onion key — the ADD_ONION conflicted, the 127.0.0.1:9876
+    // port mapping fought the live QUIC listener, and the old daemon was
+    // orphaned (the child handle was dropped without wait). Kill + reap any
+    // previous instance first so each call manages exactly one tor.
+    if let Some(mut old) = state.take_tor_child() {
+        let _ = old.kill();
+        let _ = old.wait();
+        state.add_log(
+            "[Tor] Stopped previous tor daemon before re-creating onion (audit F16)".to_string(),
+        );
+    }
     // AUDIT FINDING #11: the onion service is created with v3 client
     // authorization — the service is UNREACHABLE without the x25519 credential
     // generated here. A public .onion address with an open QUIC port was

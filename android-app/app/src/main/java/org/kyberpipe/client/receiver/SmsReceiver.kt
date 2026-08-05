@@ -165,8 +165,13 @@ object SmsForwarder {
             java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy()
         )
 
-    /// Serializes the actual quicSendAndRecv calls (QUIC bridge is single-stream).
-    private val lock = Object()
+    /// AUDIT F5: serialization with the poll engine's QUIC round-trip now
+    /// happens through the SHARED per-peer gate in
+    /// [org.kyberpipe.client.service.KyberPipePollEngine.withPeerRoundTrip] —
+    /// only one QUIC round-trip per peer can exist at a time by construction,
+    /// so the SMS no longer loses to a mid-flight poll at the Rust in-flight
+    /// gate. The single-threaded executor still serializes the ratchet
+    /// encrypt calls against each other (audit finding #7/#12).
 
     /// Static outage gate (audit finding #7): timestamp of the most recent
     /// failed task. While the desktop looks unreachable, new SMS are dropped
@@ -267,20 +272,43 @@ object SmsForwarder {
             try {
                 val settings = org.kyberpipe.client.utils.SettingsManager(context)
                 val hostIp = settings.pairedHostIp
-                if (hostIp.isNotEmpty()) {
-                    try {
-                        val ok = org.kyberpipe.client.PairingManager.connectWithIdentity(
-                            hostIp, 9876.toUShort(), settings.serverCertPin, context
-                        )
-                        if (!ok) {
+                // AUDIT F5: the same per-peer peer key the poll engine routes
+                // by (cert pin, falling back to the ratchet identity) — the SMS
+                // round-trip must hit the SAME connection/gate as the poll in a
+                // multi-peer mesh instead of the legacy ACTIVE_PEER API.
+                val peerKey = settings.serverCertPin.takeIf { it.isNotEmpty() }
+                    ?: settings.peerRatchetIdentity
+                // AUDIT F5: the ENTIRE connect + round-trip runs under the
+                // poll engine's shared per-peer gate. Only one QUIC round-trip
+                // per peer can exist at a time by construction, so the SMS no
+                // longer burns its retry budget on the Rust in-flight gate's
+                // bounded wait while a poll is mid-flight — it waits its turn
+                // and then sends. The gate is a plain (non-suspend) lock; this
+                // worker thread is the right place to block on it.
+                val ok = org.kyberpipe.client.service.KyberPipePollEngine.withPeerRoundTrip {
+                    if (hostIp.isNotEmpty()) {
+                        var connected = false
+                        try {
+                            connected = org.kyberpipe.client.PairingManager.connectWithIdentity(
+                                hostIp, 9876.toUShort(), settings.serverCertPin, context
+                            )
+                        } catch (_: Exception) {}
+                        if (!connected) {
                             try {
-                                uniffi.core_crypto.quicConnect(hostIp, 9876.toUShort(), settings.serverCertPin)
+                                connected = uniffi.core_crypto.quicConnect(
+                                    hostIp, 9876.toUShort(), settings.serverCertPin
+                                )
                             } catch (_: Exception) {}
                         }
-                    } catch (_: Exception) {}
-                }
-                synchronized(lock) {
-                    uniffi.core_crypto.quicSendAndRecv(0x07.toUByte(), payload)
+                    }
+                    // `quicSendAndRecvTo` reconnects internally via the peer's
+                    // registered connection / candidate set, so a failed
+                    // explicit connect above does not prevent the send.
+                    if (peerKey.isNotEmpty()) {
+                        uniffi.core_crypto.quicSendAndRecvTo(peerKey, 0x07.toUByte(), payload)
+                    } else {
+                        uniffi.core_crypto.quicSendAndRecv(0x07.toUByte(), payload)
+                    }
                 }
                 Log.i(TAG, "SMS forwarded via QUIC")
                 forwarded = true
