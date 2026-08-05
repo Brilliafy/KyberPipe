@@ -72,7 +72,9 @@ fun PairingModals(
                     )
                     Spacer(modifier = Modifier.height(15.dp))
                     Text(
-                        text = state.sasCodeDisplay,
+                        // AUDIT P4-1: the 12-character/60-bit SAS is rendered
+                        // in 4-char groups for human-typed readability.
+                        text = state.formattedSasDisplay,
                         fontSize = 32.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,

@@ -247,8 +247,25 @@ class PairingState(
      * the SAS (two-phase commit, audit finding #6). Runs the block_on_sync FFI
      * calls off the Main thread (audit F9).
      */
+    /// The SAS is now a 12-character / 60-bit code (audit P4-1). Render it in
+    /// 4-character groups so the human-typed desktop verification is readable.
+    val formattedSasDisplay: String
+        get() = sasCodeDisplay.chunked(4).joinToString(" ")
+
     fun confirmSasAndCommit(coroutineScope: CoroutineScope) {
         coroutineScope.launch {
+            // AUDIT P4-1 (re-entry guard): the SAS verification is the LAST line
+            // of defense against an active MitM; the DESKTOP enforces a
+            // 3-attempt lockout on the typed code. Mirror the discipline
+            // phone-side: a double-tap of "Verify & Connect" (or a compromised
+            // renderer re-invoking the commit) must not stack a second
+            // pending-confirmation window / duplicate service restarts. Once a
+            // confirmation is pending (or committed), re-invocation is a no-op
+            // until the pairing is cleared or re-started.
+            if (pairingConfirmedPending || settings.pendingPairingConfirmation) {
+                addLog("[Pairing] SAS confirmation already pending — ignoring duplicate commit (audit P4-1)")
+                return@launch
+            }
             withContext(Dispatchers.IO) {
                 val realIp = tempHostIp.takeIf { it.isNotEmpty() }
                     ?: settings.pairedHostIp.takeIf { it.isNotEmpty() }

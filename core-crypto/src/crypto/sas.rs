@@ -2,8 +2,12 @@ use crate::error::KyberError;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-/// Generate a 7-character alphanumeric Short Authentication String (SAS) for out-of-band verification.
-/// Provides ~36 bits of entropy to resist MitM brute-force during pairing.
+/// Generate a 12-character alphanumeric Short Authentication String (SAS) for
+/// out-of-band verification.
+/// Provides 60 bits of entropy (12 × 5) to resist MitM brute-force during
+/// pairing (audit P4-1: raised from the legacy 7-char/35-bit code — 35 bits is
+/// the low end for the LAST line of defense against an active MitM; the
+/// desktop additionally locks out after 3 verification attempts).
 /// All characters are derived from HKDF output — no LCG fallback.
 /// Bound to ephemeral host_pk, client_pk, and shared_secret — replay of the same
 /// public keys within a session produces the same SAS, which is safe because
@@ -20,8 +24,8 @@ pub fn generate_sas_code(
     hkdf_input.extend_from_slice(shared_secret);
 
     let hk = Hkdf::<Sha256>::new(Some(b"kyberpipe-sas-v2-salt"), &hkdf_input);
-    // Derive 7 bytes from HKDF — enough for 7 base32 characters (5 bits each = 35 bits)
-    let mut okm = [0u8; 7];
+    // Derive 8 bytes from HKDF — enough for 12 base32 characters (5 bits each = 60 bits)
+    let mut okm = [0u8; 8];
     hk.expand(b"kyberpipe-sas-code-v2", &mut okm)
         .map_err(|e| KyberError::CryptoError(e.to_string()))?;
 
@@ -42,7 +46,7 @@ pub fn generate_sas_code(
                                                        // extraction is guarded by an explicit `>= 5` assertion so the shift can
                                                        // never go negative. At most 8+4 = 12 bits are ever buffered, so `u64` is
                                                        // always sufficient regardless of `okm.len()`.
-    const CODE_LEN: usize = 7;
+    const CODE_LEN: usize = 12;
     let mut code = String::with_capacity(CODE_LEN);
     let mut accum: u64 = 0;
     let mut bits_in_accum: u32 = 0;

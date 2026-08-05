@@ -33,13 +33,16 @@ tokio = { version = "1.0", features = ["full"] }
 # Ultra high-speed multiplexed network pipeline over UDP
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 # Post-Quantum Cryptography implementations (NIST-approved ML-KEM / Kyber)
 pqcrypto-kyber = "0.8"
 pqcrypto-mldsa = "0.1"
 pqcrypto-traits = "0.3"
 # Classical ECC X25519 fallback for hybrid KEM
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+# Wall-clock for pinned-certificate validity-period enforcement (audit P4-2);
+# same major version rcgen 0.13 already resolves, so no new lockfile entries.
+time = "0.3"
 # Key derivation and hashing
 hkdf = "0.12"
 sha2 = "0.10"

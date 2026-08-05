@@ -148,6 +148,18 @@ fn mask_ipv4_literals(input: &str) -> String {
     output
 }
 
+pub static GLOBAL_FLIGHT_RECORDER: std::sync::LazyLock<FlightDataRecorder> =
+    std::sync::LazyLock::new(FlightDataRecorder::new);
+
+/// Initialize Sentry Desktop Error Tracing SDK (Stub - Zero-Trust Local Logging Active)
+pub fn init_sentry_desktop_diagnostics(dsn: &str) {
+    if !dsn.is_empty() {
+        tracing::info!(
+            "[Diagnostics] Local diagnostics active. Sentry telemetry bypassed. DSN: {dsn}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,17 +196,5 @@ mod tests {
         );
         // Leave the recorder state clean for other tests.
         GLOBAL_FLIGHT_RECORDER.set_enabled(false);
-    }
-}
-
-pub static GLOBAL_FLIGHT_RECORDER: std::sync::LazyLock<FlightDataRecorder> =
-    std::sync::LazyLock::new(FlightDataRecorder::new);
-
-/// Initialize Sentry Desktop Error Tracing SDK (Stub - Zero-Trust Local Logging Active)
-pub fn init_sentry_desktop_diagnostics(dsn: &str) {
-    if !dsn.is_empty() {
-        tracing::info!(
-            "[Diagnostics] Local diagnostics active. Sentry telemetry bypassed. DSN: {dsn}"
-        );
     }
 }

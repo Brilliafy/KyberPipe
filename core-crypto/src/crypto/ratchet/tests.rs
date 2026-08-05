@@ -997,6 +997,7 @@ fn snapshot_completeness_guard_roundtrips_every_field() {
     s.skip_message_keys = Some(HashMap::from([((3u32, 5u64), [0x35; 32].into())]));
     s.rekey_pending_confirm_queue = VecDeque::from([super::state::RekeyCarrier {
         carrier_seq: 100,
+        sent: true,
         attached_at: std::time::Instant::now(),
         attached_at_unix: 1_700_000_000,
         // AUDIT F2: first-staged wall clock distinct from the last re-send
@@ -1502,6 +1503,7 @@ fn two_entry_confirm_queue_is_cleared_by_ack_commit() {
         .rekey_pending_confirm_queue
         .push_back(super::state::RekeyCarrier {
             carrier_seq: 130,
+            sent: true,
             attached_at: std::time::Instant::now(),
             attached_at_unix: super::state::now_unix_secs(),
             first_attached_at: std::time::Instant::now(),
@@ -1571,6 +1573,7 @@ fn resend_evicts_all_stale_carriers_keeping_one() {
         .rekey_pending_confirm_queue
         .push_back(super::state::RekeyCarrier {
             carrier_seq: 100,
+            sent: true,
             attached_at: old,
             attached_at_unix: old_unix,
             first_attached_at: old,
@@ -1583,6 +1586,7 @@ fn resend_evicts_all_stale_carriers_keeping_one() {
         .rekey_pending_confirm_queue
         .push_back(super::state::RekeyCarrier {
             carrier_seq: 130,
+            sent: true,
             attached_at: old,
             attached_at_unix: old_unix,
             first_attached_at: old,
@@ -1780,4 +1784,144 @@ proptest::proptest! {
         alice.assert_confirm_queue_invariant();
         bob.assert_confirm_queue_invariant();
     }
+}
+
+/// AUDIT P1-1 (HIGH): `dh_ratchet_rekey` must broadcast the initiator's OWN
+/// fresh public halves in both `outgoing_proposal.rekey_payload` and the
+/// confirm-queue carrier — never the PEER's public keys. The legacy code
+/// stored the peer's keys, which (a) made `resolve_rekey_race_and_ack`
+/// compare the peer's new keys against the peer's OLD keys while the peer
+/// compared OUR new keys against ITS new keys — an asymmetric tie-break that
+/// lets both sides cancel their own proposal and commit the other's (two
+/// different root keys, permanent desync) — and (b) made the peer adopt its
+/// OWN keys as the initiator's identity, poisoning the next rekey
+/// encapsulation.
+#[test]
+fn dh_ratchet_rekey_broadcasts_local_keys_not_peers() {
+    let (mut alice, mut bob) = alice_bob();
+    let bob_pair_xpk = bob.our_hybrid_pair.x25519_pk;
+    let bob_pair_mpk = bob.our_hybrid_pair.mlkem_pk.clone();
+
+    // Alice manually initiates a rekey to bob's CURRENT keys (the API contract).
+    let _ = alice
+        .dh_ratchet_rekey(bob_pair_xpk, &bob_pair_mpk)
+        .expect("manual rekey stages a proposal");
+
+    // The outgoing payload must carry ALICE's fresh public halves — never bob's.
+    let (our_xpk, our_mpk, _ct) = alice
+        .outgoing_proposal
+        .rekey_payload
+        .clone()
+        .expect("rekey payload present");
+    let fresh_xpk = alice
+        .outgoing_proposal
+        .hybrid_pair
+        .as_ref()
+        .expect("fresh keypair staged")
+        .x25519_pk;
+    assert_eq!(
+        our_xpk.as_slice(),
+        &fresh_xpk[..],
+        "payload must carry OUR fresh x25519 pk (audit P1-1)"
+    );
+    assert_ne!(
+        our_xpk,
+        bob_pair_xpk.to_vec(),
+        "payload must never carry the PEER's x25519 pk (audit P1-1)"
+    );
+    assert_ne!(
+        our_mpk, bob_pair_mpk,
+        "payload must never carry the PEER's mlkem pk (audit P1-1)"
+    );
+
+    // The staged carrier must carry the same LOCAL fresh keys and be unsent.
+    let carrier = alice
+        .rekey_pending_confirm_queue
+        .back()
+        .expect("carrier staged");
+    assert!(
+        !carrier.sent,
+        "a freshly staged carrier is unsent (audit P1-2)"
+    );
+    assert_eq!(
+        carrier.rekey_x25519_pk, our_xpk,
+        "carrier carries the local pk"
+    );
+    assert_eq!(
+        carrier.rekey_mlkem_pk, our_mpk,
+        "carrier carries the local mlkem pk"
+    );
+
+    // AUDIT P1-2: the very next message must attach the staged payload —
+    // never wait for the 15s retry TTL.
+    let msg = alice.ratchet_encrypt(b"carrier-driver").expect("encrypt");
+    assert!(
+        msg.rekey_ciphertext.is_some(),
+        "staged carrier must attach on the NEXT message (audit P1-2)"
+    );
+    assert_eq!(msg.rekey_x25519_pk.as_deref(), Some(our_xpk.as_slice()));
+    let carrier = alice
+        .rekey_pending_confirm_queue
+        .back()
+        .expect("carrier retained");
+    assert!(carrier.sent, "carrier must be marked sent after attachment");
+
+    // Bob receives it and stages an incoming proposal adopting ALICE's fresh key.
+    let rekey_x = <[u8; 32]>::try_from(msg.rekey_x25519_pk.as_deref().unwrap()).unwrap();
+    let pt = bob
+        .ratchet_decrypt_with_rekey(
+            &<[u8; 12]>::try_from(msg.nonce.as_slice()).unwrap(),
+            &msg.ciphertext,
+            msg.rekey_ciphertext.as_deref(),
+            Some(&rekey_x),
+            msg.rekey_mlkem_pk.as_deref(),
+        )
+        .expect("bob decrypts the carrier");
+    assert_eq!(pt, b"carrier-driver");
+    assert_eq!(
+        bob.incoming_proposal.peer_x25519_pk,
+        Some(fresh_xpk),
+        "bob must adopt ALICE's fresh key, never its own (audit P1-1)"
+    );
+
+    // Bob acks; alice commits; the session continues on the new generation.
+    while let Some(ack_seq) = bob.take_pending_rekey_ack_seq() {
+        let ack = bob.generate_rekey_ack(ack_seq).expect("ack");
+        let ack_x = ack
+            .rekey_x25519_pk
+            .as_deref()
+            .map(|v| <[u8; 32]>::try_from(v).unwrap());
+        let ack_pt = alice
+            .ratchet_decrypt_with_rekey(
+                &<[u8; 12]>::try_from(ack.nonce.as_slice()).unwrap(),
+                &ack.ciphertext,
+                ack.rekey_ciphertext.as_deref(),
+                ack_x.as_ref(),
+                ack.rekey_mlkem_pk.as_deref(),
+            )
+            .expect("alice processes bob's ack");
+        if DoubleRatchetState::is_rekey_ack(&ack_pt) {
+            let decoded = crate::packets::safe_decode_packet(&ack_pt).unwrap();
+            if let crate::packets::KyberMessage::RekeyAck { seq } = decoded {
+                assert!(
+                    alice.process_rekey_ack(seq),
+                    "alice must commit on bob's ack"
+                );
+            }
+        }
+    }
+    assert!(
+        alice.outgoing_proposal.root_key.is_none(),
+        "alice's outgoing proposal must be committed after the ack"
+    );
+    alice.assert_confirm_queue_invariant();
+    bob.assert_confirm_queue_invariant();
+
+    // The two sides keep interoperating on the new generation.
+    for i in 0..5u64 {
+        a2b(&mut alice, &mut bob, 1000 + i);
+        b2a(&mut alice, &mut bob, 1000 + i);
+    }
+    alice.assert_confirm_queue_invariant();
+    bob.assert_confirm_queue_invariant();
 }

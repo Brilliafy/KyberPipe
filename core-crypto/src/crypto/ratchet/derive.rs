@@ -107,31 +107,48 @@ impl DoubleRatchetState {
         // Store as an OUTGOING proposal — we are the initiator of this rekey,
         // so our send chain is new_send and our recv chain is new_recv.
         let new_pair = generate_hybrid_keypair();
+        // AUDIT P1-1 (HIGH): the broadcast contract for `rekey_payload` and the
+        // carrier is "the initiator's OWN fresh public halves the peer must
+        // adopt for the next generation." The legacy code stored the PEER's
+        // public keys here — the peer then staged an incoming proposal whose
+        // "peer keys" were its own keys (adopted on commit, poisoning the next
+        // rekey encapsulation) and `resolve_rekey_race_and_ack` compared the
+        // peer's new keys against the peer's OLD keys while the peer compared
+        // OUR new keys against ITS new keys — an asymmetric race tie-break
+        // that lets both sides cancel their own proposal and commit the
+        // other's, deriving two different root keys (permanent desync).
+        // Extract the fresh public halves BEFORE moving the keypair into the
+        // proposal slot.
+        let new_x25519_pk = new_pair.x25519_pk;
+        let new_mlkem_pk = new_pair.mlkem_pk.clone();
         self.outgoing_proposal.root_key = Some(new_root);
         self.outgoing_proposal.sending_chain_key = Some(new_send);
         self.outgoing_proposal.receiving_chain_key = Some(new_recv);
         self.outgoing_proposal.hybrid_pair = Some(new_pair);
         self.outgoing_proposal.rekey_payload = Some((
-            peer_x25519_pk.to_vec(),
-            peer_mlkem_pk.to_vec(),
+            new_x25519_pk.to_vec(),
+            new_mlkem_pk.clone(),
             kem_res.ciphertext_bytes.clone(),
         ));
-        // AUDIT FINDING #26: push a carrier so `ratchet_encrypt`'s retry/eviction
-        // path RE-SENDS the payload on the next message. The legacy code staged
-        // the proposal without a carrier, so the payload was never transmitted
-        // and `should_rekey` remained blocked by `proposal_pending` forever.
-        // Carrier seq 0 is provisional; encrypt.rs overwrites it with the live
-        // send position when it re-attaches the payload.
+        // AUDIT FINDING #26 + AUDIT P1-2: push a carrier so `ratchet_encrypt`'s
+        // retry/eviction path RE-SENDS the payload on the next message. The
+        // legacy code staged the proposal without a carrier, so the payload was
+        // never transmitted and `should_rekey` remained blocked by
+        // `proposal_pending` forever. Carrier seq 0 is provisional and
+        // `sent=false` marks the carrier as never-attached, so the very next
+        // `ratchet_encrypt` attaches it at the live send position (audit
+        // P1-2 — a staged proposal must never sit invisible for the retry TTL).
         self.rekey_pending_confirm_queue
             .push_back(super::state::RekeyCarrier {
                 carrier_seq: 0,
+                sent: false,
                 attached_at: std::time::Instant::now(),
                 attached_at_unix: super::state::now_unix_secs(),
                 // AUDIT F2: first staging — first-attached == attached.
                 first_attached_at: std::time::Instant::now(),
                 first_attached_at_unix: super::state::now_unix_secs(),
-                rekey_x25519_pk: peer_x25519_pk.to_vec(),
-                rekey_mlkem_pk: peer_mlkem_pk.to_vec(),
+                rekey_x25519_pk: new_x25519_pk.to_vec(),
+                rekey_mlkem_pk: new_mlkem_pk,
                 rekey_ciphertext: kem_res.ciphertext_bytes.clone(),
             });
         // AUDIT FINDING #26: peer-key adoption is DEFERRED to commit — do NOT
